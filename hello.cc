@@ -5,15 +5,23 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <cstdint>
+#include <cassert>
+#include <map>
 
-#define _Analysis_mode_(...)
-#define _Notliteral_
-#define __user_driver
-#define _Out_writes_bytes_opt_
-#define _In_reads_bytes_opt_(...)
-#define _Out_writes_bytes_opt_(...)
+// #define _Analysis_mode_(...)
+// #define _Notliteral_
+// #define __user_driver
+// #define _Out_writes_bytes_opt_
+// #define _In_reads_bytes_opt_(...)
+// #define _Out_writes_bytes_opt_(...)
 
 #include <wudfddi.h>
+#include <winusb.h>
+#include <wudfusb.h>
+#include <setupapi.h>
+
+#include <cfgmgr32.h>
 
 #define NTDDI_VERSION NTDDI_WIN7
 #include "winbio_ioctl.h"
@@ -30,9 +38,11 @@ int WINAPI PropVariantToStringAlloc(
 }
 
 typedef WINAPI DllGetClassObject_t(_In_ REFCLSID rclsid, _In_ REFIID riid, _Out_ LPVOID* ppv);
+// typedef WINAPI DllGetClassObject_t(_In_ REFCLSID rclsid, _In_ long long *IID, _Out_ LPVOID* ppv);
 //WINAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, _Out_ LPVOID* ppv);
 
-// 96710705-b080-4b29-a3ec-b16935ae663a
+// 96710705-B080-4B29-A3EC-B16935AE663A
+// 96710705-B080-4B29-A3EC-B16935AE663A
 DEFINE_GUID(SYNA_CLSID, 0x96710705, 0xb080, 0x4b29, 0xa3, 0xec, 0xb1, 0x69, 0x35, 0xae, 0x66, 0x3a);
 
 // 1BEC7499-8881-4F2B-B01C-A1A907304AFC
@@ -42,69 +52,734 @@ DEFINE_GUID(IID_IQueueCallbackDeviceIoControl, 0xC5411408, 0x0F1E, 0x4ed6, 0xA4,
 
 DEFINE_GUID(IID_IPnpCallbackHardware, 0x51433BD3, 0xC7C1, 0x4bd8, 0xB4, 0xC1, 0xAB, 0x1E, 0x03, 0x46, 0x26, 0xCC);
 
+DEFINE_GUID(IID_IPnpCallbackHardware2, 0x1493CD1B, 0xC546, 0x46bb, 0xBF, 0x47, 0xB2, 0x74, 0x65, 0x09, 0x33, 0x93);
+
+// 5e8e7e85
 DEFINE_GUID(IID_IPnpCallback, 0x27c32374, 0xcc45, 0x4840, 0x85, 0x7e, 0x8e, 0x5e, 0xf7, 0xc0, 0xeb, 0xff);
 
 DEFINE_GUID(IID_IWDFPropertyStoreFactory, 0x45BE7E06, 0x9B65, 0x434d, 0xA7, 0xD6, 0x95, 0x72, 0xD7, 0xF7, 0x3D, 0x53);
 
+DEFINE_GUID(IID_IWDFDevice3, 0x863D943A, 0xC9CD, 0x4655, 0xA8, 0xD6, 0xC8, 0x4E, 0xF4, 0x11, 0xCC, 0x0D);
+
+DEFINE_GUID(IID_IWDFUsbTargetFactory, 0x3f7becf9, 0x3a65, 0x4348, 0xa4, 0xf3, 0x33, 0x9d, 0x57, 0x34, 0xa9, 0xc6);
+
+DEFINE_GUID(IID_IWDFUsbTargetDevice, 0x4cd12e96,0x900a,0x44c3,0xa1,0xb7,0x05,0xb8,0x95,0x4d,0xab,0x76);
+
+// x46000000000000c0
+DEFINE_GUID(IID_IUnknown, 0x00000001, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+
+DEFINE_GUID(WINUSB_GUID, 0x88BAE032, 0x5A81, 0x49f0, 0xBC, 0x3D, 0xA4, 0xFF, 0x13, 0x82, 0x16, 0xD6);
+
+// The driver defines it, not sure for what yet.
+DEFINE_GUID(IID_IDeviceExtension, 0x5cd8d6f8, 0x3725, 0x4cfa, 0x98, 0xca, 0x39, 0xc5, 0x74, 0x1a, 0x66, 0x9c);
+
+DEFINE_GUID(IID_UsbTargetAliasMaybe, 0xA44A3FEF, 0x88D9, 0x4C6E, 0xBC, 0xB1, 0xE5, 0xBF, 0xA3, 0x8B, 0xC4, 0xA6);
+
+// Driver also defines IPowerPolicyCallbackWakeFromS0 - 7EE9F0FA-5A1A-48df-A35E-8DB42F519B66
+// IPowerPolicyCallbackWakeFromSx - 3AB1426D-689C-4220-901E-03C6D909B5F5
+
+/*
+  // IID_IUnknown || IID_IDeviceExtension
+ if (((*param_2 == 0) && (param_2[1] == 0x46000000000000c0)) ||
+     ((*param_2 == 0x4cfa37255cd8d6f8 && (param_2[1] == -0x6399e58b3ac63568)))) {
+    plVar2 = param_1 + 0x9f;
+  }
+  else {
+    // if !IID_IPnpCallbackHardware2
+    if ((*param_2 != 0x46bbc5461493cd1b) || (param_2[1] != -0x6cccf69a8b4db841)) {
+      uVar1 = FUN_18000cc9c(param_1,param_2,param_3);
+      if (-1 < (int)uVar1) {
+        return uVar1;
+      }
+      *param_3 = 0;
+      return 0x80004002;
+    }
+    IID_IPnpCallbackHardware2
+    plVar2 = param_1 + 1;
+  }
+
+  // IRequestCallbackCancel
+  if ((*param_2 == 0x423545874e9f1a77) && (param_2[1] == 0x56a64545d2e6c481)) {
+    *param_3 = -(ulonglong)(param_1 != (longlong *)0x0) & (ulonglong)(param_1 + 2);
+    lVar1 = *param_1;
+  }
+  else {
+    // IPnpCallback
+    if ((*param_2 == 0x4840cc4527c32374) && (param_2[1] == L'\x5e8e7e85')) {
+      plVar2 = param_1 + 3;
+    }
+    // IPowerPolicyCallbackWakeFromS0
+    else if ((*param_2 == 0x48df5a1a7ee9f0fa) && (param_2[1] == 0x669b512fb48d5ea3)) {
+      plVar2 = param_1 + 4;
+    }
+    //   IPowerPolicyCallbackWakeFromSx
+    else if ((*param_2 == 0x4220689c3ab1426d) && (param_2[1] == -0xa4af62639fce170)) {
+      plVar2 = param_1 + 5;
+    }
+    else if ((*param_2 == 0x4aaf9545a49a0bb4) && (param_2[1] == 0x3458bb0bef0d2e87)) {
+      plVar2 = param_1 + 8;
+    }
+    else {
+      //   IQueueCallbackDeviceIoControl
+      if ((*param_2 != 0x4ed60f1ec5411408) || (param_2[1] != 0x7e7ee15dd3612a4)) {
+        *param_3 = 0;
+        return 0x80004002;
+      }
+      plVar2 = param_1 + 6;
+    }
+    *param_3 = -(ulonglong)(param_1 != (longlong *)0x0) & (ulonglong)plVar2;
+    lVar1 = *param_1;
+  }
+
+
+  Simplified by Deepseek:
+  // Define all GUIDs used in both functions
+static const GUID GUID_IUnknown = { 0x00000000, 0x0000, 0x0000, {0xC0,0x00,0x00,0x00,0x00,0x00,0x00,0x46} };
+static const GUID GUID_DeviceExtension = { 0x5CD8D6F8, 0x3725, 0x4CFA, {0x98,0xCA,0x39,0xC5,0x74,0x1A,0x66,0x9C} };
+static const GUID GUID_Interface = { 0x1493CD1B, 0xC546, 0x46BB, {0xBF,0x47,0xB2,0x74,0x65,0x09,0x33,0x93} };
+
+static const GUID GUID_ServiceTable = { 0x4E9F1A77, 0x4235, 0x4587, {0x56,0xA6,0x45,0x45,0xD2,0xE6,0xC4,0x81} };
+static const GUID GUID_PowerManagement = { 0x27C32374, 0x4840, 0xCC45, {0x5E,0x8E,0x7E,0x85,0x00,0x00,0x00,0x00} };
+static const GUID GUID_DeviceControl = { 0x7EE9F0FA, 0x48DF, 0x5A1A, {0x66,0x9B,0x51,0x2F,0xB4,0x8D,0x5E,0xA3} };
+static const GUID GUID_SystemControl = { 0x3AB1426D, 0x4220, 0x689C, {0xF5,0xB2,0x0E,0x5F,0x60,0x3C,0xE5,0xF0} };
+static const GUID GUID_Wmi = { 0xA49A0BB4, 0x4AAF, 0x9545, {0x34,0x58,0xBB,0x0B,0xEF,0x0D,0x2E,0x87} };
+static const GUID GUID_Pnp = { 0xC5411408, 0x4ED6, 0x0F1E, {0x07,0xE7,0xEE,0x15,0xDD,0x36,0x12,0xA4} };
+
+// Main QueryInterface implementation
+NTSTATUS QueryInterfaceHandler(longlong* pThis, GUID* pIid, ulonglong* ppvObject)
+{
+    longlong* pInterface;
+
+    // Handle IUnknown and device-specific interfaces
+    if (IsEqualGUID(pIid, &GUID_IUnknown) ||
+        IsEqualGUID(pIid, &GUID_DeviceExtension)) {
+        pInterface = pThis + 0x9F;
+    }
+    else if (IsEqualGUID(pIid, &GUID_Interface)) {
+        pInterface = pThis + 1;
+    }
+    else {
+        // Fallback to secondary interface handler
+        return SecondaryInterfaceHandler(pThis, pIid, ppvObject);
+    }
+
+    *ppvObject = (pThis != NULL) ? (ulonglong)pInterface : 0;
+    (**(code**)(*pThis + 0x18))(pThis);  // Call Release method
+    return STATUS_SUCCESS;
+}
+
+// Handle secondary interfaces
+NTSTATUS SecondaryInterfaceHandler(longlong* pThis, GUID* pIid, ulonglong* ppvObject)
+{
+    longlong* pInterface;
+    longlong vtable;
+
+    if (IsEqualGUID(pIid, &GUID_ServiceTable)) {
+        pInterface = pThis + 2;
+        vtable = *pThis;
+    }
+    else {
+        // Handle other specialized interfaces
+        if (IsEqualGUID(pIid, &GUID_PowerManagement)) {
+            pInterface = pThis + 3;
+        }
+        else if (IsEqualGUID(pIid, &GUID_DeviceControl)) {
+            pInterface = pThis + 4;
+        }
+        else if (IsEqualGUID(pIid, &GUID_SystemControl)) {
+            pInterface = pThis + 5;
+        }
+        else if (IsEqualGUID(pIid, &GUID_Wmi)) {
+            pInterface = pThis + 8;
+        }
+        else if (IsEqualGUID(pIid, &GUID_Pnp)) {
+            pInterface = pThis + 6;
+        }
+        else {
+            // Interface not supported
+            *ppvObject = 0;
+            return STATUS_NOINTERFACE;
+        }
+
+        *ppvObject = (pThis != NULL) ? (ulonglong)pInterface : 0;
+        vtable = *pThis;
+    }
+
+    (**(code**)(vtable + 0x18))(pThis);  // Call Release method
+    return STATUS_SUCCESS;
+}
+*/
+
 int goIdle;
 
+static const char *hresult_to_sting(HRESULT res)
+{
+    switch (res) {
+#ifdef S_OK
+    case S_OK:
+        return "S_OK";
+#endif
+#ifdef E_CLASSNOTAVAILABLE
+    case E_CLASSNOTAVAILABLE:
+        return "E_CLASSNOTAVAILABLE";
+#endif
+#ifdef E_ABORT
+    case E_ABORT:
+        return "E_ABORT";
+#endif
+#ifdef E_ACCESSDENIED
+    case E_ACCESSDENIED:
+        return "E_ACCESSDENIED";
+#endif
+#ifdef E_APPLICATION_ACTIVATION_EXEC_FAILURE
+    case E_APPLICATION_ACTIVATION_EXEC_FAILURE:
+        return "E_APPLICATION_ACTIVATION_EXEC_FAILURE";
+#endif
+#ifdef E_APPLICATION_ACTIVATION_TIMED_OUT
+    case E_APPLICATION_ACTIVATION_TIMED_OUT:
+        return "E_APPLICATION_ACTIVATION_TIMED_OUT";
+#endif
+#ifdef E_APPLICATION_EXITING
+    case E_APPLICATION_EXITING:
+        return "E_APPLICATION_EXITING";
+#endif
+#ifdef E_APPLICATION_MANAGER_NOT_RUNNING
+    case E_APPLICATION_MANAGER_NOT_RUNNING:
+        return "E_APPLICATION_MANAGER_NOT_RUNNING";
+#endif
+#ifdef E_APPLICATION_NOT_REGISTERED
+    case E_APPLICATION_NOT_REGISTERED:
+        return "E_APPLICATION_NOT_REGISTERED";
+#endif
+#ifdef E_APPLICATION_TEMPORARY_LICENSE_ERROR
+    case E_APPLICATION_TEMPORARY_LICENSE_ERROR:
+        return "E_APPLICATION_TEMPORARY_LICENSE_ERROR";
+#endif
+#ifdef E_APPLICATION_TRIAL_LICENSE_EXPIRED
+    case E_APPLICATION_TRIAL_LICENSE_EXPIRED:
+        return "E_APPLICATION_TRIAL_LICENSE_EXPIRED";
+#endif
+#ifdef E_APPLICATION_VIEW_EXITING
+    case E_APPLICATION_VIEW_EXITING:
+        return "E_APPLICATION_VIEW_EXITING";
+#endif
+#ifdef E_ASYNC_OPERATION_NOT_STARTED
+    case E_ASYNC_OPERATION_NOT_STARTED:
+        return "E_ASYNC_OPERATION_NOT_STARTED";
+#endif
+#ifdef E_AUDIO_ENGINE_NODE_NOT_FOUND
+    case E_AUDIO_ENGINE_NODE_NOT_FOUND:
+        return "E_AUDIO_ENGINE_NODE_NOT_FOUND";
+#endif
+#ifdef E_BLUETOOTH_ATT_ATTRIBUTE_NOT_FOUND
+    case E_BLUETOOTH_ATT_ATTRIBUTE_NOT_FOUND:
+        return "E_BLUETOOTH_ATT_ATTRIBUTE_NOT_FOUND";
+#endif
+#ifdef E_BLUETOOTH_ATT_ATTRIBUTE_NOT_LONG
+    case E_BLUETOOTH_ATT_ATTRIBUTE_NOT_LONG:
+        return "E_BLUETOOTH_ATT_ATTRIBUTE_NOT_LONG";
+#endif
+#ifdef E_BLUETOOTH_ATT_INSUFFICIENT_AUTHENTICATION
+    case E_BLUETOOTH_ATT_INSUFFICIENT_AUTHENTICATION:
+        return "E_BLUETOOTH_ATT_INSUFFICIENT_AUTHENTICATION";
+#endif
+#ifdef E_BLUETOOTH_ATT_INSUFFICIENT_AUTHORIZATION
+    case E_BLUETOOTH_ATT_INSUFFICIENT_AUTHORIZATION:
+        return "E_BLUETOOTH_ATT_INSUFFICIENT_AUTHORIZATION";
+#endif
+#ifdef E_BLUETOOTH_ATT_INSUFFICIENT_ENCRYPTION
+    case E_BLUETOOTH_ATT_INSUFFICIENT_ENCRYPTION:
+        return "E_BLUETOOTH_ATT_INSUFFICIENT_ENCRYPTION";
+#endif
+#ifdef E_BLUETOOTH_ATT_INSUFFICIENT_ENCRYPTION_KEY_SIZE
+    case E_BLUETOOTH_ATT_INSUFFICIENT_ENCRYPTION_KEY_SIZE:
+        return "E_BLUETOOTH_ATT_INSUFFICIENT_ENCRYPTION_KEY_SIZE";
+#endif
+#ifdef E_BLUETOOTH_ATT_INSUFFICIENT_RESOURCES
+    case E_BLUETOOTH_ATT_INSUFFICIENT_RESOURCES:
+        return "E_BLUETOOTH_ATT_INSUFFICIENT_RESOURCES";
+#endif
+#ifdef E_BLUETOOTH_ATT_INVALID_ATTRIBUTE_VALUE_LENGTH
+    case E_BLUETOOTH_ATT_INVALID_ATTRIBUTE_VALUE_LENGTH:
+        return "E_BLUETOOTH_ATT_INVALID_ATTRIBUTE_VALUE_LENGTH";
+#endif
+#ifdef E_BLUETOOTH_ATT_INVALID_HANDLE
+    case E_BLUETOOTH_ATT_INVALID_HANDLE:
+        return "E_BLUETOOTH_ATT_INVALID_HANDLE";
+#endif
+#ifdef E_BLUETOOTH_ATT_INVALID_OFFSET
+    case E_BLUETOOTH_ATT_INVALID_OFFSET:
+        return "E_BLUETOOTH_ATT_INVALID_OFFSET";
+#endif
+#ifdef E_BLUETOOTH_ATT_INVALID_PDU
+    case E_BLUETOOTH_ATT_INVALID_PDU:
+        return "E_BLUETOOTH_ATT_INVALID_PDU";
+#endif
+#ifdef E_BLUETOOTH_ATT_PREPARE_QUEUE_FULL
+    case E_BLUETOOTH_ATT_PREPARE_QUEUE_FULL:
+        return "E_BLUETOOTH_ATT_PREPARE_QUEUE_FULL";
+#endif
+#ifdef E_BLUETOOTH_ATT_READ_NOT_PERMITTED
+    case E_BLUETOOTH_ATT_READ_NOT_PERMITTED:
+        return "E_BLUETOOTH_ATT_READ_NOT_PERMITTED";
+#endif
+#ifdef E_BLUETOOTH_ATT_REQUEST_NOT_SUPPORTED
+    case E_BLUETOOTH_ATT_REQUEST_NOT_SUPPORTED:
+        return "E_BLUETOOTH_ATT_REQUEST_NOT_SUPPORTED";
+#endif
+#ifdef E_BLUETOOTH_ATT_UNKNOWN_ERROR
+    case E_BLUETOOTH_ATT_UNKNOWN_ERROR:
+        return "E_BLUETOOTH_ATT_UNKNOWN_ERROR";
+#endif
+#ifdef E_BLUETOOTH_ATT_UNLIKELY
+    case E_BLUETOOTH_ATT_UNLIKELY:
+        return "E_BLUETOOTH_ATT_UNLIKELY";
+#endif
+#ifdef E_BLUETOOTH_ATT_UNSUPPORTED_GROUP_TYPE
+    case E_BLUETOOTH_ATT_UNSUPPORTED_GROUP_TYPE:
+        return "E_BLUETOOTH_ATT_UNSUPPORTED_GROUP_TYPE";
+#endif
+#ifdef E_BLUETOOTH_ATT_WRITE_NOT_PERMITTED
+    case E_BLUETOOTH_ATT_WRITE_NOT_PERMITTED:
+        return "E_BLUETOOTH_ATT_WRITE_NOT_PERMITTED";
+#endif
+#ifdef E_BOUNDS
+    case E_BOUNDS:
+        return "E_BOUNDS";
+#endif
+#ifdef E_CHANGED_STATE
+    case E_CHANGED_STATE:
+        return "E_CHANGED_STATE";
+#endif
+#ifdef E_ELEVATED_ACTIVATION_NOT_SUPPORTED
+    case E_ELEVATED_ACTIVATION_NOT_SUPPORTED:
+        return "E_ELEVATED_ACTIVATION_NOT_SUPPORTED";
+#endif
+#ifdef E_FAIL
+    case E_FAIL:
+        return "E_FAIL";
+#endif
+#ifdef E_FULL_ADMIN_NOT_SUPPORTED
+    case E_FULL_ADMIN_NOT_SUPPORTED:
+        return "E_FULL_ADMIN_NOT_SUPPORTED";
+#endif
+#ifdef E_HANDLE
+    case E_HANDLE:
+        return "E_HANDLE";
+#endif
+#ifdef E_HDAUDIO_CONNECTION_LIST_NOT_SUPPORTED
+    case E_HDAUDIO_CONNECTION_LIST_NOT_SUPPORTED:
+        return "E_HDAUDIO_CONNECTION_LIST_NOT_SUPPORTED";
+#endif
+#ifdef E_HDAUDIO_EMPTY_CONNECTION_LIST
+    case E_HDAUDIO_EMPTY_CONNECTION_LIST:
+        return "E_HDAUDIO_EMPTY_CONNECTION_LIST";
+#endif
+#ifdef E_HDAUDIO_NO_LOGICAL_DEVICES_CREATED
+    case E_HDAUDIO_NO_LOGICAL_DEVICES_CREATED:
+        return "E_HDAUDIO_NO_LOGICAL_DEVICES_CREATED";
+#endif
+#ifdef E_HDAUDIO_NULL_LINKED_LIST_ENTRY
+    case E_HDAUDIO_NULL_LINKED_LIST_ENTRY:
+        return "E_HDAUDIO_NULL_LINKED_LIST_ENTRY";
+#endif
+#ifdef E_ILLEGAL_DELEGATE_ASSIGNMENT
+    case E_ILLEGAL_DELEGATE_ASSIGNMENT:
+        return "E_ILLEGAL_DELEGATE_ASSIGNMENT";
+#endif
+#ifdef E_ILLEGAL_METHOD_CALL
+    case E_ILLEGAL_METHOD_CALL:
+        return "E_ILLEGAL_METHOD_CALL";
+#endif
+#ifdef E_ILLEGAL_STATE_CHANGE
+    case E_ILLEGAL_STATE_CHANGE:
+        return "E_ILLEGAL_STATE_CHANGE";
+#endif
+#ifdef E_INVALIDARG
+    case E_INVALIDARG:
+        return "E_INVALIDARG";
+#endif
+#ifdef E_INVALID_PROTOCOL_FORMAT
+    case E_INVALID_PROTOCOL_FORMAT:
+        return "E_INVALID_PROTOCOL_FORMAT";
+#endif
+#ifdef E_INVALID_PROTOCOL_OPERATION
+    case E_INVALID_PROTOCOL_OPERATION:
+        return "E_INVALID_PROTOCOL_OPERATION";
+#endif
+#ifdef E_MBN_BAD_SIM
+    case E_MBN_BAD_SIM:
+        return "E_MBN_BAD_SIM";
+#endif
+#ifdef E_MBN_CONTEXT_NOT_ACTIVATED
+    case E_MBN_CONTEXT_NOT_ACTIVATED:
+        return "E_MBN_CONTEXT_NOT_ACTIVATED";
+#endif
+#ifdef E_MBN_DATA_CLASS_NOT_AVAILABLE
+    case E_MBN_DATA_CLASS_NOT_AVAILABLE:
+        return "E_MBN_DATA_CLASS_NOT_AVAILABLE";
+#endif
+#ifdef E_MBN_DEFAULT_PROFILE_EXIST
+    case E_MBN_DEFAULT_PROFILE_EXIST:
+        return "E_MBN_DEFAULT_PROFILE_EXIST";
+#endif
+#ifdef E_MBN_FAILURE
+    case E_MBN_FAILURE:
+        return "E_MBN_FAILURE";
+#endif
+#ifdef E_MBN_INVALID_ACCESS_STRING
+    case E_MBN_INVALID_ACCESS_STRING:
+        return "E_MBN_INVALID_ACCESS_STRING";
+#endif
+#ifdef E_MBN_INVALID_CACHE
+    case E_MBN_INVALID_CACHE:
+        return "E_MBN_INVALID_CACHE";
+#endif
+#ifdef E_MBN_INVALID_PROFILE
+    case E_MBN_INVALID_PROFILE:
+        return "E_MBN_INVALID_PROFILE";
+#endif
+#ifdef E_MBN_MAX_ACTIVATED_CONTEXTS
+    case E_MBN_MAX_ACTIVATED_CONTEXTS:
+        return "E_MBN_MAX_ACTIVATED_CONTEXTS";
+#endif
+#ifdef E_MBN_NOT_REGISTERED
+    case E_MBN_NOT_REGISTERED:
+        return "E_MBN_NOT_REGISTERED";
+#endif
+#ifdef E_MBN_PACKET_SVC_DETACHED
+    case E_MBN_PACKET_SVC_DETACHED:
+        return "E_MBN_PACKET_SVC_DETACHED";
+#endif
+#ifdef E_MBN_PIN_DISABLED
+    case E_MBN_PIN_DISABLED:
+        return "E_MBN_PIN_DISABLED";
+#endif
+#ifdef E_MBN_PIN_NOT_SUPPORTED
+    case E_MBN_PIN_NOT_SUPPORTED:
+        return "E_MBN_PIN_NOT_SUPPORTED";
+#endif
+#ifdef E_MBN_PIN_REQUIRED
+    case E_MBN_PIN_REQUIRED:
+        return "E_MBN_PIN_REQUIRED";
+#endif
+#ifdef E_MBN_PROVIDERS_NOT_FOUND
+    case E_MBN_PROVIDERS_NOT_FOUND:
+        return "E_MBN_PROVIDERS_NOT_FOUND";
+#endif
+#ifdef E_MBN_PROVIDER_NOT_VISIBLE
+    case E_MBN_PROVIDER_NOT_VISIBLE:
+        return "E_MBN_PROVIDER_NOT_VISIBLE";
+#endif
+#ifdef E_MBN_RADIO_POWER_OFF
+    case E_MBN_RADIO_POWER_OFF:
+        return "E_MBN_RADIO_POWER_OFF";
+#endif
+#ifdef E_MBN_SERVICE_NOT_ACTIVATED
+    case E_MBN_SERVICE_NOT_ACTIVATED:
+        return "E_MBN_SERVICE_NOT_ACTIVATED";
+#endif
+#ifdef E_MBN_SIM_NOT_INSERTED
+    case E_MBN_SIM_NOT_INSERTED:
+        return "E_MBN_SIM_NOT_INSERTED";
+#endif
+#ifdef E_MBN_SMS_ENCODING_NOT_SUPPORTED
+    case E_MBN_SMS_ENCODING_NOT_SUPPORTED:
+        return "E_MBN_SMS_ENCODING_NOT_SUPPORTED";
+#endif
+#ifdef E_MBN_SMS_FILTER_NOT_SUPPORTED
+    case E_MBN_SMS_FILTER_NOT_SUPPORTED:
+        return "E_MBN_SMS_FILTER_NOT_SUPPORTED";
+#endif
+#ifdef E_MBN_SMS_FORMAT_NOT_SUPPORTED
+    case E_MBN_SMS_FORMAT_NOT_SUPPORTED:
+        return "E_MBN_SMS_FORMAT_NOT_SUPPORTED";
+#endif
+#ifdef E_MBN_SMS_INVALID_MEMORY_INDEX
+    case E_MBN_SMS_INVALID_MEMORY_INDEX:
+        return "E_MBN_SMS_INVALID_MEMORY_INDEX";
+#endif
+#ifdef E_MBN_SMS_LANG_NOT_SUPPORTED
+    case E_MBN_SMS_LANG_NOT_SUPPORTED:
+        return "E_MBN_SMS_LANG_NOT_SUPPORTED";
+#endif
+#ifdef E_MBN_SMS_MEMORY_FAILURE
+    case E_MBN_SMS_MEMORY_FAILURE:
+        return "E_MBN_SMS_MEMORY_FAILURE";
+#endif
+#ifdef E_MBN_SMS_MEMORY_FULL
+    case E_MBN_SMS_MEMORY_FULL:
+        return "E_MBN_SMS_MEMORY_FULL";
+#endif
+#ifdef E_MBN_SMS_NETWORK_TIMEOUT
+    case E_MBN_SMS_NETWORK_TIMEOUT:
+        return "E_MBN_SMS_NETWORK_TIMEOUT";
+#endif
+#ifdef E_MBN_SMS_OPERATION_NOT_ALLOWED
+    case E_MBN_SMS_OPERATION_NOT_ALLOWED:
+        return "E_MBN_SMS_OPERATION_NOT_ALLOWED";
+#endif
+#ifdef E_MBN_SMS_UNKNOWN_SMSC_ADDRESS
+    case E_MBN_SMS_UNKNOWN_SMSC_ADDRESS:
+        return "E_MBN_SMS_UNKNOWN_SMSC_ADDRESS";
+#endif
+#ifdef E_MBN_VOICE_CALL_IN_PROGRESS
+    case E_MBN_VOICE_CALL_IN_PROGRESS:
+        return "E_MBN_VOICE_CALL_IN_PROGRESS";
+#endif
+#ifdef E_MONITOR_RESOLUTION_TOO_LOW
+    case E_MONITOR_RESOLUTION_TOO_LOW:
+        return "E_MONITOR_RESOLUTION_TOO_LOW";
+#endif
+#ifdef E_MULTIPLE_EXTENSIONS_FOR_APPLICATION
+    case E_MULTIPLE_EXTENSIONS_FOR_APPLICATION:
+        return "E_MULTIPLE_EXTENSIONS_FOR_APPLICATION";
+#endif
+#ifdef E_MULTIPLE_PACKAGES_FOR_FAMILY
+    case E_MULTIPLE_PACKAGES_FOR_FAMILY:
+        return "E_MULTIPLE_PACKAGES_FOR_FAMILY";
+#endif
+#ifdef E_NOINTERFACE
+    case E_NOINTERFACE:
+        return "E_NOINTERFACE";
+#endif
+#ifdef E_NOTIMPL
+    case E_NOTIMPL:
+        return "E_NOTIMPL";
+#endif
+#ifdef E_NOT_SET
+    case E_NOT_SET:
+        return "E_NOT_SET";
+#endif
+#ifdef E_NOT_SUFFICIENT_BUFFER
+    case E_NOT_SUFFICIENT_BUFFER:
+        return "E_NOT_SUFFICIENT_BUFFER";
+#endif
+#ifdef E_NOT_VALID_STATE
+    case E_NOT_VALID_STATE:
+        return "E_NOT_VALID_STATE";
+#endif
+#ifdef E_OUTOFMEMORY
+    case E_OUTOFMEMORY:
+        return "E_OUTOFMEMORY";
+#endif
+#ifdef E_PENDING
+    case E_PENDING:
+        return "E_PENDING";
+#endif
+#ifdef E_POINTER
+    case E_POINTER:
+        return "E_POINTER";
+#endif
+#ifdef E_PROTOCOL_EXTENSIONS_NOT_SUPPORTED
+    case E_PROTOCOL_EXTENSIONS_NOT_SUPPORTED:
+        return "E_PROTOCOL_EXTENSIONS_NOT_SUPPORTED";
+#endif
+#ifdef E_PROTOCOL_VERSION_NOT_SUPPORTED
+    case E_PROTOCOL_VERSION_NOT_SUPPORTED:
+        return "E_PROTOCOL_VERSION_NOT_SUPPORTED";
+#endif
+#ifdef E_SKYDRIVE_FILE_NOT_UPLOADED
+    case E_SKYDRIVE_FILE_NOT_UPLOADED:
+        return "E_SKYDRIVE_FILE_NOT_UPLOADED";
+#endif
+#ifdef E_SKYDRIVE_ROOT_TARGET_CANNOT_INDEX
+    case E_SKYDRIVE_ROOT_TARGET_CANNOT_INDEX:
+        return "E_SKYDRIVE_ROOT_TARGET_CANNOT_INDEX";
+#endif
+#ifdef E_SKYDRIVE_ROOT_TARGET_FILE_SYSTEM_NOT_SUPPORTED
+    case E_SKYDRIVE_ROOT_TARGET_FILE_SYSTEM_NOT_SUPPORTED:
+        return "E_SKYDRIVE_ROOT_TARGET_FILE_SYSTEM_NOT_SUPPORTED";
+#endif
+#ifdef E_SKYDRIVE_ROOT_TARGET_OVERLAP
+    case E_SKYDRIVE_ROOT_TARGET_OVERLAP:
+        return "E_SKYDRIVE_ROOT_TARGET_OVERLAP";
+#endif
+#ifdef E_SKYDRIVE_ROOT_TARGET_VOLUME_ROOT_NOT_SUPPORTED
+    case E_SKYDRIVE_ROOT_TARGET_VOLUME_ROOT_NOT_SUPPORTED:
+        return "E_SKYDRIVE_ROOT_TARGET_VOLUME_ROOT_NOT_SUPPORTED";
+#endif
+#ifdef E_SKYDRIVE_UPDATE_AVAILABILITY_FAIL
+    case E_SKYDRIVE_UPDATE_AVAILABILITY_FAIL:
+        return "E_SKYDRIVE_UPDATE_AVAILABILITY_FAIL";
+#endif
+#ifdef E_STRING_NOT_NULL_TERMINATED
+    case E_STRING_NOT_NULL_TERMINATED:
+        return "E_STRING_NOT_NULL_TERMINATED";
+#endif
+#ifdef E_SUBPROTOCOL_NOT_SUPPORTED
+    case E_SUBPROTOCOL_NOT_SUPPORTED:
+        return "E_SUBPROTOCOL_NOT_SUPPORTED";
+#endif
+#ifdef E_SYNCENGINE_CLIENT_UPDATE_NEEDED
+    case E_SYNCENGINE_CLIENT_UPDATE_NEEDED:
+        return "E_SYNCENGINE_CLIENT_UPDATE_NEEDED";
+#endif
+#ifdef E_SYNCENGINE_FILE_IDENTIFIER_UNKNOWN
+    case E_SYNCENGINE_FILE_IDENTIFIER_UNKNOWN:
+        return "E_SYNCENGINE_FILE_IDENTIFIER_UNKNOWN";
+#endif
+#ifdef E_SYNCENGINE_FILE_SIZE_EXCEEDS_REMAINING_QUOTA
+    case E_SYNCENGINE_FILE_SIZE_EXCEEDS_REMAINING_QUOTA:
+        return "E_SYNCENGINE_FILE_SIZE_EXCEEDS_REMAINING_QUOTA";
+#endif
+#ifdef E_SYNCENGINE_FILE_SIZE_OVER_LIMIT
+    case E_SYNCENGINE_FILE_SIZE_OVER_LIMIT:
+        return "E_SYNCENGINE_FILE_SIZE_OVER_LIMIT";
+#endif
+#ifdef E_SYNCENGINE_FILE_SYNC_PARTNER_ERROR
+    case E_SYNCENGINE_FILE_SYNC_PARTNER_ERROR:
+        return "E_SYNCENGINE_FILE_SYNC_PARTNER_ERROR";
+#endif
+#ifdef E_SYNCENGINE_FOLDER_INACCESSIBLE
+    case E_SYNCENGINE_FOLDER_INACCESSIBLE:
+        return "E_SYNCENGINE_FOLDER_INACCESSIBLE";
+#endif
+#ifdef E_SYNCENGINE_FOLDER_IN_REDIRECTION
+    case E_SYNCENGINE_FOLDER_IN_REDIRECTION:
+        return "E_SYNCENGINE_FOLDER_IN_REDIRECTION";
+#endif
+#ifdef E_SYNCENGINE_FOLDER_ITEM_COUNT_LIMIT_EXCEEDED
+    case E_SYNCENGINE_FOLDER_ITEM_COUNT_LIMIT_EXCEEDED:
+        return "E_SYNCENGINE_FOLDER_ITEM_COUNT_LIMIT_EXCEEDED";
+#endif
+#ifdef E_SYNCENGINE_PATH_LENGTH_LIMIT_EXCEEDED
+    case E_SYNCENGINE_PATH_LENGTH_LIMIT_EXCEEDED:
+        return "E_SYNCENGINE_PATH_LENGTH_LIMIT_EXCEEDED";
+#endif
+#ifdef E_SYNCENGINE_PROXY_AUTHENTICATION_REQUIRED
+    case E_SYNCENGINE_PROXY_AUTHENTICATION_REQUIRED:
+        return "E_SYNCENGINE_PROXY_AUTHENTICATION_REQUIRED";
+#endif
+#ifdef E_SYNCENGINE_REMOTE_PATH_LENGTH_LIMIT_EXCEEDED
+    case E_SYNCENGINE_REMOTE_PATH_LENGTH_LIMIT_EXCEEDED:
+        return "E_SYNCENGINE_REMOTE_PATH_LENGTH_LIMIT_EXCEEDED";
+#endif
+#ifdef E_SYNCENGINE_REQUEST_BLOCKED_BY_SERVICE
+    case E_SYNCENGINE_REQUEST_BLOCKED_BY_SERVICE:
+        return "E_SYNCENGINE_REQUEST_BLOCKED_BY_SERVICE";
+#endif
+#ifdef E_SYNCENGINE_REQUEST_BLOCKED_DUE_TO_CLIENT_ERROR
+    case E_SYNCENGINE_REQUEST_BLOCKED_DUE_TO_CLIENT_ERROR:
+        return "E_SYNCENGINE_REQUEST_BLOCKED_DUE_TO_CLIENT_ERROR";
+#endif
+#ifdef E_SYNCENGINE_SERVICE_AUTHENTICATION_FAILED
+    case E_SYNCENGINE_SERVICE_AUTHENTICATION_FAILED:
+        return "E_SYNCENGINE_SERVICE_AUTHENTICATION_FAILED";
+#endif
+#ifdef E_SYNCENGINE_SERVICE_RETURNED_UNEXPECTED_SIZE
+    case E_SYNCENGINE_SERVICE_RETURNED_UNEXPECTED_SIZE:
+        return "E_SYNCENGINE_SERVICE_RETURNED_UNEXPECTED_SIZE";
+#endif
+#ifdef E_SYNCENGINE_STORAGE_SERVICE_BLOCKED
+    case E_SYNCENGINE_STORAGE_SERVICE_BLOCKED:
+        return "E_SYNCENGINE_STORAGE_SERVICE_BLOCKED";
+#endif
+#ifdef E_SYNCENGINE_STORAGE_SERVICE_PROVISIONING_FAILED
+    case E_SYNCENGINE_STORAGE_SERVICE_PROVISIONING_FAILED:
+        return "E_SYNCENGINE_STORAGE_SERVICE_PROVISIONING_FAILED";
+#endif
+#ifdef E_SYNCENGINE_SYNC_PAUSED_BY_SERVICE
+    case E_SYNCENGINE_SYNC_PAUSED_BY_SERVICE:
+        return "E_SYNCENGINE_SYNC_PAUSED_BY_SERVICE";
+#endif
+#ifdef E_SYNCENGINE_UNKNOWN_SERVICE_ERROR
+    case E_SYNCENGINE_UNKNOWN_SERVICE_ERROR:
+        return "E_SYNCENGINE_UNKNOWN_SERVICE_ERROR";
+#endif
+#ifdef E_SYNCENGINE_UNSUPPORTED_FILE_NAME
+    case E_SYNCENGINE_UNSUPPORTED_FILE_NAME:
+        return "E_SYNCENGINE_UNSUPPORTED_FILE_NAME";
+#endif
+#ifdef E_SYNCENGINE_UNSUPPORTED_FOLDER_NAME
+    case E_SYNCENGINE_UNSUPPORTED_FOLDER_NAME:
+        return "E_SYNCENGINE_UNSUPPORTED_FOLDER_NAME";
+#endif
+#ifdef E_SYNCENGINE_UNSUPPORTED_MARKET
+    case E_SYNCENGINE_UNSUPPORTED_MARKET:
+        return "E_SYNCENGINE_UNSUPPORTED_MARKET";
+#endif
+#ifdef E_SYNCENGINE_UNSUPPORTED_REPARSE_POINT
+    case E_SYNCENGINE_UNSUPPORTED_REPARSE_POINT:
+        return "E_SYNCENGINE_UNSUPPORTED_REPARSE_POINT";
+#endif
+#ifdef E_UAC_DISABLED
+    case E_UAC_DISABLED:
+        return "E_UAC_DISABLED";
+#endif
+#ifdef E_UNEXPECTED
+    case E_UNEXPECTED:
+        return "E_UNEXPECTED";
+#endif
+    default:
+        return "UNKNOWN";
+    }
+}
+
 struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
+    std::map<std::wstring, PROPVARIANT*> m_store;
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
             LPOLESTR str;
             StringFromIID(riid, &str);
             std::wcout << L"MyMem::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
-            return 0; 
+            printf("New NamedPropertyStore: ppvObject=%p\r\n", *ppvObject);
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
-            printf("AddRef\r\n");
-            return 0; 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
+            printf("MyNamedPropertyStore::AddRef\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
-            //printf("MyMem::Release\r\n");
+        virtual ULONG STDMETHODCALLTYPE Release() {
+            printf("MyNamedPropertyStore::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("DeleteWdfObject\r\n");
-            return 0; 
+            printf("MyNamedPropertyStore::DeleteWdfObject\r\n");
+            return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignContext( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
-            /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  void *pContext) { 
-            printf("AssignContext\r\n");
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) {
+            printf("MyNamedPropertyStore::AssignContext\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveContext( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("RetrieveContext\r\n");
+            printf("MyNamedPropertyStore::RetrieveContext\r\n");
             return 0;
         }
-        
+
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("AcquireLock\r\n");
+            printf("MyNamedPropertyStore::AcquireLock\r\n");
         }
-        
+
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("ReleaseLock\r\n");
+            printf("MyNamedPropertyStore::ReleaseLock\r\n");
         }
     public:
-        virtual HRESULT STDMETHODCALLTYPE GetNamedValue( 
-            /* [annotation][string][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE GetNamedValue(
+            /* [annotation][string][in] */
             _In_  LPCWSTR pszName,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  PROPVARIANT *pv){
-            std::wcout << L"=====================================" << std::endl;
-            std::wcout << L"GetNamedValue " << pszName << std::endl;
-            std::wcout << L"=====================================" << std::endl;
+            std::wcout << L"MyNamedPropertyStore::GetNamedValue " << pszName << " " << pv->vt << std::endl;
+
+            auto name = std::wstring(pszName);
+            auto it = m_store.find(name);
+            if (it != m_store.end()) {
+                std::wcout << L"Return cached value " << it->second->vt << std::endl;
+                *pv = *it->second;
+                return S_OK;
+            }
 
             std::string fname;
             std::wstring wfname(pszName);
@@ -121,41 +796,50 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                     pv->blob.pBlobData = (BYTE*)CoTaskMemAlloc(pv->blob.cbSize);
                     std::copy(buf.begin(), buf.end(), pv->blob.pBlobData);
                 }
-            } 
+            }
             else if(fname == "LastUpdateSystemTimeStamp" || fname == "OldCalDataDeleted") {
                 std::ifstream input(fname + ".uint");
                 if(input) {
                     pv->vt = VT_UINT;
                     input >> pv->uintVal;
-                    std::cout << "UINT " << fname << " = " << pv->uintVal << std::endl; 
+                    std::cout << "UINT " << fname << " = " << pv->uintVal << std::endl;
                 }
                 else {
                     DECIMAL_SETZERO(pv->decVal);
-                    std::cout << "UINT " << fname << " not found" << std::endl; 
+                    std::cout << "UINT " << fname << " not found" << std::endl;
                 }
-            } 
+            }
+            else if (fname == "PairingInProcess" || fname == "UnairingInProcess" ||
+                     fname == "DeviceUpdateInProcess") {
+                    // InitPropVariantFromBoolean(FALSE, pv);
+                    pv->vt = VT_BOOL;
+                    pv->boolVal = VARIANT_FALSE;
+            }
             else {
                 DECIMAL_SETZERO(pv->decVal);
+                return E_NOTIMPL;
             }
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE SetNamedValue( 
-            /* [annotation][string][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE SetNamedValue(
+            /* [annotation][string][in] */
             _In_  LPCWSTR pszName,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  const PROPVARIANT *pv){
             //wchar_t *buf = L"<error>";
             //LONG num = 118;
             //PropVariantToInt32(*pv, &num);
             //PropVariantToStringAlloc(*pv, &buf);
 
-            std::wcout << L"=====================================" << std::endl;
-            std::wcout << L"SetNamedValue " << pszName << "=" << pv->vt << std::endl;
+            std::wcout << L"MyNamedPropertyStore::SetNamedValue " << pszName << " (" << pv->vt << ")" << std::endl;
             switch(pv->vt) {
                 case VT_I1:
-                    printf("VT_I1: %d\n", pv->cVal);
+                    printf("  VT_I1: %d\n", pv->cVal);
+                    break;
+                case VT_UI4:
+                    printf("  VT_UI4: %u\n", pv->ulVal);
                     break;
                 case VT_UINT: {
                         std::string fname;
@@ -163,7 +847,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                         fname.assign(wfname.begin(), wfname.end());
                         std::ofstream output(fname + ".uint");
                         output << pv->uintVal << std::endl;
-                        printf("VT_UINT: %d\n", pv->uintVal);
+                        printf("  VT_UINT: %d\n", pv->uintVal);
                     }
                     break;
                 case VT_BLOB: {
@@ -179,40 +863,45 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                             p+=sprintf(p, "%02x", pv->blob.pBlobData[i]);
                         }
                         *p=0;
-                        printf("Blob value: %lu: %s\n", pv->blob.cbSize, hex);
+                        printf("  Blob value: %lu: %s\n", pv->blob.cbSize, hex);
                     }
                     break;
             }
-            std::wcout << L"=====================================" << std::endl;
+
+            PROPVARIANT *copy = (PROPVARIANT*) malloc(sizeof(PROPVARIANT));
+            PropVariantCopy(copy, pv);
+            std::wstring wfname(pszName);
+            m_store.insert({wfname, copy});
+
             //CoTaskMemFree(buf);
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE GetNameCount( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE GetNameCount(
+            /* [annotation][out] */
             _Out_  DWORD *pdwCount){
-            std::wcout << L"GetNameCount " << std::endl;
+            std::wcout << L"MyNamedPropertyStore::GetNameCount " << std::endl;
             *pdwCount = 0;
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE GetNameAt( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE GetNameAt(
+            /* [annotation][in] */
             _In_  DWORD iProp,
-            /* [annotation][string][out] */ 
+            /* [annotation][string][out] */
             _Out_  PWSTR *ppwszName){
-            std::wcout << L"GetNameAt " << iProp << std::endl;
+            std::wcout << L"MyNamedPropertyStore::GetNameAt " << iProp << std::endl;
             *ppwszName = L"";
             return 0;
         }
 
     public:
-        virtual HRESULT STDMETHODCALLTYPE DeleteNamedValue( 
-            /* [annotation][string][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE DeleteNamedValue(
+            /* [annotation][string][in] */
             _In_  LPCWSTR pwszName){
-            std::wcout << L"DeleteNamedValue " << pwszName<< std::endl;
+            std::wcout << L"MyNamedPropertyStore::DeleteNamedValue " << pwszName<< std::endl;
             return 0;
         }
 
@@ -221,73 +910,73 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
 
 struct MyPropertyStoreFactory : public IWDFPropertyStoreFactory {
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
             LPOLESTR str;
             StringFromIID(riid, &str);
             std::wcout << L"MyPropertyStoreFactory::QueryInterface " << str << std::endl;
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
-            return 0; 
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
-            printf("AddRef\r\n");
-            return 0; 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
+            printf("IWDFPropertyStoreFactory::AddRef\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
+        virtual ULONG STDMETHODCALLTYPE Release() {
             printf("MyPropertyStoreFactory::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("DeleteWdfObject\r\n");
-            return 0; 
+            printf("MyPropertyStoreFactory::DeleteWdfObject\r\n");
+            return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignContext( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
-            /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  void *pContext) { 
-            printf("AssignContext\r\n");
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) {
+            printf("MyPropertyStoreFactory::AssignContext\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveContext( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("RetrieveContext\r\n");
+            printf("MyPropertyStoreFactory::RetrieveContext\r\n");
             return 0;
         }
-        
+
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("AcquireLock\r\n");
+            printf("MyPropertyStoreFactory::AcquireLock\r\n");
         }
-        
+
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("ReleaseLock\r\n");
+            printf("MyPropertyStoreFactory::ReleaseLock\r\n");
         }
     public:
-        virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore(
+            /* [annotation][in] */
             _In_  PWDF_PROPERTY_STORE_ROOT RootSpecifier,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_PROPERTY_STORE_RETRIEVE_FLAGS Flags,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  REGSAM DesiredAccess,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  PCWSTR SubkeyPath,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFNamedPropertyStore2 **PropertyStore,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  WDF_PROPERTY_STORE_DISPOSITION *Disposition){
-            printf("RetrieveDevicePropertyStore\r\n");
+            printf("MyPropertyStoreFactory::RetrieveDevicePropertyStore\r\n");
             *PropertyStore = new MyNamedPropertyStore();
             return 0;
         }
 
 };
-        
+
 struct MyMem : public IWDFMemory {
     public:
         MyMem(void *b, SIZE_T s) {
@@ -296,95 +985,95 @@ struct MyMem : public IWDFMemory {
         }
 
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
             LPOLESTR str;
             StringFromIID(riid, &str);
             std::wcout << L"MyMem::QueryInterface " << str << std::endl;
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
-            return 0; 
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
-            printf("AddRef\r\n");
-            return 0; 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
+            printf("MyMem::AddRef\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
-            //printf("MyMem::Release\r\n");
+        virtual ULONG STDMETHODCALLTYPE Release() {
+            printf("MyMem::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("DeleteWdfObject\r\n");
-            return 0; 
+            printf("MyMem::DeleteWdfObject\r\n");
+            return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignContext( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
-            /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  void *pContext) { 
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) {
             printf("AssignContext\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveContext( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
             _Out_  void **ppvContext) {
             printf("RetrieveContext\r\n");
             return 0;
         }
-        
+
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
             printf("AcquireLock\r\n");
         }
-        
+
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
             printf("ReleaseLock\r\n");
         }
     public:
-        virtual HRESULT STDMETHODCALLTYPE CopyFromMemory( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE CopyFromMemory(
+            /* [annotation][in] */
             _In_  IWDFMemory *Source,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  PWDFMEMORY_OFFSET SourceOffset){
             printf("CopyFromMemory\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CopyToBuffer( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CopyToBuffer(
+            /* [annotation][in] */
             _In_  ULONG_PTR SourceOffset,
-            /* [annotation][size_is][in] */ 
+            /* [annotation][size_is][in] */
             _Out_writes_bytes_(NumOfBytesToCopyTo)  void *TargetBuffer,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T NumOfBytesToCopyTo){
             printf("CopyToBuffer\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CopyFromBuffer( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CopyFromBuffer(
+            /* [annotation][in] */
             _In_  ULONG_PTR DestOffset,
-            /* [annotation][size_is][in] */ 
+            /* [annotation][size_is][in] */
             _In_reads_bytes_(NumOfBytesToCopyFrom)  void *SourceBuffer,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T NumOfBytesToCopyFrom){
             printf("CopyFromBuffer\r\n");
             return 0;
         }
 
-        
+
         virtual SIZE_T STDMETHODCALLTYPE GetSize( void){
             printf("GetSize\r\n");
             return size;
         }
 
-        
-        virtual void *STDMETHODCALLTYPE GetDataBuffer( 
-            /* [annotation][unique][out] */ 
+
+        virtual void *STDMETHODCALLTYPE GetDataBuffer(
+            /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *BufferSize){
             if(BufferSize) {
                 *BufferSize = size;
@@ -393,11 +1082,11 @@ struct MyMem : public IWDFMemory {
             return buf;
         }
 
-        
-        virtual void STDMETHODCALLTYPE SetBuffer( 
-            /* [annotation][size_is][in] */ 
+
+        virtual void STDMETHODCALLTYPE SetBuffer(
+            /* [annotation][size_is][in] */
             _In_reads_bytes_(BufferSize)  void *Buffer,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T BufferSize){
             printf("SetBuffer\r\n");
             buf = Buffer;
@@ -407,6 +1096,94 @@ struct MyMem : public IWDFMemory {
     void * buf;
     SIZE_T size;
 };
+
+class MyUsbRequestCompletionParams : public IWDFUsbRequestCompletionParams
+    {
+    public:
+        MyUsbRequestCompletionParams(WDF_REQUEST_TYPE rt, ULONG sent) :
+            m_request_type(rt),
+            // FIXME: use actual type
+            m_usb_request_type(WdfUsbRequestTypeDeviceControlTransfer),
+            m_sent(sent) {}
+
+        virtual ULONG STDMETHODCALLTYPE AddRef() override {
+            printf("MyUsbRequestCompletionParams::AddRef\r\n");
+            return 0;
+        }
+        virtual ULONG STDMETHODCALLTYPE Release() override {
+            printf("MyUsbRequestCompletionParams::Release\r\n");
+            return 0;
+        }
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            LPOLESTR str;
+            StringFromIID(riid, &str);
+            std::wcout << L"MyUsbRequestCompletionParams::QueryInterface " << str << std::endl;
+            *ppvObject = this;
+            printf("ppvObject=%p\r\n", *ppvObject);
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE GetCompletionStatus() override {
+            printf("MyUsbRequestCompletionParams::GetCompletionStatus\r\n");
+            return S_OK;
+        }
+
+        virtual ULONG_PTR STDMETHODCALLTYPE GetInformation() override {
+            printf("MyUsbRequestCompletionParams::GetInformation\r\n");
+            return m_sent;
+        }
+
+        virtual WDF_REQUEST_TYPE STDMETHODCALLTYPE GetCompletedRequestType() override {
+            printf("MyUsbRequestCompletionParams::GetCompletedRequestType: %d\r\n", m_request_type);
+            return m_request_type;
+        }
+
+        virtual WDF_USB_REQUEST_TYPE STDMETHODCALLTYPE GetCompletedUsbRequestType() override {
+            printf("MyUsbRequestCompletionParams::GetCompletedRequestType2: %d\r\n",
+                m_usb_request_type);
+            return m_usb_request_type;
+        };
+
+        virtual void STDMETHODCALLTYPE GetDeviceControlTransferParameters(
+            /* [annotation][unique][out] */
+            _Out_opt_  IWDFMemory **ppMemory,
+            /* [annotation][unique][out] */
+            _Out_opt_  ULONG *pLengthTransferred,
+            /* [annotation][unique][out] */
+            _Out_opt_  SIZE_T *pOffset,
+            /* [annotation][unique][out] */
+            _Out_opt_  PWINUSB_SETUP_PACKET pSetupPacket) override {
+            printf("MyUsbRequestCompletionParams::GetDeviceControlTransferParameters\r\n");
+            assert(false && "NOT IMPLEMENTED");
+        }
+
+        virtual void STDMETHODCALLTYPE GetPipeWriteParameters(
+            /* [annotation][unique][out] */
+            _Out_opt_  IWDFMemory **ppWriteMemory,
+            /* [annotation][unique][out] */
+            _Out_opt_  SIZE_T *pBytesWritten,
+            /* [annotation][unique][out] */
+            _Out_opt_  SIZE_T *pWriteMemoryOffset) override {
+            printf("MyUsbRequestCompletionParams::GetPipeWriteParameters\r\n");
+            assert(false && "NOT IMPLEMENTED");
+        }
+
+        virtual void STDMETHODCALLTYPE GetPipeReadParameters(
+            /* [annotation][unique][out] */
+            _Out_opt_  IWDFMemory **ppReadMemory,
+            /* [annotation][unique][out] */
+            _Out_opt_  SIZE_T *pBytesRead,
+            /* [annotation][unique][out] */
+            _Out_opt_  SIZE_T *pReadMemoryOffset) override {
+            printf("MyUsbRequestCompletionParams::GetPipeReadParameters\r\n");
+            assert(false && "NOT IMPLEMENTED");
+        }
+
+    private:
+        WDF_REQUEST_TYPE m_request_type;
+        WDF_USB_REQUEST_TYPE m_usb_request_type;
+        ULONG m_sent;
+    };
 
 struct MyRequest : public IWDFIoRequest {
     public:
@@ -419,252 +1196,304 @@ struct MyRequest : public IWDFIoRequest {
             informationSize = 0;
         }
 
+        IRequestCallbackCancel *cancelCallback;
         WDF_REQUEST_TYPE reqType;
         ULONG ctl;
         BOOL complete;
         LONG_PTR informationSize;
+        WINUSB_SETUP_PACKET m_setupPacket;
+        ULONG m_sent = 0;
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
             LPOLESTR str;
             StringFromIID(riid, &str);
             std::wcout << L"MyRequest::QueryInterface " << str << std::endl;
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
-            return 0; 
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
-            printf("AddRef\r\n");
-            return 0; 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
+            printf("MyRequest::AddRef\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
+        virtual ULONG STDMETHODCALLTYPE Release() {
             printf("MyRequest::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("DeleteWdfObject\r\n");
-            return 0; 
+            printf("MyRequest::DeleteWdfObject\r\n");
+            return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignContext( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
-            /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  void *pContext) { 
-            printf("AssignContext\r\n");
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) {
+            printf("MyRequest::AssignContext\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveContext( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("RetrieveContext\r\n");
+            printf("MyRequest::RetrieveContext\r\n");
             return 0;
         }
-        
+
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("AcquireLock\r\n");
+            printf("MyRequest::AcquireLock\r\n");
         }
-        
+
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("ReleaseLock\r\n");
+            printf("MyRequest::ReleaseLock\r\n");
         }
     public:
-        virtual void STDMETHODCALLTYPE CompleteWithInformation( 
-            /* [annotation][in] */ 
+        virtual void STDMETHODCALLTYPE CompleteWithInformation(
+            /* [annotation][in] */
             _In_  HRESULT CompletionStatus,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T Information){
-            printf("CompleteWithInformation\r\n");
+            printf("MyRequest::CompleteWithInformation\r\n");
             complete = TRUE;
         }
 
-        
-        virtual void STDMETHODCALLTYPE SetInformation( 
-            /* [annotation][in] */ 
+        virtual void STDMETHODCALLTYPE SetInformation(
+            /* [annotation][in] */
             _In_  ULONG_PTR Information){
-            printf("SetInformation size=%lld\r\n", Information);
+            printf("MyRequest::SetInformation size=%lld\r\n", Information);
             informationSize = Information;
         }
 
-        
-        virtual void STDMETHODCALLTYPE Complete( 
-            /* [annotation][in] */ 
+        virtual void STDMETHODCALLTYPE Complete(
+            /* [annotation][in] */
             _In_  HRESULT CompletionStatus){
-            printf("Complete: %lx\r\n", (unsigned long)CompletionStatus);
+            printf("MyRequest::Complete: %lx (%s)\r\n", (unsigned long)CompletionStatus,
+                hresult_to_sting(CompletionStatus));
             complete = TRUE;
         }
 
-        
-        virtual void STDMETHODCALLTYPE SetCompletionCallback( 
-            /* [annotation][in] */ 
+        virtual void STDMETHODCALLTYPE SetCompletionCallback(
+            /* [annotation][in] */
             _In_  IRequestCallbackRequestCompletion *pCompletionCallback,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  void *pContext){
-            printf("SetCompletionCallback\r\n");
+            printf("MyRequest::SetCompletionCallback\r\n");
         }
 
-        
         virtual WDF_REQUEST_TYPE STDMETHODCALLTYPE GetType( void){
-            printf("GetType\r\n");
+            printf("MyRequest::GetType\r\n");
             return reqType;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetCreateParameters( 
-            /* [annotation][unique][out] */ 
+        virtual void STDMETHODCALLTYPE GetCreateParameters(
+            /* [annotation][unique][out] */
             _Out_opt_  ULONG *pOptions,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  USHORT *pFileAttributes,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  USHORT *pShareAccess){
-            printf("GetCreateParameters\r\n");
+            printf("MyRequest::GetCreateParameters\r\n");
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetReadParameters( 
-            /* [annotation][unique][out] */ 
+
+        virtual void STDMETHODCALLTYPE GetReadParameters(
+            /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pSizeInBytes,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  LONGLONG *pullOffset,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  ULONG *pulKey){
-            printf("GetReadParameters\r\n");
+            printf("MyRequest::GetReadParameters\r\n");
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetWriteParameters( 
-            /* [annotation][unique][out] */ 
+
+        virtual void STDMETHODCALLTYPE GetWriteParameters(
+            /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pSizeInBytes,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  LONGLONG *pullOffset,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  ULONG *pulKey){
-            printf("GetWriteParameters\r\n");
+            printf("MyRequest::GetWriteParameters\r\n");
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetDeviceIoControlParameters( 
-            /* [annotation][unique][out] */ 
+
+        virtual void STDMETHODCALLTYPE GetDeviceIoControlParameters(
+            /* [annotation][unique][out] */
             _Out_opt_  ULONG *pControlCode,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pInBufferSize,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pOutBufferSize){
-            //printf("GetDeviceIoControlParameters %p %p %p\r\n", pControlCode, pInBufferSize, pOutBufferSize);
-            *pControlCode = ctl;
-            *pInBufferSize = inMem->size;
-            *pOutBufferSize = outMem->size;
+            printf("MyRequest::GetDeviceIoControlParameters %p %p %p",
+                pControlCode, pInBufferSize, pOutBufferSize);
+            if (pControlCode)
+                *pControlCode = ctl;
+            if (pInBufferSize)
+                *pInBufferSize = inMem->size;
+            if (pOutBufferSize)
+                *pOutBufferSize = outMem->size;
+
+            printf("=> %lu %lu\r\n", pInBufferSize ? *pInBufferSize : NULL,
+                    pOutBufferSize ? *pOutBufferSize : NULL);
         }
 
-        
-        MyMem *outMem, *inMem;
 
-        virtual void STDMETHODCALLTYPE GetOutputMemory( 
-            /* [annotation][out] */ 
+        MyMem *outMem = nullptr;
+        MyMem *inMem = nullptr;
+
+        virtual void STDMETHODCALLTYPE GetOutputMemory(
+            /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory){
+            printf("MyRequest::GetOutputMemory => %p\r\n", outMem);
             *ppWdfMemory = outMem;
-            //printf("GetOutputMemory\r\n");
-        }
-        
-        virtual void STDMETHODCALLTYPE GetInputMemory( 
-            /* [annotation][out] */ 
-            _Out_  IWDFMemory **ppWdfMemory){
-            *ppWdfMemory = inMem;
-            // printf("GetInputMemory\r\n");
         }
 
-        
-        virtual void STDMETHODCALLTYPE MarkCancelable( 
-            /* [annotation][in] */ 
+        virtual void STDMETHODCALLTYPE GetInputMemory(
+            /* [annotation][out] */
+            _Out_  IWDFMemory **ppWdfMemory){
+            printf("MyRequest::GetInputMemory => %p\r\n", inMem);
+            *ppWdfMemory = inMem;
+        }
+
+        virtual void STDMETHODCALLTYPE MarkCancelable(
+            /* [annotation][in] */
             _In_  IRequestCallbackCancel *pCancelCallback){
-            printf("MarkCancelable\r\n");
-            //this->cancelCallback = pCancelCallback;
+            printf("MyRequest::MarkCancelable\r\n");
+            this->cancelCallback = pCancelCallback;
         }
 
         virtual HRESULT STDMETHODCALLTYPE UnmarkCancelable( void){
-            printf("UnmarkCancelable\r\n");
+            printf("MyRequest::UnmarkCancelable\r\n");
             return 0;
         }
 
-        
+
         virtual BOOL STDMETHODCALLTYPE CancelSentRequest( void){
-            printf("CancelSentRequest\r\n");
+            printf("MyRequest::CancelSentRequest\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE ForwardToIoQueue( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE ForwardToIoQueue(
+            /* [annotation][in] */
             _In_  IWDFIoQueue *pDestination){
-            printf("ForwardToIoQueue\r\n");
+            printf("MyRequest::ForwardToIoQueue\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE Send( 
-            /* [annotation][in] */ 
+        void SetControlData(PWINUSB_SETUP_PACKET SetupPacket,
+                            IWDFMemory *pMemory,
+                            PWDFMEMORY_OFFSET Offset) {
+            printf("MyRequest::SetControlData: %p %p %u\r\n",
+                SetupPacket, pMemory, Offset);
+            m_setupPacket = *SetupPacket;
+            outMem = (MyMem *) pMemory;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE Send(
+            /* [annotation][in] */
             _In_  IWDFIoTarget *pIoTarget,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  ULONG Flags,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  LONGLONG Timeout){
-            printf("Send\r\n");
+            assert(reqType == WdfRequestUsb);
+            printf("MyRequest::Send %p | %u | %ld\r\n", pIoTarget, Flags, Timeout);
+
+            if (Flags != WDF_REQUEST_SEND_OPTION_SYNCHRONOUS) {
+                printf("Flags are not supported: %d\r\n", Flags);
+                return E_NOTIMPL;
+            }
+
+            auto usbDev = (IWDFUsbTargetDevice *) pIoTarget;
+            PUCHAR buffer = nullptr;
+            SIZE_T bufLen = 0;
+            m_sent = 0;
+
+            if (outMem)
+                buffer = (PUCHAR) outMem->GetDataBuffer(&bufLen);
+
+            if (m_setupPacket.Length && !(m_setupPacket.RequestType & 0b10000000)) {
+                printf("-> ");
+                for (SIZE_T i = 0; i < bufLen; ++i) {
+                    printf("%02x", buffer[i]);
+                }
+                printf("\r\n");
+            }
+
+            if (!WinUsb_ControlTransfer(usbDev->GetWinUsbHandle(), m_setupPacket,
+                buffer, bufLen, &m_sent, 0)) {
+                printf("Fail to send data: %d (%s)\n", GetLastError(),
+                    hresult_to_sting(GetLastError()));
+                return GetLastError();
+            }
+
+            printf("Data sent: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+
+            if (m_setupPacket.Length && (m_setupPacket.RequestType & 0b10000000)) {
+                printf("<- ");
+                for (SIZE_T i = 0; i < m_sent; ++i) {
+                    printf("%02x", buffer[i]);
+                }
+                printf("\r\n");
+            }
+
+            outMem = nullptr;
+            inMem = outMem;
+
+            // WDF_REQUEST_SEND_OPTION_TIMEOUT
+            // WDF_REQUEST_SEND_OPTION_IGNORE_TARGET_STATE
+            // WDF_REQUEST_SEND_OPTION_SEND_AND_FORGET
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetFileObject( 
-            /* [annotation][out] */ 
+        virtual void STDMETHODCALLTYPE GetFileObject(
+            /* [annotation][out] */
             _Out_  IWDFFile **ppFileObject){
-            printf("GetFileObject\r\n");
+            printf("MyRequest::GetFileObject\r\n");
         }
 
-        
         virtual void STDMETHODCALLTYPE FormatUsingCurrentType( void){
-            printf("FormatUsingCurrentType\r\n");
+            printf("MyRequest::FormatUsingCurrentType\r\n");
         }
 
-        
         virtual ULONG STDMETHODCALLTYPE GetRequestorProcessId( void){
-            printf("GetRequestorProcessId\r\n");
+            printf("MyRequest::GetRequestorProcessId\r\n");
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetIoQueue( 
-            /* [annotation][out] */ 
+        virtual void STDMETHODCALLTYPE GetIoQueue(
+            /* [annotation][out] */
             _Out_  IWDFIoQueue **ppWdfIoQueue){
-            printf("GetIoQueue\r\n");
+            printf("MyRequest::GetIoQueue\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE Impersonate( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE Impersonate(
+            /* [annotation][in] */
             _In_  SECURITY_IMPERSONATION_LEVEL ImpersonationLevel,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  IImpersonateCallback *pCallback,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  void *pvCallbackContext){
-            printf("Impersonate\r\n");
+            printf("MyRequest::Impersonate\r\n");
             return 0;
         }
 
-        
+
         virtual BOOL STDMETHODCALLTYPE IsFrom32BitProcess( void){
-            printf("IsFrom32BitProcess\r\n");
+            printf("MyRequest::IsFrom32BitProcess\r\n");
             return 1;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetCompletionParams( 
-            /* [annotation][out] */ 
+        virtual void STDMETHODCALLTYPE GetCompletionParams(
+            /* [annotation][out] */
             _Out_  IWDFRequestCompletionParams **ppCompletionParams){
-            printf("GetCompletionParams\r\n");
+            printf("MyRequest::GetCompletionParams\r\n");
+            *ppCompletionParams = new MyUsbRequestCompletionParams(reqType, m_sent);
         }
-
-        
 };
 
 struct MyQueue : public IWDFIoQueue {
@@ -678,146 +1507,1243 @@ struct MyQueue : public IWDFIoQueue {
         IQueueCallbackDeviceIoControl *ioctl=0;
 
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
             LPOLESTR str;
             StringFromIID(riid, &str);
             std::wcout << L"MyQueue::QueryInterface " << str << std::endl;
             *ppvObject = this;
             printf("ppvObject=%p\r\n", *ppvObject);
-            return 0; 
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
-            printf("AddRef\r\n");
-            return 0; 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
+            printf("MyQueue::AddRef\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
+        virtual ULONG STDMETHODCALLTYPE Release() {
             printf("MyQueue::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("DeleteWdfObject\r\n");
-            return 0; 
+            printf("MyQueue::DeleteWdfObject\r\n");
+            return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignContext( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
-            /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  void *pContext) { 
-            printf("AssignContext\r\n");
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) {
+            printf("MyQueue::AssignContext\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveContext( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("RetrieveContext\r\n");
+            printf("MyQueue::RetrieveContext\r\n");
             return 0;
         }
-        
+
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("AcquireLock\r\n");
+            printf("MyQueue::AcquireLock\r\n");
         }
-        
+
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("ReleaseLock\r\n");
+            printf("MyQueue::ReleaseLock\r\n");
         }
     public:
-        virtual void STDMETHODCALLTYPE GetDevice( 
-            /* [annotation][out] */ 
+        virtual void STDMETHODCALLTYPE GetDevice(
+            /* [annotation][out] */
             _Out_  IWDFDevice **ppWdfDevice){
-            printf("GetDevice\r\n");
+            printf("MyQueue::GetDevice\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE ConfigureRequestDispatching( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE ConfigureRequestDispatching(
+            /* [annotation][in] */
             _In_  WDF_REQUEST_TYPE RequestType,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  BOOL Forward){
-            printf("MyQueue::ConfigureRequestDispatching\r\n");
+            printf("MyDevice::ConfigureRequestDispatching (%d, %d)\r\n",
+                RequestType, Forward);
             return 0;
         }
 
-        
-        virtual WDF_IO_QUEUE_STATE STDMETHODCALLTYPE GetState( 
-            /* [annotation][out] */ 
+
+        virtual WDF_IO_QUEUE_STATE STDMETHODCALLTYPE GetState(
+            /* [annotation][out] */
             _Out_  ULONG *pulNumOfRequestsInQueue,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  ULONG *pulNumOfRequestsInDriver){
-            printf("GetState\r\n");
-            return (WDF_IO_QUEUE_STATE)(WdfIoQueueAcceptRequests | 
-                    WdfIoQueueDispatchRequests | 
-                    WdfIoQueueNoRequests | 
+            printf("MyQueue::GetState\r\n");
+            return (WDF_IO_QUEUE_STATE)(WdfIoQueueAcceptRequests |
+                    WdfIoQueueDispatchRequests |
+                    WdfIoQueueNoRequests |
                     WdfIoQueueDriverNoRequests);
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveNextRequest( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveNextRequest(
+            /* [annotation][out] */
             _Out_  IWDFIoRequest **ppRequest){
-            printf("RetrieveNextRequest\r\n");
+            printf("MyQueue::RetrieveNextRequest\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveNextRequestByFileObject( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveNextRequestByFileObject(
+            /* [annotation][in] */
             _In_  IWDFFile *pFile,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFIoRequest **ppRequest){
-            printf("RetrieveNextRequestByFileObject\r\n");
+            printf("MyQueue::RetrieveNextRequestByFileObject\r\n");
             return 0;
         }
 
-        
+
         virtual void STDMETHODCALLTYPE Start( void){
-            printf("Start\r\n");
+            printf("MyQueue::Start\r\n");
         }
 
-        
-        virtual void STDMETHODCALLTYPE Stop( 
-            /* [annotation][unique][in] */ 
+
+        virtual void STDMETHODCALLTYPE Stop(
+            /* [annotation][unique][in] */
             _In_opt_  IQueueCallbackStateChange *pStopComplete){
-            printf("Stop\r\n");
+            printf("MyQueue::Stop\r\n");
         }
 
-        
+
         virtual void STDMETHODCALLTYPE StopSynchronously( void){
-            printf("StopSynchronously\r\n");
+            printf("MyQueue::StopSynchronously\r\n");
         }
 
-        
-        virtual void STDMETHODCALLTYPE Drain( 
-            /* [annotation][unique][in] */ 
+
+        virtual void STDMETHODCALLTYPE Drain(
+            /* [annotation][unique][in] */
             _In_opt_  IQueueCallbackStateChange *pDrainComplete){
-            printf("Drain\r\n");
+            printf("MyQueue::Drain\r\n");
         }
 
-        
+
         virtual void STDMETHODCALLTYPE DrainSynchronously( void){
-            printf("Drain\r\n");
+            printf("MyQueue::Drain\r\n");
         }
 
-        
-        virtual void STDMETHODCALLTYPE Purge( 
-            /* [annotation][unique][in] */ 
+
+        virtual void STDMETHODCALLTYPE Purge(
+            /* [annotation][unique][in] */
             _In_opt_  IQueueCallbackStateChange *pPurgeComplete){
-            printf("Purge\r\n");
+            printf("MyQueue::Purge\r\n");
         }
 
-        
+
         virtual void STDMETHODCALLTYPE PurgeSynchronously( void){
-            printf("Purge\r\n");
+            printf("MyQueue::Purge\r\n");
         }
 
 
 };
 
+/*
+
+#include <usbiodef.h>
+
+typedef struct _DEVICE_GUID_LIST {
+    HDEVINFO   DeviceInfo;
+    LIST_ENTRY ListHead;
+} DEVICE_GUID_LIST, *PDEVICE_GUID_LIST;
+
+typedef struct _DEVICE_INFO_NODE {
+    HDEVINFO                         DeviceInfo;
+    LIST_ENTRY                       ListEntry;
+    SP_DEVINFO_DATA                  DeviceInfoData;
+    SP_DEVICE_INTERFACE_DATA         DeviceInterfaceData;
+    PSP_DEVICE_INTERFACE_DETAIL_DATA DeviceDetailData;
+    PSTR                             DeviceDescName;
+    ULONG                            DeviceDescNameLength;
+    PSTR                             DeviceDriverName;
+    ULONG                            DeviceDriverNameLength;
+    DEVICE_POWER_STATE               LatestDevicePowerState;
+} DEVICE_INFO_NODE, *PDEVICE_INFO_NODE;
+
+
+#define OOPS() { printf("Failed at %d\r\n", __LINE__); }
+
+BOOL
+GetDeviceProperty(
+    _In_    HDEVINFO         DeviceInfoSet,
+    _In_    PSP_DEVINFO_DATA DeviceInfoData,
+    _In_    DWORD            Property,
+    _Outptr_  LPTSTR        *ppBuffer
+    )
+{
+    BOOL bResult;
+    DWORD requiredLength = 0;
+    DWORD lastError;
+
+    if (ppBuffer == NULL)
+    {
+        return FALSE;
+    }
+
+    *ppBuffer = NULL;
+
+    bResult = SetupDiGetDeviceRegistryProperty(DeviceInfoSet,
+                                               DeviceInfoData,
+                                               Property ,
+                                               NULL,
+                                               NULL,
+                                               0,
+                                               &requiredLength);
+    lastError = GetLastError();
+
+    if ((requiredLength == 0) || (bResult != FALSE && lastError != ERROR_INSUFFICIENT_BUFFER))
+    {
+        return FALSE;
+    }
+
+    *ppBuffer = (PSTR) malloc(requiredLength);
+
+    if (*ppBuffer == NULL)
+    {
+        return FALSE;
+    }
+
+    bResult = SetupDiGetDeviceRegistryProperty(DeviceInfoSet,
+                                                DeviceInfoData,
+                                                Property ,
+                                                NULL,
+                                                (PBYTE) *ppBuffer,
+                                                requiredLength,
+                                                &requiredLength);
+    if(bResult == FALSE)
+    {
+        free(*ppBuffer);
+        *ppBuffer = NULL;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+#define InsertTailList(ListHead,Entry) {\
+    PLIST_ENTRY _EX_Blink;\
+    PLIST_ENTRY _EX_ListHead;\
+    _EX_ListHead = (ListHead);\
+    _EX_Blink = _EX_ListHead->Blink;\
+    (Entry)->Flink = _EX_ListHead;\
+    (Entry)->Blink = _EX_Blink;\
+    _EX_Blink->Flink = (Entry);\
+    _EX_ListHead->Blink = (Entry);\
+    }
+
+void
+EnumerateAllDevicesWithGuid(
+    PDEVICE_GUID_LIST DeviceList,
+    LPGUID Guid
+    )
+{
+    if (DeviceList->DeviceInfo != INVALID_HANDLE_VALUE)
+    {
+        // ClearDeviceList(DeviceList);
+    }
+
+    DeviceList->DeviceInfo = SetupDiGetClassDevs(NULL, NULL, NULL, DIGCF_PRESENT|DIGCF_ALLCLASSES);
+    // DeviceList->DeviceInfo = SetupDiGetClassDevs(Guid,
+    //                                  NULL,
+    //                                  NULL,
+    //                                  (DIGCF_PRESENT | DIGCF_DEVICEINTERFACE));
+
+    std::cout << "Device info is " << DeviceList->DeviceInfo << std::endl;
+    if (DeviceList->DeviceInfo != INVALID_HANDLE_VALUE)
+    {
+        ULONG                    index;
+        DWORD error;
+
+        error = 0;
+        index = 0;
+
+        while (error != ERROR_NO_MORE_ITEMS)
+        {
+            BOOL success;
+            PDEVICE_INFO_NODE pNode;
+
+            pNode = (PDEVICE_INFO_NODE) malloc(sizeof(DEVICE_INFO_NODE));
+            if (pNode == NULL)
+            {
+                OOPS();
+                continue;
+            }
+            pNode->DeviceInfo = DeviceList->DeviceInfo;
+            pNode->DeviceInterfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+            pNode->DeviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+
+            success = SetupDiEnumDeviceInfo(DeviceList->DeviceInfo,
+                                            index,
+                                            &pNode->DeviceInfoData);
+            LPOLESTR str;
+            StringFromIID(pNode->DeviceInfoData.ClassGuid, &str);
+            std::wcout << "Device info Date is " << success << " " << str << std::endl;
+
+            index++;
+
+            if (success == FALSE)
+            {
+                error = GetLastError();
+
+                if (error != ERROR_NO_MORE_ITEMS)
+                {
+                    OOPS();
+                    continue;
+                }
+
+                // FreeDeviceInfoNode(&pNode);
+            }
+            else
+            {
+                BOOL   bResult;
+                ULONG  requiredLength;
+
+                bResult = GetDeviceProperty(DeviceList->DeviceInfo,
+                                            &pNode->DeviceInfoData,
+                                            SPDRP_DEVICEDESC,
+                                            &pNode->DeviceDescName);
+                if (bResult == FALSE)
+                {
+                    // FreeDeviceInfoNode(&pNode);
+                    OOPS();
+                    continue;
+                }
+
+                std::cout << "  Device desc name is " << pNode->DeviceDescName << std::endl;
+
+                bResult = GetDeviceProperty(DeviceList->DeviceInfo,
+                                            &pNode->DeviceInfoData,
+                                            SPDRP_DRIVER,
+                                            &pNode->DeviceDriverName);
+                if (bResult == FALSE)
+                {
+                    // FreeDeviceInfoNode(&pNode);
+                    OOPS();
+                    continue;
+                }
+
+                std::cout << "  Device driver name is " << pNode->DeviceDriverName << std::endl;
+
+                pNode->DeviceInterfaceData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+
+                success = SetupDiEnumDeviceInterfaces(DeviceList->DeviceInfo,
+                                                      0,
+                                                      Guid,
+                                                      index-1,
+                                                      &pNode->DeviceInterfaceData);
+                if (!success)
+                {
+                    // FreeDeviceInfoNode(&pNode);
+                    OOPS();
+                    continue;
+                }
+
+                success = SetupDiGetDeviceInterfaceDetail(DeviceList->DeviceInfo,
+                                                          &pNode->DeviceInterfaceData,
+                                                          NULL,
+                                                          0,
+                                                          &requiredLength,
+                                                          NULL);
+
+                error = GetLastError();
+
+                if (!success && error != ERROR_INSUFFICIENT_BUFFER)
+                {
+                    // FreeDeviceInfoNode(&pNode);
+                    OOPS();
+                    continue;
+                }
+
+                pNode->DeviceDetailData = (PSP_DEVICE_INTERFACE_DETAIL_DATA) malloc(requiredLength);
+
+                if (pNode->DeviceDetailData == NULL)
+                {
+                    // FreeDeviceInfoNode(&pNode);
+                    OOPS();
+                    continue;
+                }
+
+                pNode->DeviceDetailData->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+
+                success = SetupDiGetDeviceInterfaceDetail(DeviceList->DeviceInfo,
+                                                          &pNode->DeviceInterfaceData,
+                                                          pNode->DeviceDetailData,
+                                                          requiredLength,
+                                                          &requiredLength,
+                                                          NULL);
+                if (!success)
+                {
+                    // FreeDeviceInfoNode(&pNode);
+                    OOPS();
+                    continue;
+                }
+
+                std::cout << "  DevicePath is " << pNode->DeviceDetailData->DevicePath << std::endl;
+
+                // InsertTailList(&DeviceList->ListHead, &pNode->ListEntry);
+            }
+        }
+    }
+}
+
+static void
+EnumerateAllDevices()
+{
+    DEVICE_GUID_LIST gHubList;
+    DEVICE_GUID_LIST gDeviceList;
+
+    EnumerateAllDevicesWithGuid(&gDeviceList,
+                                (LPGUID)&GUID_DEVINTERFACE_USB_DEVICE);
+
+    EnumerateAllDevicesWithGuid(&gHubList,
+                                (LPGUID)&GUID_DEVINTERFACE_USB_HUB);
+
+    // PLIST_ENTRY       pEntry = NULL;
+    // PDEVICE_INFO_NODE pNode  = NULL;
+    // PDEVICE_GUID_LIST pList = &gHubList;
+
+    // std::wcout << L"Listing HUBS" << std::endl;
+    // pEntry = pList->ListHead.Flink;
+    // while (pEntry != &pList->ListHead)
+    // {
+    //     pNode = CONTAINING_RECORD(pEntry,
+    //                               DEVICE_INFO_NODE,
+    //                               ListEntry);
+    //     std::cout << "Device " << (pNode ? pNode->DeviceDriverName : "<none>") << std::endl;
+    //     pEntry = pEntry->Flink;
+    // }
+
+    // pList = &gDeviceList;
+    // pEntry = pList->ListHead.Flink;
+    // std::wcout << L"Listing DEVS" << std::endl;
+    // while (pEntry != &pList->ListHead)
+    // {
+    //     pNode = CONTAINING_RECORD(pEntry,
+    //                               DEVICE_INFO_NODE,
+    //                               ListEntry);
+    //     std::cout << "Device " << (pNode ? pNode->DeviceDriverName : "<none>") << std::endl;
+    //     pEntry = pEntry->Flink;
+    // }
+}
+
+HRESULT
+RetrieveDevicePath(
+    _Out_ LPTSTR DevicePath,
+    _In_                  ULONG  BufLen,
+    _Out_opt_             PBOOL  FailureDeviceNotFound
+    )
+{
+    CONFIGRET cr = CR_SUCCESS;
+    HRESULT   hr = S_OK;
+    PTSTR     DeviceInterfaceList = NULL;
+    ULONG     DeviceInterfaceListLength = 0;
+
+    if (NULL != FailureDeviceNotFound) {
+        *FailureDeviceNotFound = FALSE;
+    }
+
+    //
+    // Enumerate all devices exposing the interface. Do this in a loop
+    // in case a new interface is discovered while this code is executing,
+    // causing CM_Get_Device_Interface_List to return CR_BUFFER_SMALL.
+    //
+    do {
+        cr = CM_Get_Device_Interface_List_Size(&DeviceInterfaceListLength,
+                                               (LPGUID)&GUID_DEVINTERFACE_USB_DEVICE,
+                                               NULL,
+                                               CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+
+        if (cr != CR_SUCCESS) {
+            hr = E_ABORT;
+            break;
+        }
+
+        DeviceInterfaceList = (PTSTR)HeapAlloc(GetProcessHeap(),
+                                               HEAP_ZERO_MEMORY,
+                                               DeviceInterfaceListLength * sizeof(TCHAR));
+
+        if (DeviceInterfaceList == NULL) {
+            hr = E_OUTOFMEMORY;
+            break;
+        }
+
+        cr = CM_Get_Device_Interface_List((LPGUID)&GUID_DEVINTERFACE_USB_DEVICE,
+                                          NULL,
+                                          DeviceInterfaceList,
+                                          DeviceInterfaceListLength,
+                                          CM_GET_DEVICE_INTERFACE_LIST_PRESENT);
+
+        if (cr != CR_SUCCESS) {
+            HeapFree(GetProcessHeap(), 0, DeviceInterfaceList);
+
+            if (cr != CR_BUFFER_SMALL) {
+                hr = E_ABORT;
+            }
+        }
+    } while (cr == CR_BUFFER_SMALL);
+
+    if (FAILED(hr)) {
+        return hr;
+    }
+
+    //
+    // If the interface list is empty, no devices were found.
+    //
+    if (*DeviceInterfaceList == TEXT('\0')) {
+        if (NULL != FailureDeviceNotFound) {
+            *FailureDeviceNotFound = TRUE;
+        }
+
+        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        HeapFree(GetProcessHeap(), 0, DeviceInterfaceList);
+        return hr;
+    }
+
+    //
+    // Give path of the first found device interface instance to the caller. CM_Get_Device_Interface_List ensured
+    // the instance is NULL-terminated.
+    //
+    // hr = StringCbCopy(DevicePath,
+    //                   BufLen,
+    //                   DeviceInterfaceList);
+
+    // HeapFree(GetProcessHeap(), 0, DeviceInterfaceList);
+
+    return hr;
+}
+*/
 
 MyQueue *myQueue = 0;
+
+class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
+    public:
+        MyUsbTargetPipe(
+            WINUSB_INTERFACE_HANDLE winUsbHandle,
+            USBD_PIPE_TYPE PipeType,
+            UCHAR PipeId,
+            USHORT MaximumPacketSize,
+            UCHAR Interval)
+            : m_WinUsbHandle(winUsbHandle),
+                m_PipeId(PipeId),
+                m_PipeType(PipeType),
+                m_MaxPacketSize(MaximumPacketSize),
+                m_Interval(Interval) {
+            printf("MyUsbTargetPipe::MyUsbTargetPipe %d 0x%x\r\n",
+                m_PipeType, m_PipeId);
+        }
+
+        virtual ULONG STDMETHODCALLTYPE AddRef() override {
+            printf("MyUsbTargetPipe::AddRef\r\n");
+            return 0;
+        }
+
+        virtual ULONG STDMETHODCALLTYPE Release() override {
+            printf("MyUsbTargetPipe::Release\r\n");
+            return 0;
+        }
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            LPOLESTR str;
+            StringFromIID(riid, &str);
+            std::wcout << L"MyUsbTargetPipe::QueryInterface " << str << std::endl;
+            *ppvObject = this;
+            printf("ppvObject=%p\r\n", *ppvObject);
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
+            printf("MyUsbTargetPipe::DeleteWdfObject\r\n");
+            return 0;
+        }
+
+        virtual void STDMETHODCALLTYPE AcquireLock() override {
+            printf("MyUsbTargetPipe::AcquireLock\r\n");
+        }
+
+        virtual void STDMETHODCALLTYPE ReleaseLock() override {
+            printf("MyUsbTargetPipe::ReleaseLock\r\n");
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) override {
+            printf("MyUsbTargetPipe::AssignContext\r\n");
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
+            _Out_  void **ppvContext) override {
+            printf("MyUsbTargetPipe::RetrieveContext\r\n");
+            return 0;
+        }
+
+        virtual void STDMETHODCALLTYPE GetTargetFile(
+            /* [annotation][out] */
+            _Out_  IWDFFile **ppWdfFile) override {
+            printf("MyUsbTargetPipe::GetTargetFile\r\n");
+            *ppWdfFile = NULL;
+        }
+
+        virtual void STDMETHODCALLTYPE CancelSentRequestsForFile(
+            /* [annotation][in] */
+            _In_  IWDFFile *pFile) override {
+            printf("MyUsbTargetPipe::CancelSentRequestsForFile\r\n");
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE FormatRequestForRead(
+            /* [annotation][in] */
+            _In_  IWDFIoRequest *pRequest,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFFile *pFile,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pOutputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset,
+            /* [annotation][unique][in] */
+            _In_opt_  PLONGLONG DeviceOffset) override {
+            printf("MyUsbTargetPipe::FormatRequestForRead\r\n");
+            return S_OK;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE FormatRequestForWrite(
+            /* [annotation][in] */
+            _In_  IWDFIoRequest *pRequest,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFFile *pFile,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pInputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pInputMemoryOffset,
+            /* [annotation][unique][in] */
+            _In_opt_  PLONGLONG DeviceOffset) override {
+            printf("MyUsbTargetPipe::FormatRequestForWrite\r\n");
+            return S_OK;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE FormatRequestForIoctl(
+            /* [annotation][in] */
+            _In_  IWDFIoRequest *pRequest,
+            /* [annotation][in] */
+            _In_  ULONG IoctlCode,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFFile *pFile,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pInputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pInputMemoryOffset,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pOutputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset) override {
+            printf("MyUsbTargetPipe::FormatRequestForIoctl\r\n");
+            return S_OK;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE Abort() override {
+            printf("MyUsbTargetPipe::Abort\r\n");
+
+            if (!WinUsb_AbortPipe(m_WinUsbHandle, m_PipeId)) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            return S_OK;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE Reset() override {
+            printf("MyUsbTargetPipe::Reset\r\n");
+
+            if (!WinUsb_ResetPipe(m_WinUsbHandle, m_PipeId)) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            return S_OK;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE Flush() override {
+            printf("MyUsbTargetPipe::Flush\r\n");
+
+            if (!WinUsb_FlushPipe(m_WinUsbHandle, m_PipeId)) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            return S_OK;
+        }
+
+        virtual void STDMETHODCALLTYPE GetInformation(_Out_ PWINUSB_PIPE_INFORMATION pInfo) override {
+            printf("MyUsbTargetPipe::GetInformation %d 0x%x\r\n", m_PipeType, m_PipeId);
+            pInfo->PipeType = m_PipeType;
+            pInfo->PipeId = m_PipeId;
+            pInfo->MaximumPacketSize = m_MaxPacketSize;
+            pInfo->Interval = m_Interval;
+        }
+
+        virtual BOOL STDMETHODCALLTYPE IsInEndPoint() override {
+            printf("MyUsbTargetPipe::IsInEndPoint\r\n");
+
+            return (m_PipeId & 0x80) != 0;
+        }
+
+        virtual BOOL STDMETHODCALLTYPE IsOutEndPoint() override {
+            printf("MyUsbTargetPipe::IsOutEndPoint\r\n");
+
+            return (m_PipeId & 0x80) == 0;
+        }
+
+        virtual USBD_PIPE_TYPE STDMETHODCALLTYPE GetType() override {
+            printf("MyUsbTargetPipe::GetType\r\n");
+
+            return m_PipeType;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrievePipePolicy(
+            _In_ ULONG PolicyType,
+            _Inout_ ULONG* ValueLength,
+            _Out_ PVOID Value) override {
+            printf("MyUsbTargetPipe::RetrievePipePolicy\r\n");
+
+            if (!WinUsb_GetPipePolicy(
+                    m_WinUsbHandle,
+                    m_PipeId,
+                    PolicyType,
+                    ValueLength,
+                    Value)) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            return S_OK;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE SetPipePolicy(
+            _In_ ULONG PolicyType,
+            _In_ ULONG ValueLength,
+            _In_ PVOID Value) override {
+            printf("MyUsbTargetPipe::SetPipePolicy\r\n");
+
+            if (!WinUsb_SetPipePolicy(
+                m_WinUsbHandle,
+                m_PipeId,
+                PolicyType,
+                ValueLength,
+                Value
+            )) {
+                return HRESULT_FROM_WIN32(GetLastError());
+            }
+            return S_OK;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE ConfigureContinuousReader(
+            /* [annotation][in] */
+            _In_  SIZE_T TransferLength,
+            /* [annotation][in] */
+            _In_  SIZE_T HeaderLength,
+            /* [annotation][in] */
+            _In_  SIZE_T TrailerLength,
+            /* [annotation][in] */
+            _In_  UCHAR NumPendingReads,
+            /* [annotation][unique][in] */
+            _In_opt_  IUnknown *pMemoryCleanupCallbackInterface,
+            /* [annotation][in] */
+            _In_  IUsbTargetPipeContinuousReaderCallbackReadComplete *pOnCompletion,
+            /* [annotation][unique][in] */
+            _In_opt_  PVOID pCompletionContext,
+            /* [annotation][unique][in] */
+            _In_opt_  IUsbTargetPipeContinuousReaderCallbackReadersFailed *pOnFailure) override {
+            printf("MyUsbTargetPipe::ConfigureContinuousReader\r\n");
+            return S_OK;
+        }
+
+    private:
+        WINUSB_INTERFACE_HANDLE m_WinUsbHandle;
+        UCHAR m_PipeId;
+        USBD_PIPE_TYPE m_PipeType;
+        ULONG m_MaxPacketSize;
+        ULONG m_Interval;
+};
+
+class MyUsbInterface : public IWDFUsbInterface {
+    public:
+        MyUsbInterface(UCHAR idx, WINUSB_INTERFACE_HANDLE handle)
+            : m_idx(idx), m_handle(handle) {}
+
+        virtual ULONG STDMETHODCALLTYPE AddRef() override {
+            printf("MyUsbInterface::AddRef\r\n");
+            return 0;
+        }
+        virtual ULONG STDMETHODCALLTYPE Release() override {
+            printf("MyUsbInterface::Release\r\n");
+            return 0;
+        }
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            LPOLESTR str;
+            StringFromIID(riid, &str);
+            std::wcout << L"MyUsbInterface::QueryInterface " << str << std::endl;
+            *ppvObject = this;
+            printf("ppvObject=%p\r\n", *ppvObject);
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
+            printf("MyUsbInterface::DeleteWdfObject\r\n");
+            return 0;
+        }
+
+        virtual void STDMETHODCALLTYPE AcquireLock() override {
+            printf("MyUsbInterface::AcquireLock\r\n");
+        }
+
+        virtual void STDMETHODCALLTYPE ReleaseLock() override {
+            printf("MyUsbInterface::ReleaseLock\r\n");
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) override {
+            printf("MyUsbInterface::AssignContext\r\n");
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
+            _Out_  void **ppvContext) override {
+            printf("MyUsbInterface::RetrieveContext\r\n");
+            return 0;
+        }
+
+        virtual void STDMETHODCALLTYPE GetInterfaceDescriptor(
+            /* [annotation][out] */
+            _Out_  PUSB_INTERFACE_DESCRIPTOR UsbAltInterfaceDescriptor) override {
+            printf("MyUsbInterface::GetInterfaceDescriptor\r\n");
+        }
+
+        virtual UCHAR STDMETHODCALLTYPE GetInterfaceNumber() override {
+            printf("MyUsbInterface::GetInterfaceNumber\r\n");
+            return m_idx;
+        }
+
+        virtual UCHAR STDMETHODCALLTYPE GetNumEndPoints() override {
+            printf("MyUsbInterface::GetNumEndPoints\r\n");
+            return 3;
+        }
+
+        virtual UCHAR STDMETHODCALLTYPE GetConfiguredSettingIndex() override {
+            printf("MyUsbInterface::GetConfiguredSettingIndex\r\n");
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE SelectSetting(
+            /* [annotation][in] */
+            _In_  UCHAR SettingNumber) override {
+            printf("MyUsbInterface::SelectSetting\r\n");
+            return 0;
+        }
+
+        virtual WINUSB_INTERFACE_HANDLE STDMETHODCALLTYPE GetWinUsbHandle() override {
+            printf("MyUsbInterface::GetWinUsbHandle\r\n");
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveUsbPipeObject(
+            /* [annotation][in] */
+            _In_  UCHAR PipeIndex,
+            /* [annotation][out] */
+            _Out_  IWDFUsbTargetPipe **ppPipe) override {
+            printf("MyUsbInterface::IWDFUsbTargetPipe 0x%x\r\n", PipeIndex);
+
+            WINUSB_PIPE_INFORMATION pipeInfo;
+            if (!WinUsb_QueryPipe(GetWinUsbHandle(), m_idx, PipeIndex, &pipeInfo)) {
+                printf("Impossible to get pipe informatio!\r\n");
+                return E_NOTIMPL;
+            }
+
+            *ppPipe = new MyUsbTargetPipe(m_handle, pipeInfo.PipeType,
+                pipeInfo.PipeId, pipeInfo.MaximumPacketSize, pipeInfo.Interval);
+            return 0;
+        }
+
+    private:
+        UCHAR m_idx;
+        WINUSB_INTERFACE_HANDLE m_handle;
+    };
+
+class MyUsbTargetDevice : public IWDFUsbTargetDevice {
+public:
+        MyUsbTargetDevice(WINUSB_INTERFACE_HANDLE handle) : m_handle(handle) {
+            printf("MyUsbTargetDevice::MyUsbTargetDevice: %p\r\n", this);
+
+            // Get device descriptor
+            USB_DEVICE_DESCRIPTOR devDesc;
+            ULONG len;
+            if (!WinUsb_GetDescriptor(m_handle, USB_DEVICE_DESCRIPTOR_TYPE,
+                                      0, 0, (PUCHAR)&devDesc, sizeof(devDesc), &len)) {
+                printf("WinUsb_GetDescriptor (device) failed: %d\r\n", GetLastError());
+                return;
+            }
+
+            printf("Found USB %lu configurations\n", devDesc.bNumConfigurations);
+
+            for (UCHAR i = 0; i < devDesc.bNumConfigurations; i++) {
+                 USB_CONFIGURATION_DESCRIPTOR configHeader;
+
+                if (!WinUsb_GetDescriptor(m_handle, USB_CONFIGURATION_DESCRIPTOR_TYPE,
+                                          i, 0, (PUCHAR)&configHeader,
+                                          sizeof(configHeader), &len)) {
+                    continue;
+                }
+
+                m_configDesc = &configHeader;
+                printf("Found USB Configuration descriptor %p (real size %lu)\n", m_configDesc, len);
+                break;
+            }
+
+            if (!m_configDesc) {
+                printf("Active configuration not found\r\n");
+                return;
+            }
+
+            std::wcout
+                << L"  =======================" << std::endl
+                << L"  bLength: " << m_configDesc->bLength << std::endl
+                << L"  bDescriptorType: " << m_configDesc->bDescriptorType << std::endl
+                << L"  wTotalLength: " << m_configDesc->wTotalLength << std::endl
+                << L"  bNumInterfaces: " << m_configDesc->bNumInterfaces << std::endl
+                << L"  bConfigurationValue: " << m_configDesc->bConfigurationValue << std::endl
+                << L"  iConfiguration: " << m_configDesc->iConfiguration << std::endl
+                << L"  bmAttributes: " << m_configDesc->bmAttributes << std::endl
+                << L"  MaxPower: " << m_configDesc->MaxPower << std::endl
+                << L"  =======================" << std::endl;
+
+            // for (UCHAR i = 0; i < pConfigDesc->bNumInterfaces; i++) {
+            //      USB_INTERFACE_DESCRIPTOR iface_desc;
+
+            //     if (!WinUsb_GetDescriptor(m_handle, USB_INTERFACE_DESCRIPTOR_TYPE,
+            //                               i, 0, (PUCHAR)&iface_desc,
+            //                               sizeof(iface_desc), &len)) {
+            //         continue;
+            //     }
+
+            //     printf("Found USB Interface descriptor %u\n", i);
+            //     break;
+            // }
+
+            // TODO: Let's not bother for now checking the oher interfaces, we
+            // only care on the first one for now.
+
+            // // Parse interfaces
+            // PUCHAR p = (PUCHAR)(pConfigDesc) + pConfigDesc->bLength;
+            // ULONG totalLength = pConfigDesc->wTotalLength - pConfigDesc->bLength;
+
+            // while (totalLength > 0) {
+            //     printf("Handling p at %p | totalLength %lu\n", p, totalLength);
+            //     UCHAR descLen = p[0];
+            //     UCHAR descType = p[1];
+
+            //     if (descType == USB_INTERFACE_DESCRIPTOR_TYPE && descLen >= sizeof(USB_INTERFACE_DESCRIPTOR)) {
+            //         PUSB_INTERFACE_DESCRIPTOR iface = (PUSB_INTERFACE_DESCRIPTOR)p;
+            //         printf("Interface #%d, Alternate %d: Class=0x%02X, SubClass=0x%02X, Protocol=0x%02X, Endpoints=%d\n",
+            //             iface->bInterfaceNumber, iface->bAlternateSetting,
+            //             iface->bInterfaceClass, iface->bInterfaceSubClass, iface->bInterfaceProtocol,
+            //             iface->bNumEndpoints);
+            //     }
+
+            //     descLen = std::max(sizeof(USB_INTERFACE_DESCRIPTOR), size_t(descLen));
+            //     if (descLen > totalLength)
+            //         break;
+
+            //     totalLength -= descLen;
+            //     p += descLen;
+            // }
+        }
+
+        virtual ULONG STDMETHODCALLTYPE AddRef() override {
+            printf("MyUsbTargetDevice::AddRef\r\n");
+            return 0;
+        }
+        virtual ULONG STDMETHODCALLTYPE Release() override {
+            printf("MyUsbTargetDevice::Release\r\n");
+            return 0;
+        }
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            LPOLESTR str;
+            StringFromIID(riid, &str);
+            std::wcout << L"MyUsbTargetDevice::QueryInterface " << str << std::endl;
+            if (!IsEqualIID(riid, IID_IWDFUsbTargetDevice) &&
+                !IsEqualIID(riid, IID_UsbTargetAliasMaybe)) {
+                std::wcout << L" NOT FOUND!" << std::endl;
+                return 0;
+                // return E_NOINTERFACE;
+            }
+
+            *ppvObject = this;
+            printf("ppvObject=%p\r\n", *ppvObject);
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
+            printf("MyUsbTargetDevice::DeleteWdfObject\r\n");
+            return 0;
+        }
+
+        virtual void STDMETHODCALLTYPE AcquireLock() override {
+            printf("MyUsbTargetDevice::AcquireLock\r\n");
+        }
+
+        virtual void STDMETHODCALLTYPE ReleaseLock() override {
+            printf("MyUsbTargetDevice::ReleaseLock\r\n");
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) override {
+            printf("MyUsbTargetDevice::AssignContext\r\n");
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
+            _Out_  void **ppvContext) override {
+            printf("MyUsbTargetDevice::RetrieveContext\r\n");
+            return 0;
+        }
+
+        virtual void STDMETHODCALLTYPE GetTargetFile(
+            /* [annotation][out] */
+            _Out_  IWDFFile **ppWdfFile) override {
+            printf("MyUsbTargetDevice::GetTargetFile\r\n");
+        };
+
+        virtual void STDMETHODCALLTYPE CancelSentRequestsForFile(
+            /* [annotation][in] */
+            _In_  IWDFFile *pFile) override {
+            printf("MyUsbTargetDevice::CancelSentRequestsForFile\r\n");
+        };
+
+        virtual HRESULT STDMETHODCALLTYPE FormatRequestForRead(
+            /* [annotation][in] */
+            _In_  IWDFIoRequest *pRequest,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFFile *pFile,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pOutputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset,
+            /* [annotation][unique][in] */
+            _In_opt_  PLONGLONG DeviceOffset) override {
+            printf("MyUsbTargetDevice::FormatRequestForRead\r\n");
+            return 0;
+        };
+
+        virtual HRESULT STDMETHODCALLTYPE FormatRequestForWrite(
+            /* [annotation][in] */
+            _In_  IWDFIoRequest *pRequest,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFFile *pFile,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pInputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pInputMemoryOffset,
+            /* [annotation][unique][in] */
+            _In_opt_  PLONGLONG DeviceOffset) override {
+            printf("MyUsbTargetDevice::FormatRequestForWrite\r\n");
+            return 0;
+        };
+
+        virtual HRESULT STDMETHODCALLTYPE FormatRequestForIoctl(
+            /* [annotation][in] */
+            _In_  IWDFIoRequest *pRequest,
+            /* [annotation][in] */
+            _In_  ULONG IoctlCode,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFFile *pFile,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pInputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pInputMemoryOffset,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pOutputMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset) override {
+            printf("MyUsbTargetDevice::FormatRequestForIoctl\r\n");
+            return 0;
+        };
+
+        virtual WINUSB_INTERFACE_HANDLE STDMETHODCALLTYPE GetWinUsbHandle() override {
+            printf("MyUsbTargetDevice::GetWinUsbHandle\r\n");
+            return m_handle;
+        }
+
+        virtual UCHAR STDMETHODCALLTYPE GetNumInterfaces() override {
+            printf("MyUsbTargetDevice::GetNumInterfaces\r\n");
+            return m_configDesc ? m_configDesc->bNumInterfaces : 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveUsbInterface(
+            /* [annotation][in] */
+            _In_  UCHAR InterfaceIndex,
+            /* [annotation][out] */
+            _Out_  IWDFUsbInterface **ppUsbInterface) override {
+                printf("MyUsbTargetDevice::RetrieveUsbInterface %x\r\n", InterfaceIndex);
+                *ppUsbInterface = new MyUsbInterface(InterfaceIndex, m_handle);
+                return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE FormatRequestForControlTransfer(
+            /* [annotation][in] */
+            _In_  IWDFIoRequest *pRequest,
+            /* [annotation][in] */
+            _In_  PWINUSB_SETUP_PACKET SetupPacket,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFMemory *pMemory,
+            /* [annotation][unique][in] */
+            _In_opt_  PWDFMEMORY_OFFSET TransferOffset) override {
+                printf("MyUsbTargetDevice::FormatRequestForControlTransfer: %p %p\r\n",
+                    pRequest, pMemory);
+
+                char buf[10] = {0};
+                snprintf(buf, sizeof(buf), "0x%x", SetupPacket->RequestType);
+                std::wcout
+                    << L"  =======================" << std::endl
+                    << L"  RequestType: " << buf << std::endl
+                    << L"  RequestType.Direction: " << (SetupPacket->Length ? (SetupPacket->RequestType & 0b10000000) >> 7 : -1) << std::endl
+                    << L"  RequestType.Type: " << ((SetupPacket->RequestType & 0b01100000) >> 5) << std::endl
+                    << L"  RequestType.Recipient: " << (SetupPacket->RequestType & 0b00011111) << std::endl
+                    << L"  Request: " << SetupPacket->Request << std::endl
+                    << L"  Value: " << SetupPacket->Value << std::endl
+                    << L"  Index: " << SetupPacket->Index << std::endl
+                    << L"  Length: " << SetupPacket->Length << std::endl
+                    << L"  =======================" << std::endl;
+
+                if (pRequest == nullptr)
+                    return E_ABORT;
+
+                auto *myReq = (MyRequest *) pRequest;
+                myReq->SetControlData(SetupPacket, pMemory, TransferOffset);
+
+                return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceInformation(
+            /* [annotation][in] */
+            _In_  ULONG InformationType,
+            /* [annotation][out][in] */
+            _Inout_  ULONG *BufferLength,
+            /* [annotation][out] */
+            _Out_  PVOID Buffer) override {
+                printf("MyUsbTargetDevice::RetrieveDeviceInformation %lx\r\n",
+                    InformationType);
+                // If InformationType is DEVICE_SPEED (0x01), on successful return,
+                //  Buffer indicates the operating speed of the device.
+                // 0x03 indicates high-speed or higher; 0x01 indicates full-speed or lower.
+                assert(BufferLength && *BufferLength == 1);
+                if (InformationType == DEVICE_SPEED)
+                    memset(Buffer, 1, 1);
+                return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDescriptor(
+            /* [annotation][in] */
+            _In_  UCHAR DescriptorType,
+            /* [annotation][in] */
+            _In_  UCHAR Index,
+            /* [annotation][in] */
+            _In_  USHORT LanguageID,
+            /* [annotation][out][in] */
+            _Inout_  ULONG *BufferLength,
+            /* [annotation][out] */
+            _Out_  PVOID Buffer) override {
+                printf("MyUsbTargetDevice::RetrieveDescriptor\r\n");
+                return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrievePowerPolicy(
+            /* [annotation][in] */
+            _In_  ULONG PolicyType,
+            /* [annotation][out][in] */
+            _Inout_  ULONG *ValueLength,
+            /* [annotation][out] */
+            _Out_  PVOID Value) override {
+                printf("MyUsbTargetDevice::RetrievePowerPolicy\r\n");
+                return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE SetPowerPolicy(
+            /* [annotation][in] */
+            _In_  ULONG PolicyType,
+            /* [annotation][in] */
+            _In_  ULONG ValueLength,
+            /* [annotation][in] */
+            _In_  PVOID Value) override {
+                printf("MyUsbTargetDevice::SetPowerPolicy %d\r\n", PolicyType);
+                return 0;
+        }
+
+    private:
+        WINUSB_INTERFACE_HANDLE m_handle;
+        PUSB_CONFIGURATION_DESCRIPTOR m_configDesc = NULL;
+};
+
+class MyUsbTargetFactory : public IWDFUsbTargetFactory {
+public:
+        virtual ULONG STDMETHODCALLTYPE AddRef() override {
+            printf("MyUsbTargetFactory::AddRef\r\n");
+            return 0;
+        }
+        virtual ULONG STDMETHODCALLTYPE Release() override {
+            printf("MyUsbTargetFactory::Release\r\n");
+            return 0;
+        }
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            LPOLESTR str;
+            StringFromIID(riid, &str);
+            std::wcout << L"MyUsbTargetFactory::QueryInterface " << str << std::endl;
+            *ppvObject = this;
+            printf("ppvObject=%p\r\n", *ppvObject);
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE CreateUsbTargetDevice(
+            _Out_  IWDFUsbTargetDevice **ppDevice) override {
+            printf("MyUsbTargetFactory::CreateUsbTargetDevice\r\n");
+#if 0
+            // To be fair... Enumerate the devices and only get the ones we care about.
+            static const char dPath[] =  "\\\\?\\usb#vid_047d&pid_00f2#de88bf659e72#{a5dcbf10-6530-11d2-901f-00c04fb951ed}";
+#else
+            static const char dPath[] =  "c:\\usb.txt";
+#endif
+            HANDLE deviceHandle = CreateFile(dPath, GENERIC_READ |
+                                             GENERIC_WRITE, FILE_SHARE_READ |
+                                             FILE_SHARE_WRITE,
+                                             NULL, OPEN_EXISTING,
+                                             FILE_ATTRIBUTE_NORMAL |
+                                             FILE_FLAG_OVERLAPPED, NULL);
+
+            if (deviceHandle == INVALID_HANDLE_VALUE) {
+                printf("CreateFile failed: %d (%s)\n",
+                    GetLastError(), hresult_to_sting(GetLastError()));
+                return E_FAIL;
+            }
+
+            WINUSB_INTERFACE_HANDLE winusbHandle = NULL;
+            if (!WinUsb_Initialize(deviceHandle, &winusbHandle)) {
+                printf("WinUsb_Initialize failed: %d (%s)\n", GetLastError(),
+                    hresult_to_sting(GetLastError()));
+                CloseHandle(deviceHandle);
+                return E_FAIL;
+            }
+
+            *ppDevice = new MyUsbTargetDevice(winusbHandle);
+            return 0;
+        }
+};
 
 struct MyDevice;
 
@@ -826,17 +2752,20 @@ MyDevice *myDevice = 0;
 
 struct MyDevice : public IWDFDevice3 {
     public:
-        MyDevice(IUnknown *pCallbackInterface) {
+        MyDevice(IWDFDriver *driver, IUnknown *pCallbackInterface) : m_driver(driver) {
             pCallbackInterface->AddRef();
             pCallbackInterface->QueryInterface(IID_IPnpCallbackHardware, (LPVOID*)&pnphwcb);
+            pCallbackInterface->QueryInterface(IID_IPnpCallbackHardware2, (LPVOID*)&pnphwcb2);
             pCallbackInterface->QueryInterface(IID_IPnpCallback, (LPVOID*)&pnpcb);
-            printf("pnphwcb=%p pnpcb=%p\r\n", pnphwcb, pnpcb);
+            printf("NewDevice: pnphwcb=%p, pnphwcb2=%p, pnpcb=%p\r\n", pnphwcb, pnphwcb2, pnpcb);
         }
 
         IPnpCallbackHardware *pnphwcb;
+        IPnpCallbackHardware2 *pnphwcb2;
         IPnpCallback *pnpcb;
+        IWDFDriver *m_driver;
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
             LPOLESTR str;
             StringFromIID(riid, &str);
             std::wcout << L"MyDevice::QueryInterface " << str << std::endl;
@@ -844,135 +2773,141 @@ struct MyDevice : public IWDFDevice3 {
             if(IsEqualIID(riid, IID_IWDFPropertyStoreFactory)) {
                 printf("is IID_IWDFPropertyStoreFactory\r\n");
                 *ppvObject = new MyPropertyStoreFactory();
-            } else {
+            } else if (IsEqualIID(riid, IID_IWDFDevice3)) {
                 printf("is IID_IWDFDevice3\r\n");
                 *ppvObject = (IWDFDevice3*)this;
+            } else if (IsEqualIID(riid, IID_IWDFUsbTargetFactory)) {
+                printf("is IID_IWDFUsbTargetFactory\r\n");
+                *ppvObject = new MyUsbTargetFactory();
             }
             printf("ppvObject=%p\r\n", *ppvObject);
-            return 0; 
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
             printf("AddRef\r\n");
-            return 0; 
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
+        virtual ULONG STDMETHODCALLTYPE Release() {
             printf("MyDevice::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("DeleteWdfObject\r\n");
-            return 0; 
+            printf("MyDevice::DeleteWdfObject\r\n");
+            return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignContext( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
-            /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  void *pContext) { 
-            printf("AssignContext\r\n");
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) {
+            printf("MyDevice::AssignContext\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveContext( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("RetrieveContext\r\n");
+            printf("MyDevice::RetrieveContext\r\n");
             return 0;
         }
-        
+
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("AcquireLock\r\n");
+            printf("MyDevice::AcquireLock\r\n");
         }
-        
+
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("ReleaseLock\r\n");
+            printf("MyDevice::ReleaseLock\r\n");
         }
 
     public:
-        virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore( 
-            /* [annotation][unique][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore(
+            /* [annotation][unique][in] */
             _In_opt_  PCWSTR pcwszServiceName,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_PROPERTY_STORE_RETRIEVE_FLAGS Flags,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFNamedPropertyStore **ppPropStore,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  WDF_PROPERTY_STORE_DISPOSITION *pDisposition){
-            printf("RetrieveDevicePropertyStore\r\n");
+            printf("MyDevice::RetrieveDevicePropertyStore\r\n");
             *ppPropStore = new MyNamedPropertyStore();
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetDriver( 
-            /* [annotation][out] */ 
+
+        virtual void STDMETHODCALLTYPE GetDriver(
+            /* [annotation][out] */
             _Out_  IWDFDriver **ppWdfDriver){
-            printf("GetDriver\r\n");
+            printf("MyDevice::GetDriver\r\n");
+            *ppWdfDriver = m_driver;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceInstanceId( 
-            /* [annotation][unique][out][string] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceInstanceId(
+            /* [annotation][unique][out][string] */
             _Out_opt_  PWSTR Buffer,
-            /* [annotation][out][in] */ 
+            /* [annotation][out][in] */
             _Inout_  DWORD *pdwSizeInChars){
-            printf("RetrieveDeviceInstanceId\r\n");
+            printf("MyDevice::RetrieveDeviceInstanceId\r\n");
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetDefaultIoTarget( 
-            /* [annotation][out] */ 
+
+        virtual void STDMETHODCALLTYPE GetDefaultIoTarget(
+            /* [annotation][out] */
             _Out_  IWDFIoTarget **ppWdfIoTarget){
-            printf("GetDefaultIoTarget\r\n");
+            printf("MyDevice::GetDefaultIoTarget\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateWdfFile( 
-            /* [annotation][string][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateWdfFile(
+            /* [annotation][string][unique][in] */
             _In_opt_  LPCWSTR pcwszFileName,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFDriverCreatedFile **ppFile){
-            printf("CreateWdfFile\r\n");
+            printf("MyDevice::CreateWdfFile\r\n");
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetDefaultIoQueue( 
-            /* [annotation][out] */ 
+
+        virtual void STDMETHODCALLTYPE GetDefaultIoQueue(
+            /* [annotation][out] */
             _Out_  IWDFIoQueue **ppWdfIoQueue){
-            printf("GetDefaultIoQueue\r\n");
+            printf("MyDevice::GetDefaultIoQueue\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateIoQueue( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateIoQueue(
+            /* [annotation][in] */
             _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  BOOL bDefaultQueue,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_IO_QUEUE_DISPATCH_TYPE DispatchType,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  BOOL bPowerManaged,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  BOOL bAllowZeroLengthRequests,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFIoQueue **ppIoQueue){
-            printf("MyDevice::CreateIoQueue\r\n");
+            printf("MyDevice::CreateIoQueue (%p, %d, %d, %d, %d, %d)\r\n",
+                pCallbackInterface, bDefaultQueue, DispatchType, bPowerManaged,
+                bAllowZeroLengthRequests);
             *ppIoQueue = myQueue = new MyQueue(pCallbackInterface);
             printf("new queue=%p\r\n", *ppIoQueue);
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateDeviceInterface( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateDeviceInterface(
+            /* [annotation][in] */
             _In_  LPCGUID pDeviceInterfaceGuid,
-            /* [annotation][unique][string][in] */ 
+            /* [annotation][unique][string][in] */
             _In_opt_  PCWSTR pReferenceString){
-            //printf("CreateDeviceInterface\r\n");
+            // this ois of type GUID_DEVINTERFACE_BIOMETRIC_READER
             LPOLESTR str;
             StringFromIID(*pDeviceInterfaceGuid, &str);
             std::wcout << L"MyDevice::CreateDeviceInterface "
@@ -981,13 +2916,13 @@ struct MyDevice : public IWDFDevice3 {
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignDeviceInterfaceState( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignDeviceInterfaceState(
+            /* [annotation][in] */
             _In_  LPCGUID pDeviceInterfaceGuid,
-            /* [annotation][unique][string][in] */ 
+            /* [annotation][unique][string][in] */
             _In_opt_  PCWSTR pReferenceString,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  BOOL Enable){
             //printf("AssignDeviceInterfaceState\r\n");
             LPOLESTR str;
@@ -1000,481 +2935,578 @@ struct MyDevice : public IWDFDevice3 {
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceName( 
-            /* [annotation][unique][out][string] */ 
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceName(
+            /* [annotation][unique][out][string] */
             _Out_writes_to_opt_(*pdwDeviceNameLength, *pdwDeviceNameLength)  PWSTR pDeviceName,
-            /* [annotation][out][in] */ 
+            /* [annotation][out][in] */
             _Inout_  DWORD *pdwDeviceNameLength){
-            printf("RetrieveDeviceName %p %lu\r\n", pDeviceName, *pdwDeviceNameLength);
-            static const wchar_t name[] =  L"c:\\usb.txt";
+            printf("MyDevice::RetrieveDeviceName %p %lu\r\n", pDeviceName, *pdwDeviceNameLength);
+            // FIXME: Get it enumerating the USB maybe?
+            static const wchar_t name[] =  L"VeriMark DT Fingerprint Key";
+            // static const wchar_t name[] =  L"c:\\usb.txt";
             //static const wchar_t name[] =  L"c:\\UMDF.txt";
             if(pDeviceName) {
                 wcscpy(pDeviceName, name);
                 //Sleep(5000);
             }
+            // Always return the length, since the driver uses it to allocate the memory.
             *pdwDeviceNameLength = sizeof(name);
             //Sleep(5000);
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE PostEvent( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE PostEvent(
+            /* [annotation][in] */
             _In_  REFGUID EventGuid,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_EVENT_TYPE EventType,
-            /* [annotation][size_is][in] */ 
+            /* [annotation][size_is][in] */
             _In_reads_bytes_(cbDataSize)  BYTE *pbData,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  DWORD cbDataSize){
-            printf("PostEvent\r\n");
+            printf("MyDevice::PostEvent\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE ConfigureRequestDispatching( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE ConfigureRequestDispatching(
+            /* [annotation][in] */
             _In_  IWDFIoQueue *pQueue,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_REQUEST_TYPE RequestType,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  BOOL Forward){
-            printf("MyDevice::ConfigureRequestDispatching\r\n");
+            printf("MyDevice::ConfigureRequestDispatching (%d, %d)\r\n",
+                RequestType, Forward);
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE SetPnpState( 
-            /* [annotation][in] */ 
+
+        virtual void STDMETHODCALLTYPE SetPnpState(
+            /* [annotation][in] */
             _In_  WDF_PNP_STATE State,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_TRI_STATE Value){
-            printf("SetPnpState\r\n");
+            printf("MyDevice::SetPnpState\r\n");
         }
 
-        
-        virtual WDF_TRI_STATE STDMETHODCALLTYPE GetPnpState( 
-            /* [annotation][in] */ 
+
+        virtual WDF_TRI_STATE STDMETHODCALLTYPE GetPnpState(
+            /* [annotation][in] */
             _In_  WDF_PNP_STATE State){
-            printf("GetPnpState\r\n");
+            printf("MyDevice::GetPnpState\r\n");
             return WdfFalse;
         }
 
-        
+
         virtual void STDMETHODCALLTYPE CommitPnpState( void){
-            printf("CommitPnpState\r\n");
+            printf("MyDevice::CommitPnpState\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateRequest( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateRequest(
+            /* [annotation][unique][in] */
             _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  IWDFObject *pParentObject,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFIoRequest **ppRequest){
-            printf("CreateRequest\r\n");
+            printf("MyDevice::CreateRequest");
+            *ppRequest = new MyRequest(WdfRequestUsb, 0, nullptr, nullptr);
+            printf(" = %p\r\n", *ppRequest);
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateSymbolicLink( 
-            /* [annotation][unique][string][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateSymbolicLink(
+            /* [annotation][unique][string][in] */
             _In_  PCWSTR pSymbolicLink){
-            printf("CreateSymbolicLink\r\n");
+            printf("MyDevice::CreateSymbolicLink\r\n");
             return 0;
         }
 
     // Device2
-        virtual HRESULT STDMETHODCALLTYPE AssignS0IdleSettings( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE AssignS0IdleSettings(
+            /* [annotation][in] */
             _In_  WDF_POWER_POLICY_S0_IDLE_CAPABILITIES IdleCaps,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  DEVICE_POWER_STATE DxState,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  ULONG IdleTimeout,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_POWER_POLICY_S0_IDLE_USER_CONTROL UserControlOfIdleSettings,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_TRI_STATE Enabled){
-            printf("AssignS0IdleSettings\r\n");
+            printf("MyDevice::AssignS0IdleSettings\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE StopIdle( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE StopIdle(
+            /* [annotation][in] */
             _In_  BOOL WaitForD0){
-            printf("StopIdle\r\n");
+            printf("MyDevice::StopIdle\r\n");
             return 0;
         }
 
-        
+
         virtual void STDMETHODCALLTYPE ResumeIdle( void){
             goIdle = 1;
-            printf("ResumeIdle\r\n");
+            printf("MyDevice::ResumeIdle\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateSymbolicLinkWithReferenceString( 
-            /* [annotation][unique][string][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateSymbolicLinkWithReferenceString(
+            /* [annotation][unique][string][in] */
             _In_  PCWSTR pSymbolicLink,
-            /* [annotation][unique][string][in] */ 
+            /* [annotation][unique][string][in] */
             _In_opt_  PCWSTR pReferenceString){
-            printf("CreateSymbolicLinkWithReferenceString\r\n");
+            printf("MyDevice::CreateSymbolicLinkWithReferenceString\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE RegisterRemoteInterfaceNotification( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RegisterRemoteInterfaceNotification(
+            /* [annotation][in] */
             _In_  LPCGUID pDeviceInterfaceGuid,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  BOOL IncludeExistingInterfaces){
-            printf("RegisterRemoteInterfaceNotification\r\n");
+            printf("MyDevice::RegisterRemoteInterfaceNotification\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateRemoteInterface( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateRemoteInterface(
+            /* [annotation][in] */
             _In_  IWDFRemoteInterfaceInitialize *pRemoteInterfaceInit,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFRemoteInterface **ppRemoteInterface){
-            printf("CreateRemoteInterface\r\n");
+            printf("MyDevice::CreateRemoteInterface\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateRemoteTarget( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateRemoteTarget(
+            /* [annotation][unique][in] */
             _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  IWDFObject *pParentObject,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFRemoteTarget **ppRemoteTarget){
-            printf("CreateRemoteTarget\r\n");
+            printf("MyDevice::CreateRemoteTarget\r\n");
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE GetDeviceStackIoTypePreference( 
-            /* [annotation][out] */ 
+
+        virtual void STDMETHODCALLTYPE GetDeviceStackIoTypePreference(
+            /* [annotation][out] */
             _Out_  WDF_DEVICE_IO_TYPE *ReadWritePreference,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  WDF_DEVICE_IO_TYPE *IoControlPreference){
-            printf("GetDeviceStackIoTypePreference\r\n");
+            printf("MyDevice::GetDeviceStackIoTypePreference\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignSxWakeSettings( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignSxWakeSettings(
+            /* [annotation][in] */
             _In_  DEVICE_POWER_STATE DxState,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_POWER_POLICY_SX_WAKE_USER_CONTROL UserControlOfWakeSettings,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_TRI_STATE Enabled){
-            printf("AssignSxWakeSettings\r\n");
+            printf("MyDevice::AssignSxWakeSettings\r\n");
             return 0;
         }
 
-        
+
         virtual POWER_ACTION STDMETHODCALLTYPE GetSystemPowerAction( void){
-            printf("GetSystemPowerAction\r\n");
+            printf("MyDevice::GetSystemPowerAction\r\n");
             return PowerActionNone;
         }
 
     // Device3
     public:
-        virtual HRESULT STDMETHODCALLTYPE MapIoSpace( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE MapIoSpace(
+            /* [annotation][in] */
             _In_  PHYSICAL_ADDRESS PhysicalAddress,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T NumberOfBytes,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  MEMORY_CACHING_TYPE CacheType,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  void **pPseudoBaseAddress){
-            printf("MapIoSpace\r\n");
+            printf("MyDevice::MapIoSpace\r\n");
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE UnmapIoSpace( 
-            /* [annotation][in] */ 
+
+        virtual void STDMETHODCALLTYPE UnmapIoSpace(
+            /* [annotation][in] */
             _In_  void *PseudoBaseAddress,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T NumberOfBytes){
-            printf("UnmapIoSpace\r\n");
+            printf("MyDevice::UnmapIoSpace\r\n");
         }
 
-        
-        virtual void *STDMETHODCALLTYPE GetHardwareRegisterMappedAddress( 
-            /* [annotation][in] */ 
+
+        virtual void *STDMETHODCALLTYPE GetHardwareRegisterMappedAddress(
+            /* [annotation][in] */
             _In_  void *PseudoBaseAddress){
-            printf("GetHardwareRegisterMappedAddress\r\n");
+            printf("MyDevice::GetHardwareRegisterMappedAddress\r\n");
             return 0;
         }
 
-        
-        virtual SIZE_T STDMETHODCALLTYPE ReadFromHardware( 
-            /* [annotation][in] */ 
+
+        virtual SIZE_T STDMETHODCALLTYPE ReadFromHardware(
+            /* [annotation][in] */
             _In_  WDF_DEVICE_HWACCESS_TARGET_TYPE Type,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_DEVICE_HWACCESS_TARGET_SIZE Size,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  void *Address,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_writes_all_opt_(Count)  void *Buffer,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_opt_  ULONG Count){
-            printf("ReadFromHardware\r\n");
+            printf("MyDevice::ReadFromHardware\r\n");
             return 0;
         }
 
-        
-        virtual void STDMETHODCALLTYPE WriteToHardware( 
-            /* [annotation][in] */ 
+
+        virtual void STDMETHODCALLTYPE WriteToHardware(
+            /* [annotation][in] */
             _In_  WDF_DEVICE_HWACCESS_TARGET_TYPE Type,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_DEVICE_HWACCESS_TARGET_SIZE Size,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  void *Address,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T Value,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_reads_opt_(Count)  void *Buffer,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_opt_  ULONG Count){
-            printf("WriteToHardware\r\n");
+            printf("MyDevice::WriteToHardware\r\n");
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateInterrupt( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateInterrupt(
+            /* [annotation][in] */
             _In_  PWUDF_INTERRUPT_CONFIG Configuration,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFInterrupt **ppInterrupt){
-            printf("CreateInterrupt\r\n");
+            printf("MyDevice::CreateInterrupt\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateWorkItem( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE CreateWorkItem(
+            /* [annotation][in] */
             _In_  PWUDF_WORKITEM_CONFIG pConfig,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  IWDFObject *pParentObject,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFWorkItem **ppWorkItem){
-            printf("CreateWorkItem\r\n");
+            printf("MyDevice::CreateWorkItem\r\n");
             return 0;
         }
 
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignS0IdleSettingsEx( 
-            /* [annotation][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignS0IdleSettingsEx(
+            /* [annotation][in] */
             _In_  PWUDF_DEVICE_POWER_POLICY_IDLE_SETTINGS IdleSettings){
-            printf("AssignS0IdleSettingsEx\r\n");
+            printf("MyDevice::AssignS0IdleSettingsEx\r\n");
             return 0;
         }
-
-        
 };
 
 struct MyDriver : public IWDFDriver {
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-            printf("QueryInterface\r\n");
-            return 0; 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
+            LPOLESTR str;
+            StringFromIID(riid, &str);
+            std::wcout << L"MyDriver::QueryInterface " << str << std::endl;
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
-            printf("AddRef\r\n");
-            return 0; 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
+            printf("MyDriver::AddRef\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
+        virtual ULONG STDMETHODCALLTYPE Release() {
             printf("MyDriver::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("DeleteWdfObject\r\n");
-            return 0; 
+            printf("MyDriver::DeleteWdfObject\r\n");
+            return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE AssignContext( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
-            /* [annotation][unique][in] */ 
-            _In_opt_ __drv_aliasesMem  void *pContext) { 
-            printf("AssignContext\r\n");
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) {
+            printf("MyDriver::AssignContext\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveContext( 
-            /* [annotation][out] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("RetrieveContext\r\n");
+            printf("MyDriver::RetrieveContext\r\n");
             return 0;
         }
-        
+
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("AcquireLock\r\n");
+            printf("MyDriver::AcquireLock\r\n");
         }
-        
+
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("ReleaseLock\r\n");
+            printf("MyDriver::ReleaseLock\r\n");
         }
 
     public:
-        virtual HRESULT STDMETHODCALLTYPE CreateDevice( 
-            /* [annotation][in] */ 
+        virtual HRESULT STDMETHODCALLTYPE CreateDevice(
+            /* [annotation][in] */
             _In_  IWDFDeviceInitialize *pDeviceInit,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFDevice **ppDevice) {
-            printf("CreateDevice\r\n");
-            *ppDevice = myDevice = new MyDevice(pCallbackInterface);
+            printf("MyDriver::CreateDevice\r\n");
+            *ppDevice = myDevice = new MyDevice(this, pCallbackInterface);
             printf("new device=%p\r\n", *ppDevice);
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateWdfObject( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreateWdfObject(
+            /* [annotation][unique][in] */
             _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  IWDFObject *pParentObject,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFObject **ppWdfObject) {
-            printf("CreateWdfObject\r\n");
+            printf("MyDriver::CreateWdfObject\r\n");
             return 0;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE CreatePreallocatedWdfMemory( 
-            /* [annotation][size_is][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE CreatePreallocatedWdfMemory(
+            /* [annotation][size_is][in] */
             _In_reads_bytes_(BufferSize)  BYTE *pBuff,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  SIZE_T BufferSize,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][unique][in] */ 
+            /* [annotation][unique][in] */
             _In_opt_  IWDFObject *pParentObject,
-            /* [annotation][out] */ 
-            _Out_  IWDFMemory **ppWdfMemory) { 
-            printf("CreatePreallocatedWdfMemory\r\n");
-            return 0; 
-        }
-        
-        virtual HRESULT STDMETHODCALLTYPE CreateWdfMemory( 
-            /* [annotation][in] */ 
-            _In_  SIZE_T BufferSize,
-            /* [annotation][unique][in] */ 
-            _In_opt_  IUnknown *pCallbackInterface,
-            /* [annotation][unique][in] */ 
-            _In_opt_  IWDFObject *pParentObject,
-            /* [annotation][out] */ 
-            _Out_  IWDFMemory **ppWdfMemory) { 
-            printf("CreateWdfMemory\r\n");
+            /* [annotation][out] */
+            _Out_  IWDFMemory **ppWdfMemory) {
+            printf("MyDriver::CreatePreallocatedWdfMemory %p (%lu) = ",
+                pBuff, BufferSize);
+            *ppWdfMemory = new MyMem(pBuff, BufferSize);
+            printf(" %p\r\n", *ppWdfMemory);
             return 0;
         }
-        
-        virtual BOOL STDMETHODCALLTYPE IsVersionAvailable( 
-            /* [annotation][in] */ 
-            _In_  UMDF_VERSION_DATA *pMinimumVersion) { 
-            printf("IsVersionAvailable\r\n");
+
+        virtual HRESULT STDMETHODCALLTYPE CreateWdfMemory(
+            /* [annotation][in] */
+            _In_  SIZE_T BufferSize,
+            /* [annotation][unique][in] */
+            _In_opt_  IUnknown *pCallbackInterface,
+            /* [annotation][unique][in] */
+            _In_opt_  IWDFObject *pParentObject,
+            /* [annotation][out] */
+            _Out_  IWDFMemory **ppWdfMemory) {
+            printf("MyDriver::CreateWdfMemory %p (%lu) = ", BufferSize);
+            // FIXME: Free this
+            void *mem = malloc(BufferSize);
+            memset(mem, 0, BufferSize);
+            *ppWdfMemory = new MyMem(mem, BufferSize);
+            printf(" %p\r\n", *ppWdfMemory);
+            return 0;
+        }
+
+        virtual BOOL STDMETHODCALLTYPE IsVersionAvailable(
+            /* [annotation][in] */
+            _In_  UMDF_VERSION_DATA *pMinimumVersion) {
+            printf("MyDriver::IsVersionAvailable\r\n");
             return true;
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveVersionString( 
-            /* [annotation][unique][out][string] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveVersionString(
+            /* [annotation][unique][out][string] */
             _Out_writes_to_opt_(*pdwVersionLength, *pdwVersionLength)  PWSTR pVersion,
-            /* [annotation][out][in] */ 
+            /* [annotation][out][in] */
             _Inout_  DWORD *pdwVersionLength) {
-            printf("RetrieveVersionString\r\n");
+            printf("MyDriver::RetrieveVersionString\r\n");
             return 0;
         }
 };
 
 class MyDevInit : public IWDFDeviceInitialize {
     public:
-        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) { 
-            printf("QueryInterface\r\n");
-            return 0; 
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
+            printf("MyDevInit::QueryInterface\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE AddRef(void) { 
-            printf("AddRef\r\n");
-            return 0; 
+        virtual ULONG STDMETHODCALLTYPE AddRef() {
+            printf("MyDevInit::AddRef\r\n");
+            return 0;
         }
-        virtual ULONG STDMETHODCALLTYPE Release(void) {
-            printf("Release\r\n");
+        virtual ULONG STDMETHODCALLTYPE Release() {
+            printf("MyDevInit::Release\r\n");
             return 0;
         }
 
     public:
         virtual void STDMETHODCALLTYPE SetFilter( void) {
-            printf("SetFilter\r\n");
+            printf("MyDevInit::SetFilter\r\n");
         }
-        
-        virtual void STDMETHODCALLTYPE SetLockingConstraint( 
-            /* [annotation][in] */ 
+
+        virtual void STDMETHODCALLTYPE SetLockingConstraint(
+            /* [annotation][in] */
             _In_  WDF_CALLBACK_CONSTRAINT LockType) {
-            printf("SetLockingConstraint\r\n");
+            printf("MyDevInit::SetLockingConstraint\r\n");
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore( 
-            /* [annotation][unique][in] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore(
+            /* [annotation][unique][in] */
             _In_opt_  PCWSTR pcwszServiceName,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_PROPERTY_STORE_RETRIEVE_FLAGS Flags,
-            /* [annotation][out] */ 
+            /* [annotation][out] */
             _Out_  IWDFNamedPropertyStore **ppPropStore,
-            /* [annotation][unique][out] */ 
+            /* [annotation][unique][out] */
             _Out_opt_  WDF_PROPERTY_STORE_DISPOSITION *pDisposition) {
-            printf("RetrieveDevicePropertyStore\r\n");
+            printf("MyDevInit::RetrieveDevicePropertyStore\r\n");
+            *ppPropStore = new MyNamedPropertyStore();
             return 0;
         }
-        
-        virtual void STDMETHODCALLTYPE SetPowerPolicyOwnership( 
-            /* [annotation][in] */ 
+
+        virtual void STDMETHODCALLTYPE SetPowerPolicyOwnership(
+            /* [annotation][in] */
             _In_  BOOL fTrue) {
-            printf("SetPowerPolicyOwnership\r\n");
+            printf("MyDevInit::SetPowerPolicyOwnership %d\r\n", fTrue);
         }
-        
-        virtual void STDMETHODCALLTYPE AutoForwardCreateCleanupClose( 
-            /* [annotation][in] */ 
+
+        virtual void STDMETHODCALLTYPE AutoForwardCreateCleanupClose(
+            /* [annotation][in] */
             _In_  WDF_TRI_STATE State) {
-            printf("AutoForwardCreateCleanupClose\r\n");
+            printf("MyDevInit::AutoForwardCreateCleanupClose\r\n");
         }
-        
-        virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceInstanceId( 
-            /* [annotation][unique][out][string] */ 
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceInstanceId(
+            /* [annotation][unique][out][string] */
             _Out_opt_  PWSTR Buffer,
-            /* [annotation][out][in] */ 
+            /* [annotation][out][in] */
             _Inout_  DWORD *pdwSizeInChars) {
-            printf("RetrieveDeviceInstanceId\r\n");
+            printf("MyDevInit::RetrieveDeviceInstanceId\r\n");
             return 0;
         }
-        
-        virtual void STDMETHODCALLTYPE SetPnpCapability( 
-            /* [annotation][in] */ 
+
+        virtual void STDMETHODCALLTYPE SetPnpCapability(
+            /* [annotation][in] */
             _In_  WDF_PNP_CAPABILITY Capability,
-            /* [annotation][in] */ 
+            /* [annotation][in] */
             _In_  WDF_TRI_STATE Value) {
-            printf("SetPnpCapability\r\n");
+            printf("MyDevInit::SetPnpCapability\r\n");
         }
-        
-        virtual WDF_TRI_STATE STDMETHODCALLTYPE GetPnpCapability( 
-            /* [annotation][in] */ 
+
+        virtual WDF_TRI_STATE STDMETHODCALLTYPE GetPnpCapability(
+            /* [annotation][in] */
             _In_  WDF_PNP_CAPABILITY Capability) {
-            printf("GetPnpCapability\r\n");
+            printf("MyDevInit::GetPnpCapability\r\n");
             return WdfFalse;
         }
 };
+
+class MyResourceList : public IWDFCmResourceList {
+public:
+        MyResourceList(const char *type) {
+            printf("MyResourceList(%s)\r\n", type);
+            m_type = type;
+        }
+
+        // IUnknown methods (simplified)
+        virtual ULONG STDMETHODCALLTYPE AddRef() override {
+            printf("MyResourceList::AddRef\r\n");
+            return 0;
+        }
+        virtual ULONG STDMETHODCALLTYPE Release() override {
+            printf("MyResourceList::Release\r\n");
+            return 0;
+        }
+        virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
+            LPOLESTR str;
+            StringFromIID(riid, &str);
+            std::wcout << L"MyResourceList::QueryInterface " << str << std::endl;
+            *ppvObject = this;
+            printf("ppvObject=%p\r\n", *ppvObject);
+            return 0;
+        }
+
+        virtual ULONG STDMETHODCALLTYPE GetCount() override {
+            printf("MyResourceList::GetCount %s\r\n", m_type);
+            return m_count;
+        }
+
+        virtual PCM_PARTIAL_RESOURCE_DESCRIPTOR STDMETHODCALLTYPE GetDescriptor(ULONG index) override {
+            printf("MyResourceList::GetDescriptor %s %lu\r\n", m_type, index);
+            return (index < m_count) ? &m_descriptors[index] : nullptr;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
+            printf("MyResourceList::DeleteWdfObject\r\n");
+            return 0;
+        }
+
+        virtual void STDMETHODCALLTYPE AcquireLock() override {
+            printf("MyResourceList::AcquireLock\r\n");
+        }
+
+        virtual void STDMETHODCALLTYPE ReleaseLock() override {
+            printf("MyResourceList::ReleaseLock\r\n");
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE AssignContext(
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
+            /* [annotation][unique][in] */
+            _In_opt_ __drv_aliasesMem  void *pContext) override {
+            printf("MyResourceList::AssignContext\r\n");
+            return 0;
+        }
+
+        virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
+            /* [annotation][out] */
+            _Out_  void **ppvContext) override {
+            printf("MyResourceList::RetrieveContext\r\n");
+            return 0;
+        }
+
+    // // USB-specific initialization
+    // HRESULT InitializeForUSB() {
+    //     // USB devices typically have these descriptors
+    //     m_descriptors[0].Type = CmResourceTypeDeviceSpecific;
+    //     m_descriptors[0].u.DeviceSpecificData.DataSize = sizeof(USB_DEVICE_DESCRIPTOR);
+
+    //     m_descriptors[1].Type = CmResourceTypeDeviceSpecific;
+    //     m_descriptors[1].u.DeviceSpecificData.DataSize = sizeof(USB_CONFIGURATION_DESCRIPTOR);
+
+    //     m_count = 2;
+    //     return S_OK;
+    // }
+
+private:
+    const char *m_type = nullptr;
+    CM_PARTIAL_RESOURCE_DESCRIPTOR m_descriptors[4];
+    ULONG m_count = 0;
+};
+
 
 std::basic_ostream<wchar_t> &
 operator << (std::basic_ostream<wchar_t> &os, LARGE_INTEGER i)
@@ -1538,9 +3570,9 @@ identify()
 
     printf("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_CAPTURE_DATA, 0, 0);
-    //Sleep(5000);
+    Sleep(5000);
     // printf("CANCEL!!!\n");
-    //req.cancelCallback->OnCancel(&req);
+    // req.cancelCallback->OnCancel(&req);
     //printf("wakey wakey\r\n");
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     /*
@@ -1557,8 +3589,8 @@ identify()
         Sleep(200);
 
     //Sleep(5000);
-    
-    std::wcout 
+
+    std::wcout
         << L"=======================" << std::endl
         << L"PayloadSize " << data->PayloadSize << std::endl
         << L"WinBioHresult " << data->WinBioHresult << std::endl
@@ -1577,7 +3609,7 @@ identify()
         if(bir->HeaderBlock.Size > 0) {
             WINBIO_BIR_HEADER *hdr = (WINBIO_BIR_HEADER *)(data->CaptureData.Data+bir->HeaderBlock.Offset);
 
-            std::wcout 
+            std::wcout
                 << L"ValidFields = " << std::hex << hdr->ValidFields << std::endl
                 << L"HeaderVersion = " << hdr->HeaderVersion << std::endl
                 << L"PatronHeaderVersion = " << hdr->PatronHeaderVersion << std::endl
@@ -1629,10 +3661,10 @@ reset()
 {
     uint8_t buf[8];
     MyMem in(NULL, 0), out(buf, sizeof(buf));
-    MyRequest req(WdfRequestOther, 0x440008, &out, &in);
-    
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_RESET, &out, &in);
+
     printf("about to Reset\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x440008, 0, 0);
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_RESET, 0, 0);
 
     while(!req.complete)
         Sleep(200);
@@ -1650,14 +3682,14 @@ void
 enroll()
 {
     Sleep(500);
-    
+
     //UCHAR ibuf[] = { 1, 0, 0, 0 };
     //MyMem in(ibuf, sizeof(ibuf)), out(NULL, 0);
     MyMem in(NULL, 0), out(NULL, 0);
-    MyRequest req(WdfRequestOther, 0x44200C, &out, &in);
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &out, &in);
 
     printf("about to Create Enrollment\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44200C, 0, 0);
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
     while(!req.complete)
         Sleep(200);
 
@@ -1688,7 +3720,7 @@ enroll()
         while(!req.complete)
             Sleep(200);
 
-        std::wcout 
+        std::wcout
             << L"=======================" << std::endl
             << L"PayloadSize " << data->PayloadSize << std::endl
             << L"WinBioHresult " << data->WinBioHresult << std::endl
@@ -1760,14 +3792,14 @@ getSensorStatus()
     MyMem in(NULL, 0), out(buf, sizeof(buf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, &out, &in);
 
-    printf("about to ioctl\r\n");
+    printf("about to IOCTL_BIOMETRIC_GET_SENSOR_STATUS\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, 0, 0);
     while(!req.complete)
         Sleep(200);
     //Sleep(4000);
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     //Sleep(4000);
-    std::wcout 
+    std::wcout
         << L"=======================" << std::endl
         << L"PayloadSize " << diag->PayloadSize << std::endl
         << L"WinBioHresult " << diag->WinBioHresult << std::endl
@@ -1775,7 +3807,27 @@ getSensorStatus()
         << L"VendorDiagnostics.Size " << diag->VendorDiagnostics.Size << std::endl
         << L"=======================" << std::endl
         ;
-    
+
+}
+
+void
+resetIoctl()
+{
+    char buf[1024*10];
+    WINBIO_BLANK_PAYLOAD *diag = (WINBIO_BLANK_PAYLOAD*)buf;
+
+    MyMem in(NULL, 0), out(buf, sizeof(buf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_RESET, &out, &in);
+
+    printf("about to IOCTL_BIOMETRIC_RESET\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_RESET, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+    std::wcout
+        << L"=======================" << std::endl
+        << L"WinBioHresult " << diag->WinBioHresult << std::endl
+        << L"=======================" << std::endl
+        ;
 }
 
 void
@@ -1786,30 +3838,71 @@ getAttributes()
     MyMem in(NULL, 0), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_ATTRIBUTES, &out, &in);
 
-    printf("about to ioctl\r\n");
+    printf("about to IOCTL_BIOMETRIC_GET_ATTRIBUTES\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_ATTRIBUTES, 0, 0);
     //Sleep(1000);
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     while(!req.complete)
         Sleep(200);
     printf("WinBioHresult = %lx\r\n", attrs->WinBioHresult);
-    std::wcout 
-        << L"PayloadSize: " << attrs->PayloadSize << std::endl
-        << L"ManufacturerName: " << attrs->ManufacturerName  << std::endl
-        << L"ModelName: " << attrs->ModelName  << std::endl
-        << L"SensorType: " << attrs->SensorType << std::endl
-        << L"SensorSubType: " << attrs->SensorSubType << std::endl
-        << L"Capabilities: " << attrs->Capabilities << std::endl
-        << L"SerialNumber: " << attrs->SerialNumber << std::endl
-        << L"FirmwareVersion: " << attrs->FirmwareVersion.MajorVersion << "." << attrs->FirmwareVersion.MinorVersion << std::endl
-        << L"SupportedFormatEntries: " << attrs->SupportedFormatEntries << std::endl
-        << std::endl;
+    std::wcout
+        << L"=======================" << std::endl
+        << L"  PayloadSize: " << attrs->PayloadSize << std::endl
+        << L"  ManufacturerName: " << attrs->ManufacturerName  << std::endl
+        << L"  ModelName: " << attrs->ModelName  << std::endl
+        << L"  SensorType: " << attrs->SensorType << std::endl
+        << L"  SensorSubType: " << attrs->SensorSubType << std::endl
+        << L"  Capabilities: " << attrs->Capabilities << std::endl
+        << L"  SerialNumber: " << attrs->SerialNumber << std::endl
+        << L"  FirmwareVersion: " << attrs->FirmwareVersion.MajorVersion << "." << attrs->FirmwareVersion.MinorVersion << std::endl
+        << L"  SupportedFormatEntries: " << attrs->SupportedFormatEntries << std::endl;
         for(unsigned int i=0;i<attrs->SupportedFormatEntries;i++) {
-            printf("  Owner=%04x, Type=%04x\n", 
-                    attrs->SupportedFormat[i].Owner, 
-                    attrs->SupportedFormat[i].Type);
+            printf("    Owner=%04x, Type=%04x\n",
+                attrs->SupportedFormat[i].Owner,
+                attrs->SupportedFormat[i].Type);
         }
+    std::wcout
+        << L"=======================" << std::endl;
 }
+
+void
+getIndicator()
+{
+    char obuf[1024];
+    PWINBIO_GET_INDICATOR indicator = (PWINBIO_GET_INDICATOR)obuf;
+    MyMem in(NULL, 0), out(obuf, sizeof(obuf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_INDICATOR, &out, &in);
+
+    printf("about to IOCTL_BIOMETRIC_GET_INDICATOR\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_INDICATOR, 0, 0);
+
+    while(!req.complete)
+        Sleep(200);
+    printf("WinBioHresult = %lx\r\n", indicator->WinBioHresult);
+    std::wcout
+        << L"=======================" << std::endl
+        << L"  Status: " << indicator->IndicatorStatus << std::endl;
+}
+
+// void
+// setIndicator(IndicatorStatus status)
+// {
+//     char inbuf[1024];
+//     char outbuf[1024];
+//     PWINBIO_SET_INDICATOR indicator = (PWINBIO_SET_INDICATOR)inbuf;
+//     PWINBIO_BLANK_PAYLOAD blank = (PWINBIO_BLANK_PAYLOAD)outbuf;
+//     MyMem in(inbuf, sizeof(inbuf)), out(outbuf, sizeof(outbuf));
+
+//     indicator->IndicatorStatus = status;
+//     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_SET_INDICATOR, &out, &in);
+
+//     printf("about to IOCTL_BIOMETRIC_SET_INDICATOR\r\n");
+//     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_SET_INDICATOR, 0, 0);
+
+//     while(!req.complete)
+//         Sleep(200);
+//     printf("WinBioHresult = %lx\r\n", blank->WinBioHresult);
+// }
 
 void
 setMode(unsigned short mode)
@@ -1830,7 +3923,7 @@ void
 deleteRecord()
 {
         // delete record
-    unsigned char ibuf[0x50] = { 
+    unsigned char ibuf[0x50] = {
         /* 4c, identity  */ 0x03, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x15, 0x00, 0x00, 0x00, 0xc5, 0x69, 0x85, 0x17, 0xbc, 0xff, 0x12, 0xe7, 0x24, 0x96, 0xb7, 0x63, 0xed, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         /* 04, subfactor */ 0xf6, 0x00, 0x00, 0x00,
     };
@@ -1877,12 +3970,12 @@ setIndicator()
         << L"setInd.PayloadSize: " << setInd.PayloadSize << std::endl
         << L"setInd.IndicatorStatus: " << setInd.IndicatorStatus << std::endl
         ;
-    printf("about to ioctl\r\n");
+    printf("about to ioctl IOCTL_BIOMETRIC_SET_INDICATOR\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_SET_INDICATOR, sizeof(setInd), sizeof(setInd));
     Sleep(1000);
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
 
-    std::wcout 
+    std::wcout
         << L"rc=" << rc << std::endl
         << L"==== After ===" << std::endl
         << L"getInd.PayloadSize: " << getInd.PayloadSize << std::endl
@@ -1928,7 +4021,7 @@ void
 handle_trace(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
-    
+
     printf("Trace: %s:%lld\n", ctx->Rcx, ctx->Rdx);
 }
 
@@ -1947,10 +4040,10 @@ handle_calibrate_iteration(_EXCEPTION_POINTERS *ExceptionInfo)
     printf("==========================================================================================\n");
 }
 
-const uint8_t target[] = { 
-//0x4e, 0x00, 0x28, 0x00, 0xfb, 0xb2, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x30, 0x00, 0x00, 0x00, 0x87, 0x00, 0x02, 0x00, 0x67, 0x00, 0x0a, 0x00, 0x01, 0x80, 0x00, 0x00, 0x0a, 0x02, 0x00, 0x00, 0x0b, 0x19, 0x00, 0x00, 0x88, 0x13, 0xb8, 0x0b, 0x01, 0x09, 0x10, 0x00, 
-//0x17, 0x00, 0x00, 0x00, 
-'n', 0x23, 0x00, 0x00, 0x00, 0x20, 0x00, 0x08, 0x00, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00, 0x01, 0x00, 0x32, 0x00, 0x74, 0x00, 0x00, 0x00, 0x00, 0x80, 0x20, 0x20, 0x04, 0x00, 0x24, 0x20, 0x00, 0x00, 0x50, 0x20, 0x77, 0x36, 0x28, 0x20, 0x01, 0x00, 0x30, 0x20, 0x01, 0x00, 0x3c, 0x20, 0x80, 0x00, 0x08, 0x21, 0x38, 0x00, 0x0c, 0x21, 0x00, 0x00, 0x48, 0x21, 0x07, 0x00, 0x4c, 0x21, 0x00, 0x00, 0x58, 0x20, 0x00, 0x00, 0x5c, 0x20, 0x00, 0x00, 0x60, 0x20, 
+const uint8_t target[] = {
+//0x4e, 0x00, 0x28, 0x00, 0xfb, 0xb2, 0x0f, 0x00, 0x00, 0x00, 0x0f, 0x00, 0x30, 0x00, 0x00, 0x00, 0x87, 0x00, 0x02, 0x00, 0x67, 0x00, 0x0a, 0x00, 0x01, 0x80, 0x00, 0x00, 0x0a, 0x02, 0x00, 0x00, 0x0b, 0x19, 0x00, 0x00, 0x88, 0x13, 0xb8, 0x0b, 0x01, 0x09, 0x10, 0x00,
+//0x17, 0x00, 0x00, 0x00,
+'n', 0x23, 0x00, 0x00, 0x00, 0x20, 0x00, 0x08, 0x00, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00, 0x01, 0x00, 0x32, 0x00, 0x74, 0x00, 0x00, 0x00, 0x00, 0x80, 0x20, 0x20, 0x04, 0x00, 0x24, 0x20, 0x00, 0x00, 0x50, 0x20, 0x77, 0x36, 0x28, 0x20, 0x01, 0x00, 0x30, 0x20, 0x01, 0x00, 0x3c, 0x20, 0x80, 0x00, 0x08, 0x21, 0x38, 0x00, 0x0c, 0x21, 0x00, 0x00, 0x48, 0x21, 0x07, 0x00, 0x4c, 0x21, 0x00, 0x00, 0x58, 0x20, 0x00, 0x00, 0x5c, 0x20, 0x00, 0x00, 0x60, 0x20,
 };
 
 
@@ -1962,7 +4055,7 @@ handle_malloc(_EXCEPTION_POINTERS *ExceptionInfo)
     uint8_t *rax = (uint8_t *)ctx->Rax;
     uint32_t len = (uint32_t)rsp[5+1];
     size_t i;
-    
+
     printf("malloc %ld: %p\n", len, rax);
     if(len == 13440) {
 
@@ -2438,25 +4531,71 @@ main(int argc, char *argv[])
     }
 #endif
 
-    HMODULE pDll = LoadLibrary("synawudfbiousb.dll");
+    // EnumerateAllDevices();
+
+    // HRESULT hr = S_OK;
+    // BOOL    bResult;
+
+    // typedef struct _DEVICE_DATA {
+    //     BOOL                    HandlesOpen;
+    //     WINUSB_INTERFACE_HANDLE WinusbHandle;
+    //     HANDLE                  DeviceHandle;
+    //     TCHAR                   DevicePath[MAX_PATH];
+
+    // } DEVICE_DATA, *PDEVICE_DATA;
+
+    // DEVICE_DATA dd;
+    // PDEVICE_DATA DeviceData = &dd;
+    // DeviceData->HandlesOpen = FALSE;
+
+    // BOOL FailureDeviceNotFound;
+    // hr = RetrieveDevicePath(DeviceData->DevicePath,
+    //                         sizeof(DeviceData->DevicePath),
+    //                         &FailureDeviceNotFound);
+    // std::wcout << L"Checking for PATH " << hr << ", '"<<DeviceData->DevicePath<<"' not  found " << FailureDeviceNotFound << std::endl;
+
+    // What we do here...
+    // https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/understanding-the-umdf-template-code-for-usb
+
+    HMODULE pDll = LoadLibrary("synaWudfBioUsb132.dll");
     if(!pDll) {
         puts("Failed to LoadLibrary dll");
         return 3;
     }
     DllGetClassObject_t *proc = (DllGetClassObject_t*)GetProcAddress(pDll, "DllGetClassObject");
     if(!proc) {
-        puts("DllGetClassObject was not exported from the synawudfbiousb.dll");
+        puts("DllGetClassObject was not exported from the synaWudfBioUsb132.dll");
         return 3;
     }
-    printf("about to create factory\r\n");
-    proc(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
+    HRESULT pres;
+    // HMODULE synaDll = LoadLibrary("synaFpAdapter132.dll");
+    // if(!synaDll) {
+    //     puts("Failed to synaFpAdapter132 dll");
+    //     return 3;
+    // }
+    // DllGetClassObject_t *synaProc = (DllGetClassObject_t*)GetProcAddress(pDll, "DllGetClassObject");
+    // if(!proc) {
+    //     puts("DllGetClassObject was not exported from the synaFpAdapter132.dll");
+    //     return 3;
+    // }
+
     LPVOID dibr = 0;
-    proc(GUID_DEVINTERFACE_BIOMETRIC_READER, IID_IUnknown, (LPVOID *)&dibr);
-    printf("GUID_DEVINTERFACE_BIOMETRIC_READER=%p\n", dibr);
+    // pres = proc(GUID_DEVINTERFACE_BIOMETRIC_READER, IID_IUnknown, (LPVOID *)&dibr);
+    // printf("res 0x%x %s GUID_DEVINTERFACE_BIOMETRIC_READER=%p\n", pres, hresult_to_sting(pres), dibr);
     //Sleep(5000);
     //DllGetClassObject(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
+    printf(">>>>>>>>>>>>>>>>>>>>>>>> about to create factory\r\n");
+    // long long iid[2];
+    // *iid = 1;
+    // iid[1] = 0x46000000000000c0;
+    // // printf("Using IID 0x%lx\n", iid);
+    // long long *iidptr = iid;
+    // printf("That would be 0x%lx | 0x%x, matches %d,%d\n", *iidptr, iidptr[1], *iidptr == 1, iidptr[1] == 0x46000000000000c0);
+    // pres = proc(SYNA_CLSID, iidptr, (LPVOID *)&fact);
+    pres = proc(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
+    // pres = proc(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
+    printf("<<<<<<<<<<<<<<<<<<<<<<< Factory creation done (0x%lx, %s) = %p\r\n", pres, hresult_to_sting(pres), fact);
     IDriverEntry *inst;
-    printf("about to create instance fact = %p\r\n", fact);
     if(!fact) {
         puts("SYNA_CLSID not found in DLL");
         return 3;
@@ -2478,9 +4617,10 @@ main(int argc, char *argv[])
     HRESULT rc;
 
     MyDriver *aDriver = new MyDriver();
-    printf("about to init %p\r\n", aDriver);
+    printf(">>>>>>>>>>>>>>>>>>>>>>> about to init %p\r\n", aDriver);
     rc = inst->OnInitialize(aDriver);
-    printf("OnInitialize rc = %lx\r\n", rc);
+    printf("<<<<<<<<<<<<<<<<<<<<<<< OnInitialize rc = %lx (%s)\r\n",
+        rc, hresult_to_sting(rc));
     if(rc < 0) {
         return 0;
     }
@@ -2496,9 +4636,10 @@ main(int argc, char *argv[])
     }
 
     MyDevInit *devinit = new MyDevInit();
-    printf("about to add device %p\r\n", devinit);
+    printf(">>>>>>>>>>>>>>>>>>>>>>> about to add device %p\r\n", devinit);
     rc = inst->OnDeviceAdd(aDriver, devinit);
-    printf("OnDeviceAdd rc = %lx\r\n", rc);
+    printf("<<<<<<<<<<<<<<<<<<<<<<< OnDeviceAdd rc = %lx (%s)\r\n",
+        rc, hresult_to_sting(rc));
     if(rc < 0) {
         return 0;
     }
@@ -2506,52 +4647,86 @@ main(int argc, char *argv[])
     goIdle = 0;
 
     Sleep(100);
-    printf("about to prepare hw\r\n");
-    rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
-    printf("OnPrepareHardware rc = %lx\r\n", rc);
+    printf(">>>>>>>>>>>>>>>>>>>>>>> about to prepare hw\r\n");
+    if (myDevice->pnphwcb)
+        rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
+    else if (myDevice->pnphwcb2) {
+        auto raw_resources = new MyResourceList("raw");
+        auto translated_resources = new MyResourceList("translated");
+        rc = myDevice->pnphwcb2->OnPrepareHardware(myDevice, raw_resources, translated_resources);
+    }
+    else
+        assert(false);
+
+    printf("<<<<<<<<<<<<<<<<<<<<<<< OnPrepareHardware rc = %lx (%s)\r\n",
+        rc, hresult_to_sting(rc));
 
     if(rc < 0) {
-        return 0;
+        return 1;
     }
 
     Sleep(100);
-    printf("about to enter D0 state\r\n");
+    printf(">>>>>>>>>>>>>>>>>>>>>>> about to enter D0 state\r\n");
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
-    printf("OnD0Entry rc = %lx\r\n", rc);
+    printf("<<<<<<<<<<<<<<<<<<<<<<< OnD0Entry rc = %lx (%s)\r\n", rc,
+        hresult_to_sting(rc));
 
     if(rc < 0) {
-        return 0;
+        return 1;
     }
 
 #if 0
-    printf("about to release hw\r\n");
+    printf(">>>>>>>>>>>>>>>>>>>>>>> about to release hw\r\n");
     rc = myDevice->pnphwcb->OnReleaseHardware(myDevice);
-    printf("OnReleaseHardware rc = %lx\r\n", rc);
+    printf("<<<<<<<<<<<<<<<<<<<<<<< OnReleaseHardware rc = %lx (%s)\r\n",
+        rc, hresult_to_sting(rc));
 
     if(rc < 0) {
         return 0;
     }
 #endif
 
-    puts("All done, sleeping");
+    puts("All done, sleeping a bit");
     while(!goIdle) {
-        Sleep(200);
+      Sleep(200);
     }
 
+    Sleep(1000);
+
+    // return 0;
+
+    // Follow the sequence indicated at:
+    // https://learn.microsoft.com/en-us/windows-hardware/drivers/biometric/supporting-biometric-ioctl-calling-sequence
+
+    std::cout << "IOCTL_BIOMETRIC_GET_ATTRIBUTES: 0x" << std::hex << IOCTL_BIOMETRIC_GET_ATTRIBUTES << std::endl;
+    std::cout << "IOCTL_BIOMETRIC_RESET: 0x" << std::hex << IOCTL_BIOMETRIC_RESET << std::endl;
+    std::cout << "IOCTL_BIOMETRIC_CALIBRATE: 0x" << std::hex << IOCTL_BIOMETRIC_CALIBRATE << std::endl;
+    std::cout << "IOCTL_BIOMETRIC_GET_SENSOR_STATUS: 0x" << std::hex << IOCTL_BIOMETRIC_GET_SENSOR_STATUS << std::endl;
+    std::cout << "IOCTL_BIOMETRIC_CAPTURE_DATA: 0x" << std::hex << IOCTL_BIOMETRIC_CAPTURE_DATA << std::endl;
+
 //    reset();
+    // resetIoctl();
 
-    setMode(2); // WINBIO_SENSOR_ADVANCED_MODE
+    // printf(">>>>>>>>>>>>>>>>>>>>>>> about to setting mode...\r\n");
+    // setMode(WINBIO_SENSOR_BASIC_MODE); // WINBIO_SENSOR_ADVANCED_MODE
+    // printf("<<<<<<<<<<<<<<<<<<<<<<< done setting mode...\r\n");
 
-    //what();
-    enroll();
-    
-    printf("======================================================\r\n");
-    printf("Sleeping 10 secons....\r\n");
-    printf("======================================================\r\n");
-    Sleep(10000);
+    getAttributes();
+    getSensorStatus();
+    // getIndicator();
+    // setIndicator();
+    // resetIoctl();
 
-    identify();
+    // //what();
+    // enroll();
 
-    printf("about to de-init\r\n");
-    inst->OnDeinitialize(aDriver);
+    // printf("======================================================\r\n");
+    // printf("Sleeping 10 secons....\r\n");
+    // printf("======================================================\r\n");
+    // Sleep(10000);
+
+    // identify();
+
+    // printf("about to de-init\r\n");
+    // inst->OnDeinitialize(aDriver);
 }
