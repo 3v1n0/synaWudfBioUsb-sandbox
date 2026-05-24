@@ -323,6 +323,18 @@ typedef struct _SYNA_STORAGE_QUERY_RESULT {
     SYNA_STORAGE_RECORD Records[1];
 } SYNA_STORAGE_QUERY_RESULT;
 
+typedef struct _WINBIO_IDENTIFY_ALL_OUTPUT_WIRE {
+    WINBIO_IDENTITY Identity;
+    WINBIO_BIOMETRIC_SUBTYPE SubFactor;
+    HRESULT EngineHresult;
+} WINBIO_IDENTIFY_ALL_OUTPUT_WIRE;
+
+static_assert(sizeof(SYNA_STORAGE_RECORD) == 0x70, "SYNA_STORAGE_RECORD must be 0x70 bytes");
+static_assert(offsetof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE, SubFactor) == 0x4c, "SubFactor offset must be 0x4c");
+static_assert(offsetof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE, EngineHresult) == 0x50, "EngineHresult offset must be 0x50");
+static_assert(sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE) == 0x54, "WINBIO_IDENTIFY_ALL_OUTPUT_WIRE must be 0x54 bytes");
+static_assert(sizeof(WINBIO_IDENTITY) == 0x4c, "WINBIO_IDENTITY must be 0x4c bytes");
+
 //
 // Vendor-range IOCTLs (function code = 0x800 + n)
 // These map to standard WinBio Engine/Storage adapter interface functions
@@ -4217,26 +4229,74 @@ operator << (std::basic_ostream<wchar_t> &os, WINBIO_REGISTERED_FORMAT r)
 void
 identifyFeatureSet()
 {
-    // CREATE_ENROLLMENT: driver's FUN_180003d4c swaps in/out roles
-    // Validation checks: input_size == 8, output_size == 0x28
-    UCHAR ce_ibuf[8] = {0};
-    UCHAR ce_obuf[0x28] = {0};
-    MyMem in(ce_ibuf, sizeof(ce_ibuf)), out(ce_obuf, sizeof(ce_obuf));
-    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, &out, &in);
+    ULONGLONG stl_ibuf = 0;
+    UCHAR stl_obuf[4] = {0};
+    MyMem stl_in((UCHAR *)&stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
+    MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, 0, 0);
-    while(!req.complete)
+    printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
+    while(!stl_req.complete)
         Sleep(200);
-    printf("Got back 0x%llx bytes: ", req.informationSize);
-    for(LONG_PTR i=0;i<req.informationSize;i++)
-        printf("%02x", ce_obuf[i]);
+
+    printf("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
+        (long long)stl_req.informationSize);
+
+    const DWORD ia_obuf_size = 4096;
+    UCHAR *ia_obuf = (UCHAR *)calloc(1, ia_obuf_size);
+    if(!ia_obuf) {
+        printf("identifyFeatureSet: failed to allocate identify buffer\n");
+        return;
+    }
+    MyMem ia_in(NULL, 0), ia_out(ia_obuf, ia_obuf_size);
+    MyRequest ia_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &ia_out, &ia_in);
+
+    printf("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &ia_req, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, 0, 0);
+    printf("returned from IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL dispatch, complete=%d\n", ia_req.complete ? 1 : 0);
+    while(!ia_req.complete)
+        Sleep(200);
+
+    printf("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        (unsigned long)ia_req.completionStatus, hresult_to_sting(ia_req.completionStatus),
+        (long long)ia_req.informationSize);
+
+    if(ia_req.informationSize >= sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
+        WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)ia_obuf;
+        printf("IDENTIFY_ALL engine result @0x50: 0x%lx (%s)\n",
+            (unsigned long)identifyOut->EngineHresult, hresult_to_sting(identifyOut->EngineHresult));
+    }
+
+    printf("IDENTIFY_ALL raw (first 96 bytes): ");
+    for(LONG_PTR i=0;i<96 && i<ia_req.informationSize;i++)
+        printf("%02x", ia_obuf[i]);
     printf("\n");
+
+    free(ia_obuf);
 }
 
 void
 identify()
 {
+    {
+        char calibrate_obuf[1024];
+        MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
+        MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
+
+        printf("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
+        while(!cal_req.complete)
+            Sleep(200);
+
+        printf("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
+            hresult_to_sting(cal_req.completionStatus));
+        if(FAILED(cal_req.completionStatus)) {
+            printf("CALIBRATE failed, aborting identify\n");
+            return;
+        }
+    }
+
     char ibuf[1024*10];
     WINBIO_CAPTURE_PARAMETERS *params = (WINBIO_CAPTURE_PARAMETERS *)ibuf;
     char obuf[1024*100];
@@ -4263,9 +4323,29 @@ identify()
 
     printf("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_CAPTURE_DATA, 0, 0);
-    Sleep(5000);
-    // printf("CANCEL!!!\n");
-    // req.cancelCallback->OnCancel(&req);
+    int waitedMs = 0;
+    printf("Waiting for capture to complete (touch sensor)...\n");
+    while(!req.complete && waitedMs < 60000) {
+        Sleep(200);
+        waitedMs += 200;
+        if((waitedMs % 2000) == 0)
+            printf("  ...still waiting (%d ms)\n", waitedMs);
+    }
+
+    if(!req.complete) {
+        printf("CAPTURE_DATA still pending after %d ms; cancelling request\n", waitedMs);
+        if(req.cancelCallback) {
+            req.cancelCallback->OnCancel(&req);
+            for(int i=0;i<25 && !req.complete;i++)
+                Sleep(200);
+        }
+    }
+
+    if(!req.complete) {
+        printf("CAPTURE_DATA did not complete; capture thread is still waiting for sensor event\n");
+        return;
+    }
+
     //printf("wakey wakey\r\n");
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     /*
@@ -4278,11 +4358,6 @@ identify()
 00000086`c8bbe4f0  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
 00000086`c8bbe500  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
     */
-    while(!req.complete)
-        Sleep(200);
-
-    //Sleep(5000);
-
     std::wcout
         << L"=======================" << std::endl
         << L"PayloadSize " << data->PayloadSize << std::endl
@@ -4292,6 +4367,11 @@ identify()
         << L"CaptureData.Size " << data->CaptureData.Size << std::endl
         << L"=======================" << std::endl
         ;
+
+    if(FAILED(req.completionStatus) || FAILED(data->WinBioHresult) || data->CaptureData.Size == 0) {
+        printf("Capture did not produce a usable sample; skipping identify stage\n");
+        return;
+    }
     if(data->CaptureData.Size > 0) {
         WINBIO_BIR *bir = (WINBIO_BIR *)data->CaptureData.Data;
         printf("bir->HeaderBlock = %ld, %ld\n", bir->HeaderBlock.Size, bir->HeaderBlock.Offset);
@@ -4505,14 +4585,56 @@ enroll()
 void
 identifyAll()
 {
-    UCHAR ibuf[8] = {0};
-    UCHAR obuf[1024];
-    DWORD obufSize = sizeof(obuf);
-    MyMem in(ibuf, sizeof(ibuf)), out(obuf, obufSize);
+    {
+        char calibrate_obuf[1024];
+        MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
+        MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
+
+        printf("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
+        while(!cal_req.complete)
+            Sleep(200);
+
+        printf("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
+            hresult_to_sting(cal_req.completionStatus));
+        if(FAILED(cal_req.completionStatus)) {
+            printf("CALIBRATE failed, aborting identify-all\n");
+            return;
+        }
+    }
+
+    {
+        ULONGLONG stl_ibuf = 0;
+        UCHAR stl_obuf[4] = {0};
+        MyMem stl_in((UCHAR *)&stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
+        MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
+
+        printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
+        while(!stl_req.complete)
+            Sleep(200);
+
+        printf("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\r\n",
+            (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
+            (long long)stl_req.informationSize);
+        if(FAILED(stl_req.completionStatus)) {
+            printf("SET_TEMPLATE_LIST failed, aborting identify-all\n");
+            return;
+        }
+    }
+
+    DWORD obufSize = 4096;
+    UCHAR *obuf = (UCHAR *)calloc(1, obufSize);
+    if(!obuf) {
+        printf("identifyAll: failed to allocate output buffer\n");
+        return;
+    }
+    MyMem in(NULL, 0), out(obuf, obufSize);
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &out, &in);
 
     printf("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, 0, 0);
+    printf("returned from IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL dispatch, complete=%d\n", req.complete ? 1 : 0);
     while(!req.complete)
         Sleep(200);
 
@@ -4520,10 +4642,42 @@ identifyAll()
         (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
         (long long)req.informationSize);
 
-    printf("Output raw (first 128 bytes): ");
-    for(LONG_PTR i=0;i<128 && i<req.informationSize;i++)
+    printf("Output raw (first 84 bytes): ");
+    for(LONG_PTR i=0;i<84 && i<req.informationSize;i++)
         printf("%02x", obuf[i]);
     printf("\n");
+
+    if(req.informationSize >= sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
+        WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)obuf;
+        WINBIO_IDENTITY *identity = &identifyOut->Identity;
+        UCHAR subfactor = (UCHAR)identifyOut->SubFactor;
+        HRESULT engineHr = identifyOut->EngineHresult;
+
+        printf("IDENTIFY_ALL parsed: IdentityType=%lu, SubFactor=%u, EngineHresult=0x%lx (%s)\n",
+            (unsigned long)identity->Type,
+            (unsigned)subfactor,
+            (unsigned long)engineHr,
+            hresult_to_sting(engineHr));
+
+        if(identity->Type == WINBIO_ID_TYPE_SID) {
+            printf("  SID[%lu]=", (unsigned long)identity->Value.AccountSid.Size);
+            for(ULONG j=0; j<identity->Value.AccountSid.Size && j<SECURITY_MAX_SID_SIZE; j++)
+                printf("%02x", identity->Value.AccountSid.Data[j]);
+            printf("\n");
+        }
+        else if(identity->Type == WINBIO_ID_TYPE_GUID) {
+            printf("  GUID=%08lx-%04x-%04x-",
+                (unsigned long)identity->Value.TemplateGuid.Data1,
+                identity->Value.TemplateGuid.Data2,
+                identity->Value.TemplateGuid.Data3);
+            for(int j=0;j<2;j++) printf("%02x", identity->Value.TemplateGuid.Data4[j]);
+            printf("-");
+            for(int j=2;j<8;j++) printf("%02x", identity->Value.TemplateGuid.Data4[j]);
+            printf("\n");
+        }
+    }
+
+    free(obuf);
 }
 
 void
@@ -4587,9 +4741,9 @@ listDatabase()
     }
 
     {
-        UCHAR stl_ibuf[8] = {0};
+        ULONGLONG stl_ibuf = 0;
         UCHAR stl_obuf[4] = {0};
-        MyMem stl_in(stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
+        MyMem stl_in((UCHAR *)&stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
         MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
         printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
@@ -5421,6 +5575,9 @@ main(int argc, char *argv[])
     else if(strcasecmp(argv[1], "identify-all") == 0) {
         what = identifyAll;
     }
+    else if(strcasecmp(argv[1], "identify") == 0) {
+        what = identify;
+    }
     else if(strcasecmp(argv[1], "clear-db") == 0) {
         what = clearDatabase;
     }
@@ -5432,6 +5589,8 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "nop") == 0) {
         what = nop;
+    }
+    else if(strcasecmp(argv[1], "refresh-cache") == 0) {;
     }
     else {
         usage();
