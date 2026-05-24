@@ -335,6 +335,9 @@ static_assert(offsetof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE, EngineHresult) == 0x50, 
 static_assert(sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE) == 0x54, "WINBIO_IDENTIFY_ALL_OUTPUT_WIRE must be 0x54 bytes");
 static_assert(sizeof(WINBIO_IDENTITY) == 0x4c, "WINBIO_IDENTITY must be 0x4c bytes");
 
+static bool
+refreshTemplateCacheFromGetTemplate();
+
 //
 // Vendor-range IOCTLs (function code = 0x800 + n)
 // These map to standard WinBio Engine/Storage adapter interface functions
@@ -4229,9 +4232,9 @@ operator << (std::basic_ostream<wchar_t> &os, WINBIO_REGISTERED_FORMAT r)
 void
 identifyFeatureSet()
 {
-    ULONGLONG stl_ibuf = 0;
+    ULONGLONG stl_zero = 0;
     UCHAR stl_obuf[4] = {0};
-    MyMem stl_in((UCHAR *)&stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
+    MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
     MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
 
     printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
@@ -4417,10 +4420,62 @@ commitEnrollment()
     while(!req.complete)
         Sleep(200);
 
-    printf("Got back 0x%llx bytes: ", req.informationSize);
+    printf("COMMIT_ENROLLMENT hresult=0x%lx (%s), infoSize=%lld, raw: ",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize);
     for(LONG_PTR i=0;i<req.informationSize;i++)
         printf("%02x", obuf[i]);
     printf("\n");
+
+    if(SUCCEEDED(req.completionStatus) || req.completionStatus == 1) {
+        if(!refreshTemplateCacheFromGetTemplate()) {
+            printf("GET_TEMPLATE direct path failed, trying STORAGE_QUERY fallback\n");
+
+            UCHAR ibuf_rc[8] = {0};
+            SIZE_T recordCount = 0;
+            MyMem in_rc(ibuf_rc, sizeof(ibuf_rc)), out_rc((UCHAR *)&recordCount, sizeof(recordCount));
+            MyRequest req_rc(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out_rc, &in_rc);
+
+            myQueue->ioctl->OnDeviceIoControl(myQueue, &req_rc, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, 0);
+            while(!req_rc.complete)
+                Sleep(200);
+
+            printf("fallback: GET_RECORD_COUNT hresult=0x%lx (%s), count=%zu\n",
+                (unsigned long)req_rc.completionStatus,
+                hresult_to_sting(req_rc.completionStatus),
+                recordCount);
+
+            if(SUCCEEDED(req_rc.completionStatus) && recordCount > 0) {
+                DWORD queryBufSize = sizeof(SYNA_STORAGE_QUERY_INPUT) - sizeof(ULONG) + 0x78;
+                UCHAR *sbuf = (UCHAR *)calloc(1, queryBufSize);
+                SYNA_STORAGE_QUERY_INPUT *query = (SYNA_STORAGE_QUERY_INPUT *)sbuf;
+                query->QueryType = STORAGE_QUERY_TYPE_ALL;
+
+                DWORD resultBufSize = (DWORD)(sizeof(SYNA_STORAGE_QUERY_RESULT) + (recordCount - 1) * sizeof(SYNA_STORAGE_RECORD));
+                UCHAR *rbuf = (UCHAR *)calloc(1, resultBufSize);
+
+                MyMem in_s(sbuf, queryBufSize), out_s(rbuf, resultBufSize);
+                MyRequest req_s(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, &out_s, &in_s);
+
+                myQueue->ioctl->OnDeviceIoControl(myQueue, &req_s, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, 0, 0);
+                while(!req_s.complete)
+                    Sleep(200);
+
+                printf("fallback: STORAGE_QUERY hresult=0x%lx (%s), infoSize=%lld\n",
+                    (unsigned long)req_s.completionStatus,
+                    hresult_to_sting(req_s.completionStatus),
+                    (long long)req_s.informationSize);
+
+                if(SUCCEEDED(req_s.completionStatus)) {
+                    SYNA_STORAGE_QUERY_RESULT *result = (SYNA_STORAGE_QUERY_RESULT *)rbuf;
+                    printf("fallback: STORAGE_QUERY records=%llu\n", (unsigned long long)result->RecordCount);
+                }
+
+                free(sbuf);
+                free(rbuf);
+            }
+        }
+    }
 }
 
 void
@@ -4604,9 +4659,9 @@ identifyAll()
     }
 
     {
-        ULONGLONG stl_ibuf = 0;
+        ULONGLONG stl_zero = 0;
         UCHAR stl_obuf[4] = {0};
-        MyMem stl_in((UCHAR *)&stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
+        MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
         MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
 
         printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
@@ -4617,6 +4672,7 @@ identifyAll()
         printf("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\r\n",
             (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
             (long long)stl_req.informationSize);
+
         if(FAILED(stl_req.completionStatus)) {
             printf("SET_TEMPLATE_LIST failed, aborting identify-all\n");
             return;
@@ -4741,9 +4797,9 @@ listDatabase()
     }
 
     {
-        ULONGLONG stl_ibuf = 0;
+        ULONGLONG stl_zero = 0;
         UCHAR stl_obuf[4] = {0};
-        MyMem stl_in((UCHAR *)&stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
+        MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
         MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
         printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
@@ -4831,6 +4887,38 @@ listDatabase()
 
     free(sbuf);
     free(rbuf);
+}
+
+static bool
+refreshTemplateCacheFromGetTemplate()
+{
+    UCHAR inbuf[0x54] = {0};
+    WINBIO_IDENTITY *id = (WINBIO_IDENTITY *)inbuf;
+    WINBIO_BIOMETRIC_SUBTYPE *sub = (WINBIO_BIOMETRIC_SUBTYPE *)(inbuf + sizeof(WINBIO_IDENTITY));
+    UCHAR outbuf[0x54] = {0};
+
+    id->Type = WINBIO_ID_TYPE_WILDCARD;
+    id->Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
+    *sub = WINBIO_SUBTYPE_ANY;
+
+    MyMem in(inbuf, sizeof(inbuf)), out(outbuf, sizeof(outbuf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, &out, &in);
+
+    printf("cache-refresh: GET_TEMPLATE inputSize=%zu outputSize=%zu\n", sizeof(inbuf), sizeof(outbuf));
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    printf("cache-refresh: GET_TEMPLATE hresult=0x%lx (%s), infoSize=%lld\n",
+        (unsigned long)req.completionStatus,
+        hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize);
+
+    if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(outbuf))
+        return false;
+
+    printf("cache-refresh: GET_TEMPLATE succeeded, identity available from device\n");
+    return true;
 }
 
 void
