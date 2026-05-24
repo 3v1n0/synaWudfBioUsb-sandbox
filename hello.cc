@@ -335,6 +335,16 @@ static_assert(offsetof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE, EngineHresult) == 0x50, 
 static_assert(sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE) == 0x54, "WINBIO_IDENTIFY_ALL_OUTPUT_WIRE must be 0x54 bytes");
 static_assert(sizeof(WINBIO_IDENTITY) == 0x4c, "WINBIO_IDENTITY must be 0x4c bytes");
 
+static SIZE_T
+clampInfoSize(LONG_PTR informationSize, SIZE_T bufferSize)
+{
+    if(informationSize <= 0)
+        return 0;
+    SIZE_T n = (SIZE_T)informationSize;
+    return n < bufferSize ? n : bufferSize;
+}
+
+
 static bool
 refreshTemplateCacheFromGetTemplate();
 
@@ -4265,7 +4275,7 @@ identifyFeatureSet()
         (unsigned long)ia_req.completionStatus, hresult_to_sting(ia_req.completionStatus),
         (long long)ia_req.informationSize);
 
-    if(ia_req.informationSize >= sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
+    if(ia_req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
         WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)ia_obuf;
         printf("IDENTIFY_ALL engine result @0x50: 0x%lx (%s)\n",
             (unsigned long)identifyOut->EngineHresult, hresult_to_sting(identifyOut->EngineHresult));
@@ -4409,25 +4419,82 @@ identify()
 void
 commitEnrollment()
 {
-    // Driver expects exactly 8 bytes input buffer and >= 8 bytes output buffer
-    UCHAR ibuf[8] = {0};
-    UCHAR obuf[8];
-    MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
-    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
+    typedef struct _SYNA_COMMIT_ENROLLMENT_INPUT_WIRE {
+        WINBIO_IDENTITY Identity;
+        ULONG SubFactor;
+        ULONGLONG PayloadBlobSize;
+        UCHAR PayloadBlob[8];
+    } SYNA_COMMIT_ENROLLMENT_INPUT_WIRE;
+    static_assert(offsetof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE, SubFactor) == 0x4c, "Commit SubFactor offset must be 0x4c");
+    static_assert(offsetof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE, PayloadBlobSize) == 0x50, "Commit PayloadBlobSize offset must be 0x50");
+    static_assert(offsetof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE, PayloadBlob) == 0x58, "Commit PayloadBlob offset must be 0x58");
+    static_assert(sizeof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE) == 0x60, "Commit input wire size must be 0x60");
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, 0, 0);
-    while(!req.complete)
-        Sleep(200);
+    HRESULT commitStatus = E_FAIL;
 
-    printf("COMMIT_ENROLLMENT hresult=0x%lx (%s), infoSize=%lld, raw: ",
-        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
-        (long long)req.informationSize);
-    for(LONG_PTR i=0;i<req.informationSize;i++)
-        printf("%02x", obuf[i]);
-    printf("\n");
+    {
+        SYNA_COMMIT_ENROLLMENT_INPUT_WIRE input = {0};
+        UCHAR obuf[8] = {0};
 
-    if(SUCCEEDED(req.completionStatus) || req.completionStatus == 1) {
+        input.Identity.Type = WINBIO_ID_TYPE_GUID;
+        if(FAILED(CoCreateGuid(&input.Identity.Value.TemplateGuid))) {
+            input.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
+            input.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
+        }
+        input.SubFactor = (ULONG)WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
+        printf("COMMIT_ENROLLMENT using new identity (Type=%lu, SubFactor=%u)\n",
+            (unsigned long)input.Identity.Type,
+            (unsigned)input.SubFactor);
+
+        input.PayloadBlobSize = sizeof(input.PayloadBlob);
+        memcpy(input.PayloadBlob, "Unicorn", sizeof(input.PayloadBlob));
+
+        MyMem in((UCHAR *)&input, sizeof(input)), out(obuf, sizeof(obuf));
+        MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
+
+        printf("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (typed input, inSize=%zu)\r\n", sizeof(input));
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, 0, 0);
+        while(!req.complete)
+            Sleep(200);
+
+        printf("COMMIT_ENROLLMENT structured: hresult=0x%lx (%s), infoSize=%lld, raw: ",
+            (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+        SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+        for(SIZE_T i=0;i<commitDumpSize;i++)
+            printf("%02x", obuf[i]);
+        if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
+            printf("...(truncated)");
+        printf("\n");
+
+        commitStatus = req.completionStatus;
+    }
+
+    if(FAILED(commitStatus)) {
+        UCHAR ibuf[8] = {0};
+        UCHAR obuf[8] = {0};
+        MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+        MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
+
+        printf("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (fallback inSize=8)\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, 0, 0);
+        while(!req.complete)
+            Sleep(200);
+
+        printf("COMMIT_ENROLLMENT fallback: hresult=0x%lx (%s), infoSize=%lld, raw: ",
+            (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+        SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+        for(SIZE_T i=0;i<commitDumpSize;i++)
+            printf("%02x", obuf[i]);
+        if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
+            printf("...(truncated)");
+        printf("\n");
+
+        commitStatus = req.completionStatus;
+    }
+
+    if(SUCCEEDED(commitStatus) || commitStatus == 1) {
         if(!refreshTemplateCacheFromGetTemplate()) {
             printf("GET_TEMPLATE direct path failed, trying STORAGE_QUERY fallback\n");
 
@@ -4494,10 +4561,26 @@ reset()
     Sleep(100);
 
 
-    printf("Reset complete: ");
-    for(int i=0;i<req.informationSize;i++)
-        printf("%02x", buf[i]);
-    printf("\r\n");
+    if(FAILED(req.completionStatus)) {
+        printf("RESET failed: hresult=0x%lx (%s)\n",
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus));
+        return;
+    }
+
+    if(req.informationSize >= (LONG_PTR)sizeof(WINBIO_BLANK_PAYLOAD)) {
+        WINBIO_BLANK_PAYLOAD *payload = (WINBIO_BLANK_PAYLOAD *)buf;
+        printf("RESET complete: WinBioHresult=0x%lx (%s)\r\n",
+            (unsigned long)payload->WinBioHresult,
+            hresult_to_sting(payload->WinBioHresult));
+    }
+    else {
+        printf("RESET complete (short payload, infoSize=%lld): ", (long long)req.informationSize);
+        SIZE_T dump = clampInfoSize(req.informationSize, sizeof(buf));
+        for(SIZE_T i=0;i<dump;i++)
+            printf("%02x", buf[i]);
+        printf("\r\n");
+    }
 }
 
 void
@@ -4513,6 +4596,13 @@ enroll()
     myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
     while(!cal_req.complete)
         Sleep(200);
+
+    if(FAILED(cal_req.completionStatus)) {
+        printf("CALIBRATE failed in enroll: hresult=0x%lx (%s)\n",
+            (unsigned long)cal_req.completionStatus,
+            hresult_to_sting(cal_req.completionStatus));
+        return;
+    }
 
     Sleep(100);
 
@@ -4566,6 +4656,14 @@ enroll()
         while(!req.complete)
             Sleep(200);
 
+        if(FAILED(req.completionStatus)) {
+            printf("CAPTURE_DATA request failed: hresult=0x%lx (%s)\n",
+                (unsigned long)req.completionStatus,
+                hresult_to_sting(req.completionStatus));
+            Sleep(100);
+            continue;
+        }
+
         std::wcout
             << L"=======================" << std::endl
             << L"PayloadSize " << data->PayloadSize << std::endl
@@ -4596,9 +4694,17 @@ enroll()
 
             printf("UPDATE_ENROLLMENT hresult=0x%lx (%s), data: ", (unsigned long)req.completionStatus,
                 hresult_to_sting(req.completionStatus));
-            for(LONG_PTR i=0;i<req.informationSize;i++)
+            SIZE_T updateDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+            for(SIZE_T i=0;i<updateDumpSize;i++)
                 printf("%02x", obuf[i]);
             printf("\n");
+
+            if(FAILED(req.completionStatus) || req.informationSize < 0x30) {
+                printf("UPDATE_ENROLLMENT did not return expected payload (status=0x%lx, infoSize=%lld)\n",
+                    (unsigned long)req.completionStatus,
+                    (long long)req.informationSize);
+                break;
+            }
 
             // Driver returns S_OK as HRESULT; enrollment status is in output[0]:
             // WINBIO_I_MORE_DATA = need more samples
@@ -4627,7 +4733,8 @@ enroll()
             Sleep(200);
 
         printf("Got back 0x%llx bytes: ", req.informationSize);
-        for(LONG_PTR i=0;i<req.informationSize;i++)
+        SIZE_T dupDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+        for(SIZE_T i=0;i<dupDumpSize;i++)
             printf("%02x", obuf[i]);
         printf("\n");
     }
@@ -4703,7 +4810,7 @@ identifyAll()
         printf("%02x", obuf[i]);
     printf("\n");
 
-    if(req.informationSize >= sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
+    if(req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
         WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)obuf;
         WINBIO_IDENTITY *identity = &identifyOut->Identity;
         UCHAR subfactor = (UCHAR)identifyOut->SubFactor;
@@ -4961,6 +5068,13 @@ getSensorStatus()
         << L"=======================" << std::endl
         ;
 
+    if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(WINBIO_DIAGNOSTICS)) {
+        printf("GET_SENSOR_STATUS returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+    }
+
 }
 
 void
@@ -4976,6 +5090,15 @@ resetIoctl()
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_RESET, 0, 0);
     while(!req.complete)
         Sleep(200);
+
+    if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(WINBIO_BLANK_PAYLOAD)) {
+        printf("RESET returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+        return;
+    }
+
     std::wcout
         << L"=======================" << std::endl
         << L"WinBioHresult " << diag->WinBioHresult << std::endl
@@ -4997,6 +5120,24 @@ getAttributes()
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     while(!req.complete)
         Sleep(200);
+
+    if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)offsetof(WINBIO_SENSOR_ATTRIBUTES, SupportedFormat)) {
+        printf("GET_ATTRIBUTES returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+        return;
+    }
+
+    SIZE_T attrsFixedSize = offsetof(WINBIO_SENSOR_ATTRIBUTES, SupportedFormat);
+    SIZE_T attrsPayloadSize = clampInfoSize(req.informationSize, sizeof(obuf));
+    SIZE_T attrsFormatsCapacity = 0;
+    if(attrsPayloadSize > attrsFixedSize)
+        attrsFormatsCapacity = (attrsPayloadSize - attrsFixedSize) / sizeof(WINBIO_REGISTERED_FORMAT);
+    ULONG attrsFormatsToPrint = attrs->SupportedFormatEntries;
+    if(attrsFormatsToPrint > attrsFormatsCapacity)
+        attrsFormatsToPrint = (ULONG)attrsFormatsCapacity;
+
     printf("WinBioHresult = %lx\r\n", attrs->WinBioHresult);
     std::wcout
         << L"=======================" << std::endl
@@ -5009,11 +5150,15 @@ getAttributes()
         << L"  SerialNumber: " << attrs->SerialNumber << std::endl
         << L"  FirmwareVersion: " << attrs->FirmwareVersion.MajorVersion << "." << attrs->FirmwareVersion.MinorVersion << std::endl
         << L"  SupportedFormatEntries: " << attrs->SupportedFormatEntries << std::endl;
-        for(unsigned int i=0;i<attrs->SupportedFormatEntries;i++) {
+        for(ULONG i=0;i<attrsFormatsToPrint;i++) {
             printf("    Owner=%04x, Type=%04x\n",
                 attrs->SupportedFormat[i].Owner,
                 attrs->SupportedFormat[i].Type);
         }
+    if(attrsFormatsToPrint != attrs->SupportedFormatEntries) {
+        printf("  NOTE: truncated SupportedFormatEntries to %lu based on infoSize\n",
+            (unsigned long)attrsFormatsToPrint);
+    }
     std::wcout
         << L"=======================" << std::endl;
 }
@@ -5031,7 +5176,10 @@ setMode(unsigned short mode)
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44204C, 0, 0);
     while(!req.complete)
         Sleep(200);
-    printf("setMode - complete\n");
+    printf("setMode complete: hresult=0x%lx (%s), infoSize=%lld\n",
+        (unsigned long)req.completionStatus,
+        hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize);
 }
 
 void
@@ -5056,7 +5204,8 @@ deleteRecord(DWORD subfactor)
     printf("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
         (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
     printf("Raw output: ");
-    for(LONG_PTR i=0;i<req.informationSize;i++)
+    SIZE_T deleteDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+    for(SIZE_T i=0;i<deleteDumpSize;i++)
         printf("%02x", obuf[i]);
     printf("\n");
 }
@@ -5071,6 +5220,11 @@ discardEnrollment()
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT, 0, 0);
     while(!req.complete)
         Sleep(200);
+
+    printf("DISCARD_ENROLLMENT: hresult=0x%lx (%s), infoSize=%lld\n",
+        (unsigned long)req.completionStatus,
+        hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize);
 }
 
 void
@@ -5089,9 +5243,17 @@ setIndicator(WINBIO_INDICATOR_STATUS status)
     while(!req.complete)
         Sleep(200);
 
-    printf("SET_INDICATOR: hresult=0x%lx (%s), getInd.WinBioHresult=0x%lx, getInd.IndicatorStatus=%lu\r\n",
-        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
-        (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
+    if(req.informationSize >= (LONG_PTR)sizeof(getInd)) {
+        printf("SET_INDICATOR: hresult=0x%lx (%s), getInd.WinBioHresult=0x%lx, getInd.IndicatorStatus=%lu\r\n",
+            (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+            (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
+    }
+    else {
+        printf("SET_INDICATOR: hresult=0x%lx (%s), short output infoSize=%lld\r\n",
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+    }
 }
 
 void
@@ -5106,31 +5268,37 @@ getIndicator()
     while(!req.complete)
         Sleep(200);
 
-    printf("GET_INDICATOR: hresult=0x%lx (%s), WinBioHresult=0x%lx, IndicatorStatus=%lu\r\n",
-        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
-        (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
+    if(req.informationSize >= (LONG_PTR)sizeof(getInd)) {
+        printf("GET_INDICATOR: hresult=0x%lx (%s), WinBioHresult=0x%lx, IndicatorStatus=%lu\r\n",
+            (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+            (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
+    }
+    else {
+        printf("GET_INDICATOR: hresult=0x%lx (%s), short output infoSize=%lld\r\n",
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+    }
 }
 
 void
 getDatabaseSize()
 {
-    unsigned char buf[8] = {0};
-    MyMem in(NULL, 0), out(buf, sizeof(buf));
+    UCHAR ibuf[8] = {0};
+    SIZE_T recordCount = 0;
+    MyMem in(ibuf, sizeof(ibuf)), out((UCHAR *)&recordCount, sizeof(recordCount));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out, &in);
 
     printf("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, sizeof(buf));
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, 0);
     while(!req.complete)
         Sleep(200);
-    /*
-    Sleep(4000);
-    rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
-    Sleep(4000);
-    */
-    for(unsigned int i=0;i<sizeof(buf);i++) {
-        printf("%02x", buf[i]);
-    }
-    printf("\n");
+
+    printf("GET_RECORD_COUNT: hresult=0x%lx (%s), infoSize=%lld, count=%zu\n",
+        (unsigned long)req.completionStatus,
+        hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize,
+        recordCount);
 }
 
 void
