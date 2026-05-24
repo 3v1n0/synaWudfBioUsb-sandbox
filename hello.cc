@@ -286,6 +286,43 @@
 #define WINBIO_FP_MERGE_FAILURE                 0x0000000AL
 #endif
 
+#ifndef WINBIO_ID_TYPE_WILDCARD
+#define WINBIO_ID_TYPE_WILDCARD ((WINBIO_IDENTITY_TYPE)1)
+#endif
+#ifndef WINBIO_ID_TYPE_GUID
+#define WINBIO_ID_TYPE_GUID     ((WINBIO_IDENTITY_TYPE)2)
+#endif
+#ifndef WINBIO_ID_TYPE_SID
+#define WINBIO_ID_TYPE_SID      ((WINBIO_IDENTITY_TYPE)3)
+#endif
+#ifndef WINBIO_IDENTITY_WILDCARD
+#define WINBIO_IDENTITY_WILDCARD ((ULONG)0x25066282)
+#endif
+
+#define STORAGE_QUERY_TYPE_ALL      1
+#define STORAGE_QUERY_TYPE_SUBJECT  2
+#define STORAGE_QUERY_TYPE_CONTENT  3
+#define STORAGE_QUERY_TYPE_GET_SINGLE 4
+
+typedef struct _SYNA_STORAGE_QUERY_INPUT {
+    DWORD QueryType;
+    WINBIO_IDENTITY Identity;
+    WINBIO_BIOMETRIC_SUBTYPE SubFactor;
+    DWORD IndexElementCount;
+    ULONG IndexVector[1];
+} SYNA_STORAGE_QUERY_INPUT;
+
+typedef struct _SYNA_STORAGE_RECORD {
+    WINBIO_IDENTITY Identity;
+    WINBIO_BIOMETRIC_SUBTYPE SubFactor;
+    UCHAR Reserved[0x20];
+} SYNA_STORAGE_RECORD;
+
+typedef struct _SYNA_STORAGE_QUERY_RESULT {
+    ULONGLONG RecordCount;
+    SYNA_STORAGE_RECORD Records[1];
+} SYNA_STORAGE_QUERY_RESULT;
+
 //
 // Vendor-range IOCTLs (function code = 0x800 + n)
 // These map to standard WinBio Engine/Storage adapter interface functions
@@ -4466,6 +4503,198 @@ enroll()
 }
 
 void
+identifyAll()
+{
+    UCHAR ibuf[8] = {0};
+    UCHAR obuf[1024];
+    DWORD obufSize = sizeof(obuf);
+    MyMem in(ibuf, sizeof(ibuf)), out(obuf, obufSize);
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &out, &in);
+
+    printf("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    printf("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize);
+
+    printf("Output raw (first 128 bytes): ");
+    for(LONG_PTR i=0;i<128 && i<req.informationSize;i++)
+        printf("%02x", obuf[i]);
+    printf("\n");
+}
+
+void
+setLed(WINBIO_INDICATOR_STATUS state)
+{
+    DWORD ibuf = state;
+    DWORD obuf = 0;
+    MyMem in((UCHAR*)&ibuf, sizeof(ibuf)), out((UCHAR*)&obuf, sizeof(obuf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, &out, &in);
+
+    printf("about to IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE (OnSetLedState, state=%s)\r\n",
+        state == WINBIO_INDICATOR_ON ? "WINBIO_INDICATOR_ON" : "WINBIO_INDICATOR_OFF");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    printf("SET_LED_STATE: hresult=0x%lx (%s)\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+}
+
+void
+listDatabase()
+{
+    UCHAR ibuf_rc[8] = {0};
+    SIZE_T recordCount = 0;
+    MyMem in_rc(ibuf_rc, sizeof(ibuf_rc)), out_rc((UCHAR*)&recordCount, sizeof(recordCount));
+    MyRequest req_rc(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out_rc, &in_rc);
+
+    printf("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT (WbioStorageGetRecordCount)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req_rc, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, 0);
+    while(!req_rc.complete)
+        Sleep(200);
+
+    printf("GET_RECORD_COUNT: hresult=0x%lx (%s)\r\n",
+        (unsigned long)req_rc.completionStatus, hresult_to_sting(req_rc.completionStatus));
+
+    if(FAILED(req_rc.completionStatus)) {
+        printf("GET_RECORD_COUNT failed\r\n");
+        return;
+    }
+
+    printf("Record count: %zu\r\n", recordCount);
+
+    if(recordCount == 0) {
+        printf("Database is empty\r\n");
+        return;
+    }
+
+    {
+        UCHAR gcd_ibuf[4] = {0};
+        UCHAR gcd_obuf[256] = {0};
+        MyMem gcd_in(gcd_ibuf, sizeof(gcd_ibuf)), gcd_out(gcd_obuf, sizeof(gcd_obuf));
+        MyRequest gcd_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, &gcd_out, &gcd_in);
+        printf("about to IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA (OnGetCommonData)\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &gcd_req, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, 0, 0);
+        while(!gcd_req.complete)
+            Sleep(200);
+        printf("GET_COMMON_DATA: hresult=0x%lx (%s), infoSize=%lld\r\n",
+            (unsigned long)gcd_req.completionStatus, hresult_to_sting(gcd_req.completionStatus),
+            (long long)gcd_req.informationSize);
+    }
+
+    {
+        UCHAR stl_ibuf[8] = {0};
+        UCHAR stl_obuf[4] = {0};
+        MyMem stl_in(stl_ibuf, sizeof(stl_ibuf)), stl_out(stl_obuf, sizeof(stl_obuf));
+        MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
+        printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
+        while(!stl_req.complete)
+            Sleep(200);
+        printf("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\r\n",
+            (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
+            (long long)stl_req.informationSize);
+    }
+
+    size_t maxRecords = recordCount > 128 ? 128 : recordCount;
+
+    {
+        UCHAR *eis_ptr = *(UCHAR **)(((UCHAR *)myDevice) + 0x428);
+        printf("EIS object at %p, flag 0xf8=%u, vec begin=%p, vec end=%p\n",
+            eis_ptr,
+            eis_ptr ? (unsigned)eis_ptr[0xf8] : 0,
+            eis_ptr ? *(void **)(eis_ptr + 0x120) : NULL,
+            eis_ptr ? *(void **)(eis_ptr + 0x128) : NULL);
+    }
+
+    DWORD queryBufSize = sizeof(SYNA_STORAGE_QUERY_INPUT) - sizeof(ULONG) + 0x78;
+    UCHAR *sbuf = (UCHAR *)calloc(1, queryBufSize);
+    SYNA_STORAGE_QUERY_INPUT *query = (SYNA_STORAGE_QUERY_INPUT *)sbuf;
+    query->QueryType = STORAGE_QUERY_TYPE_ALL;
+
+    DWORD resultBufSize = (DWORD)(sizeof(SYNA_STORAGE_QUERY_RESULT) + (maxRecords - 1) * sizeof(SYNA_STORAGE_RECORD));
+    UCHAR *rbuf = (UCHAR *)calloc(1, resultBufSize);
+
+    MyMem in_s(sbuf, queryBufSize), out_s(rbuf, resultBufSize);
+    MyRequest req_s(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, &out_s, &in_s);
+
+    printf("about to IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY (OnStorageQuery, STORAGE_QUERY_TYPE_ALL)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req_s, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, 0, 0);
+    while(!req_s.complete)
+        Sleep(200);
+
+    printf("STORAGE_QUERY: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        (unsigned long)req_s.completionStatus, hresult_to_sting(req_s.completionStatus),
+        (long long)req_s.informationSize);
+
+    printf("Output buffer raw (first 64 bytes): ");
+    for(int i=0;i<64 && i<(int)resultBufSize;i++)
+        printf("%02x", rbuf[i]);
+    printf("\n");
+
+    printf("Input buffer raw (first 64 bytes): ");
+    for(int i=0;i<64 && i<(int)queryBufSize;i++)
+        printf("%02x", sbuf[i]);
+    printf("\n");
+
+    SYNA_STORAGE_QUERY_RESULT *result = (SYNA_STORAGE_QUERY_RESULT *)rbuf;
+
+    if(FAILED(req_s.completionStatus)) {
+        printf("STORAGE_QUERY failed\r\n");
+        free(sbuf);
+        free(rbuf);
+        return;
+    }
+
+    printf("Returned records: %llu\r\n", (unsigned long long)result->RecordCount);
+
+    for(DWORD i=0; i<result->RecordCount && i<maxRecords; i++) {
+        SYNA_STORAGE_RECORD *rec = &result->Records[i];
+        printf("  [%lu] Type=%lu Subfactor=%u ",
+            (unsigned long)i,
+            (unsigned long)rec->Identity.Type,
+            (unsigned)rec->SubFactor);
+        if(rec->Identity.Type == WINBIO_ID_TYPE_SID) {
+            printf("SID size=%lu ",
+                (unsigned long)rec->Identity.Value.AccountSid.Size);
+            for(ULONG j=0; j<rec->Identity.Value.AccountSid.Size && j<SECURITY_MAX_SID_SIZE; j++)
+                printf("%02x", rec->Identity.Value.AccountSid.Data[j]);
+        } else if(rec->Identity.Type == WINBIO_ID_TYPE_GUID) {
+            printf("GUID=%08lx-%04x-%04x-",
+                (unsigned long)rec->Identity.Value.TemplateGuid.Data1,
+                rec->Identity.Value.TemplateGuid.Data2,
+                rec->Identity.Value.TemplateGuid.Data3);
+            for(int j=0;j<8;j++) printf("%02x", rec->Identity.Value.TemplateGuid.Data4[j]);
+        } else {
+            printf("Value=%lu", (unsigned long)rec->Identity.Value.Wildcard);
+        }
+        printf("\n");
+    }
+
+    free(sbuf);
+    free(rbuf);
+}
+
+void
+clearDatabase()
+{
+    MyMem in(NULL, 0), out(NULL, 0);
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE, &out, &in);
+
+    printf("about to IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE (OnEraseDatabase)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    printf("ERASE_DATABASE: hresult=0x%lx (%s)\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+}
+
+void
 getSensorStatus()
 {
     char buf[1024*10];
@@ -4548,45 +4777,6 @@ getAttributes()
 }
 
 void
-getIndicator()
-{
-    char obuf[1024];
-    PWINBIO_GET_INDICATOR indicator = (PWINBIO_GET_INDICATOR)obuf;
-    MyMem in(NULL, 0), out(obuf, sizeof(obuf));
-    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_INDICATOR, &out, &in);
-
-    printf("about to IOCTL_BIOMETRIC_GET_INDICATOR\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_INDICATOR, 0, 0);
-
-    while(!req.complete)
-        Sleep(200);
-    printf("WinBioHresult = %lx\r\n", indicator->WinBioHresult);
-    std::wcout
-        << L"=======================" << std::endl
-        << L"  Status: " << indicator->IndicatorStatus << std::endl;
-}
-
-// void
-// setIndicator(IndicatorStatus status)
-// {
-//     char inbuf[1024];
-//     char outbuf[1024];
-//     PWINBIO_SET_INDICATOR indicator = (PWINBIO_SET_INDICATOR)inbuf;
-//     PWINBIO_BLANK_PAYLOAD blank = (PWINBIO_BLANK_PAYLOAD)outbuf;
-//     MyMem in(inbuf, sizeof(inbuf)), out(outbuf, sizeof(outbuf));
-
-//     indicator->IndicatorStatus = status;
-//     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_SET_INDICATOR, &out, &in);
-
-//     printf("about to IOCTL_BIOMETRIC_SET_INDICATOR\r\n");
-//     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_SET_INDICATOR, 0, 0);
-
-//     while(!req.complete)
-//         Sleep(200);
-//     printf("WinBioHresult = %lx\r\n", blank->WinBioHresult);
-// }
-
-void
 setMode(unsigned short mode)
 {
     uint32_t ibuf[2] = { mode, 2 };
@@ -4603,23 +4793,27 @@ setMode(unsigned short mode)
 }
 
 void
-deleteRecord()
+deleteRecord(DWORD subfactor)
 {
-        // delete record
-    unsigned char ibuf[0x50] = {
-        /* 4c, identity  */ 0x03, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x15, 0x00, 0x00, 0x00, 0xc5, 0x69, 0x85, 0x17, 0xbc, 0xff, 0x12, 0xe7, 0x24, 0x96, 0xb7, 0x63, 0xed, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        /* 04, subfactor */ 0xf6, 0x00, 0x00, 0x00,
-    };
-    unsigned char obuf[0x08] = { 0 };
+    UCHAR ibuf[0x50] = {0};
+    UCHAR obuf[8] = {0};
+    WINBIO_IDENTITY *identity = (WINBIO_IDENTITY *)ibuf;
+    identity->Type = WINBIO_ID_TYPE_WILDCARD;
+    identity->Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
+    ibuf[0x4c] = (UCHAR)subfactor;
 
     MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD\r\n");
+    printf("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD (OnDeleteFinger, subfactor=%lu)\r\n",
+        (unsigned long)subfactor);
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, 0, 0);
     while(!req.complete)
         Sleep(200);
-    printf("Got back 0x%llx bytes: ", req.informationSize);
+
+    printf("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+    printf("Raw output: ");
     for(LONG_PTR i=0;i<req.informationSize;i++)
         printf("%02x", obuf[i]);
     printf("\n");
@@ -4638,32 +4832,41 @@ discardEnrollment()
 }
 
 void
-setIndicator()
+setIndicator(WINBIO_INDICATOR_STATUS status)
 {
-    HRESULT rc;
     WINBIO_SET_INDICATOR setInd;
     setInd.PayloadSize = sizeof(setInd);
-    setInd.IndicatorStatus = WINBIO_INDICATOR_ON;
-    WINBIO_GET_INDICATOR getInd;
-    MyMem in(&setInd, sizeof(setInd)), out(&getInd, sizeof(getInd));
+    setInd.IndicatorStatus = status;
+    WINBIO_GET_INDICATOR getInd = {0};
+    MyMem in((UCHAR*)&setInd, sizeof(setInd)), out((UCHAR*)&getInd, sizeof(getInd));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_SET_INDICATOR, &out, &in);
 
-    std::wcout
-        << L"==== Before ===" << std::endl
-        << L"setInd.PayloadSize: " << setInd.PayloadSize << std::endl
-        << L"setInd.IndicatorStatus: " << setInd.IndicatorStatus << std::endl
-        ;
-    printf("about to ioctl IOCTL_BIOMETRIC_SET_INDICATOR\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_SET_INDICATOR, sizeof(setInd), sizeof(setInd));
-    Sleep(1000);
-    rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
+    printf("about to IOCTL_BIOMETRIC_SET_INDICATOR (SensorAdapterSetIndicatorStatus, status=%s)\r\n",
+        status == WINBIO_INDICATOR_ON ? "WINBIO_INDICATOR_ON" : "WINBIO_INDICATOR_OFF");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_SET_INDICATOR, 0, 0);
+    while(!req.complete)
+        Sleep(200);
 
-    std::wcout
-        << L"rc=" << rc << std::endl
-        << L"==== After ===" << std::endl
-        << L"getInd.PayloadSize: " << getInd.PayloadSize << std::endl
-        << L"getInd.IndicatorStatus: " << getInd.IndicatorStatus << std::endl
-        ;
+    printf("SET_INDICATOR: hresult=0x%lx (%s), getInd.WinBioHresult=0x%lx, getInd.IndicatorStatus=%lu\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+        (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
+}
+
+void
+getIndicator()
+{
+    WINBIO_GET_INDICATOR getInd = {0};
+    MyMem in(NULL, 0), out((UCHAR*)&getInd, sizeof(getInd));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_INDICATOR, &out, &in);
+
+    printf("about to IOCTL_BIOMETRIC_GET_INDICATOR (SensorAdapterGetIndicatorStatus)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_INDICATOR, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    printf("GET_INDICATOR: hresult=0x%lx (%s), WinBioHresult=0x%lx, IndicatorStatus=%lu\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+        (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
 }
 
 void
@@ -5182,7 +5385,7 @@ nop()
 void
 usage()
 {
-    puts("Usage: wine a.exe <nop|identify|enroll>");
+    puts("Usage: wine a.exe <nop|identify|enroll|set-led [on|off]|list-db|clear-db|delete-record|identify>");
 }
 
 
@@ -5190,11 +5393,11 @@ int
 main(int argc, char *argv[])
 {
     char *br = getenv("SANDBOX_BREAKPOINTS");
-    void (*what)();
+    void (*what)() = NULL;
+    WINBIO_INDICATOR_STATUS ledState = WINBIO_INDICATOR_OFF;
     IClassFactory *fact = 0;
 
-#if 0
-    if(argc != 2) {
+    if(argc < 2) {
         usage();
         return 3;
     }
@@ -5205,6 +5408,28 @@ main(int argc, char *argv[])
     else if(strcasecmp(argv[1], "enroll") == 0) {
         what = enroll;
     }
+    else if(strcasecmp(argv[1], "set-led") == 0) {
+        if(argc < 3 || (strcasecmp(argv[2], "on") != 0 && strcasecmp(argv[2], "off") != 0)) {
+            puts("Usage: wine a.exe set-led <on|off>");
+            return 3;
+        }
+        ledState = (strcasecmp(argv[2], "on") == 0) ? WINBIO_INDICATOR_ON : WINBIO_INDICATOR_OFF;
+    }
+    else if(strcasecmp(argv[1], "list-db") == 0) {
+        what = listDatabase;
+    }
+    else if(strcasecmp(argv[1], "identify-all") == 0) {
+        what = identifyAll;
+    }
+    else if(strcasecmp(argv[1], "clear-db") == 0) {
+        what = clearDatabase;
+    }
+    else if(strcasecmp(argv[1], "delete-record") == 0) {
+        if(argc < 3) {
+            puts("Usage: wine a.exe delete-record <subfactor>");
+            return 3;
+        }
+    }
     else if(strcasecmp(argv[1], "nop") == 0) {
         what = nop;
     }
@@ -5212,7 +5437,6 @@ main(int argc, char *argv[])
         usage();
         return 3;
     }
-#endif
 
     // EnumerateAllDevices();
 
@@ -5376,41 +5600,17 @@ main(int argc, char *argv[])
 
     Sleep(1000);
 
-    // return 0;
-
-    // Follow the sequence indicated at:
-    // https://learn.microsoft.com/en-us/windows-hardware/drivers/biometric/supporting-biometric-ioctl-calling-sequence
-
-    std::cout << "IOCTL_BIOMETRIC_GET_ATTRIBUTES: 0x" << std::hex << IOCTL_BIOMETRIC_GET_ATTRIBUTES << std::endl;
-    std::cout << "IOCTL_BIOMETRIC_RESET: 0x" << std::hex << IOCTL_BIOMETRIC_RESET << std::endl;
-    std::cout << "IOCTL_BIOMETRIC_CALIBRATE: 0x" << std::hex << IOCTL_BIOMETRIC_CALIBRATE << std::endl;
-    std::cout << "IOCTL_BIOMETRIC_GET_SENSOR_STATUS: 0x" << std::hex << IOCTL_BIOMETRIC_GET_SENSOR_STATUS << std::endl;
-    std::cout << "IOCTL_BIOMETRIC_CAPTURE_DATA: 0x" << std::hex << IOCTL_BIOMETRIC_CAPTURE_DATA << std::endl;
-
-//    reset();
-    // resetIoctl();
-
-    // printf(">>>>>>>>>>>>>>>>>>>>>>> about to setting mode...\r\n");
-    // setMode(WINBIO_SENSOR_BASIC_MODE); // WINBIO_SENSOR_ADVANCED_MODE
-    // printf("<<<<<<<<<<<<<<<<<<<<<<< done setting mode...\r\n");
-
     getAttributes();
-    getSensorStatus();
-    getIndicator();
-    setIndicator();
-    // getIndicator();
-    // resetIoctl();
 
-    // what();
-    enroll();
+    if(strcasecmp(argv[1], "set-led") == 0) {
+        setLed(ledState);
+    }
+    else if(strcasecmp(argv[1], "delete-record") == 0) {
+        deleteRecord((DWORD)atoi(argv[2]));
+    }
+    else if(what) {
+        what();
+    }
 
-    // printf("======================================================\r\n");
-    // printf("Sleeping 10 secons....\r\n");
-    // printf("======================================================\r\n");
-    // Sleep(10000);
-
-    // identify();
-
-    // printf("about to de-init\r\n");
-    // inst->OnDeinitialize(aDriver);
+    return 0;
 }
