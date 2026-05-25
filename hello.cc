@@ -452,6 +452,9 @@ DEFINE_GUID(IID_IDeviceExtension, 0x5cd8d6f8, 0x3725, 0x4cfa, 0x98, 0xca, 0x39, 
 
 DEFINE_GUID(IID_UsbTargetAliasMaybe, 0xA44A3FEF, 0x88D9, 0x4C6E, 0xBC, 0xB1, 0xE5, 0xBF, 0xA3, 0x8B, 0xC4, 0xA6);
 
+DEFINE_GUID(WINBIO_SYNAPTICS_VENDOR_FORMAT_UUID,
+    0x72A4E245, 0xFA20, 0x46DC, 0x95, 0x03, 0x85, 0xBA, 0xD0, 0xC0, 0x27, 0xA9);
+
 // Driver also defines IPowerPolicyCallbackWakeFromS0 - 7EE9F0FA-5A1A-48df-A35E-8DB42F519B66
 // IPowerPolicyCallbackWakeFromSx - 3AB1426D-689C-4220-901E-03C6D909B5F5
 
@@ -1737,6 +1740,30 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
 
 void setIndicator(WINBIO_INDICATOR_STATUS status);
 
+static bool use_synaptics_vendor_format()
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("USE_SYNAPTICS_FORMAT");
+        cached = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
+        HLOG_INFO("Capture format: %s\n", cached ? "Synaptics vendor UUID" : "ANSI-381");
+    }
+    return cached != 0;
+}
+
+static void configure_capture_format(WINBIO_CAPTURE_PARAMETERS *params)
+{
+    params->Format.Owner = WINBIO_ANSI_381_FORMAT_OWNER;
+    params->Format.Type = WINBIO_ANSI_381_FORMAT_TYPE;
+    params->VendorFormat = {};
+
+    if (use_synaptics_vendor_format()) {
+        params->Format.Owner = 0;
+        params->Format.Type = 0;
+        params->VendorFormat = WINBIO_SYNAPTICS_VENDOR_FORMAT_UUID;
+    }
+}
+
 void
 identify(WINBIO_SENSOR_STATUS sensorStatus)
 {
@@ -1751,10 +1778,7 @@ identify(WINBIO_SENSOR_STATUS sensorStatus)
 
     params.PayloadSize = sizeof(params);
     params.Purpose = WINBIO_PURPOSE_IDENTIFY;
-    ((uint64_t*)&params.VendorFormat)[0] = 0x46DCFA2072A4E245L;
-    ((uint64_t*)&params.VendorFormat)[1] = 0xA927C0D0BA850395L;
-    params.Format.Owner = 0;
-    params.Format.Type = 0;
+    configure_capture_format(&params);
     params.Flags = WINBIO_DATA_FLAG_PROCESSED;
 
     setIndicator(WINBIO_INDICATOR_ON);
@@ -2038,10 +2062,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
 
         params.PayloadSize = sizeof(params);
         params.Purpose = WINBIO_PURPOSE_ENROLL_FOR_IDENTIFICATION;
-        ((uint64_t*)&params.VendorFormat)[0] = 0x46DCFA2072A4E245L;
-        ((uint64_t*)&params.VendorFormat)[1] = 0xA927C0D0BA850395L;
-        params.Format.Owner = 0;
-        params.Format.Type = 0;
+        configure_capture_format(&params);
         params.Flags = WINBIO_DATA_FLAG_PROCESSED;
 
         HostMem in((UCHAR*)&params, sizeof(params)), out(obuf, sizeof(obuf));
@@ -2208,10 +2229,7 @@ identifyAll(WINBIO_SENSOR_STATUS sensorStatus)
     WINBIO_CAPTURE_PARAMETERS params = {0};
     params.PayloadSize = sizeof(params);
     params.Purpose = WINBIO_PURPOSE_IDENTIFY;
-    ((uint64_t*)&params.VendorFormat)[0] = 0x46DCFA2072A4E245L;
-    ((uint64_t*)&params.VendorFormat)[1] = 0xA927C0D0BA850395L;
-    params.Format.Owner = 0;
-    params.Format.Type = 0;
+    configure_capture_format(&params);
     params.Flags = WINBIO_DATA_FLAG_PROCESSED;
 
     setIndicator(WINBIO_INDICATOR_ON);
