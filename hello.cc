@@ -6096,7 +6096,7 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
 void
 usage(const char *prog)
 {
-    printf("Usage: %s <nop|identify|enroll|set-led [on|off]|list-db|clear-db|delete-record|identify>\n", prog);
+    printf("Usage: %s <nop|enroll|identify|reset|set-led [on|off]|list-db|clear-db|delete-record|identify>\n", prog);
 }
 
 
@@ -6118,6 +6118,9 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "enroll") == 0) {
         what = enroll;
+    }
+    else if(strcasecmp(argv[1], "reset") == 0) {
+        what = reset;
     }
     else if(strcasecmp(argv[1], "set-led") == 0) {
         if(argc < 3 || (strcasecmp(argv[2], "on") != 0 && strcasecmp(argv[2], "off") != 0)) {
