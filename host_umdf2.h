@@ -76,7 +76,9 @@ typedef NTSTATUS (*PWDF2_VERSION_BIND)(WDF2_BIND_INFO *bindInfo,
 //   WDF_INTERFACE_HEADER:
 //     +0x00: Size/InterfaceSize (ULONG; must be >= 0x38)
 //     +0x04: _pad04
-//     +0x08: InterfaceType (GUID*, can be NULL)
+//     +0x08: BindClient (function ptr — NOT a GUID! Disassembly of Wbdi.dll
+//            FxDriverEntryUm shows: mov [rbx+0x08],%rax; call [thunk=jmp *rax]
+//            called as: BindClient(param_2, &WDF_BIND_INFO, &WdfDriverGlobals))
 //   WDF_LOADER_INTERFACE body:
 //     +0x10: RegisterLibrary (function ptr, NULL = unused)
 //     +0x18: VersionBind (function ptr, stored in loaderIface but also passed as param_2)
@@ -88,7 +90,7 @@ typedef NTSTATUS (*PWDF2_VERSION_BIND)(WDF2_BIND_INFO *bindInfo,
 typedef struct _WUDF_LOADER_INTERFACE {
     ULONG   Size;            // +0x00: must be >= 0x38
     ULONG   _pad04;          // +0x04
-    void   *InterfaceType;   // +0x08: GUID* (can be NULL)
+    void   *BindClient;      // +0x08: called as BindClient(versionBind, bindInfo, ppGlobals)
     void   *RegisterLibrary; // +0x10: NULL
     void   *VersionBind;     // +0x18: PWDF2_VERSION_BIND (also passed as param_2)
     void   *VersionUnbind;   // +0x20: NULL
@@ -901,20 +903,236 @@ stub_WdfCmResourceListGetDescriptor(void *globals, void *list, ULONG index)
     return nullptr;
 }
 
-// Generic catch-all stubs (used for unimplemented slots)
-static NTSTATUS WINAPI stub_nop_ntstatus(void *g, ...) { WDF2_LOG(1, "[WDF2] STUB: unimplemented WDF table entry called\n"); return 0; }
-static void      WINAPI stub_nop_void   (void *g, ...) {}
-static void*     WINAPI stub_nop_ptr    (void *g, ...) { return nullptr; }
-static ULONG     WINAPI stub_nop_ulong  (void *g, ...) { return 0; }
+// -----------------------------------------------------------------------
+// USB WDF stubs  (indices 202-239)
+// -----------------------------------------------------------------------
+
+// Fake USB objects — populated by stub_WdfUsbTargetDeviceCreate
+struct Wdf2UsbPipe {
+    UCHAR endpointAddr;
+    ULONG maxPacketSize;
+    ULONG pipeType;   // WdfUsbPipeTypeBulk=3, WdfUsbPipeTypeInterrupt=4
+};
+struct Wdf2UsbInterface {
+    UCHAR        numPipes;
+    Wdf2UsbPipe  pipes[4];
+};
+struct Wdf2UsbDevice {
+    USHORT           idVendor;
+    USHORT           idProduct;
+    Wdf2UsbInterface iface;
+};
+static Wdf2UsbDevice g_wdf2UsbDev;
+
+// --- WdfUsbTargetDeviceCreate (index 202) ---
+static NTSTATUS WINAPI
+stub_WdfUsbTargetDeviceCreate(void *globals, void *device, void *attrs, void **pUsbDevice)
+{
+    // Parse USB_ID env var (format "vid:pid") for VID/PID, default = Goodix 27c6:6594
+    USHORT vid = 0x27c6, pid = 0x6594;
+    const char *usb_id = getenv("USB_ID");
+    if (usb_id) sscanf(usb_id, "%hx:%hx", &vid, &pid);
+
+    g_wdf2UsbDev.idVendor  = vid;
+    g_wdf2UsbDev.idProduct = pid;
+    // Two bulk endpoints: 0x81 bulk-in, 0x01 bulk-out
+    g_wdf2UsbDev.iface.numPipes   = 2;
+    g_wdf2UsbDev.iface.pipes[0]   = { 0x81, 512, 3 }; // bulk-in
+    g_wdf2UsbDev.iface.pipes[1]   = { 0x01, 512, 3 }; // bulk-out
+
+    HLOG_USER("[WDF2] WdfUsbTargetDeviceCreate -> %04x:%04x (2 bulk pipes)\n", vid, pid);
+    if (pUsbDevice) *pUsbDevice = &g_wdf2UsbDev;
+    return 0;
+}
+
+// --- WdfUsbTargetDeviceRetrieveInformation (index 204) ---
+// Fills WDF_USB_DEVICE_INFORMATION: Size, USBD_Version, Supported_USB_Version,
+// HcdPortCapabilities, Traits
+static NTSTATUS WINAPI
+stub_WdfUsbTargetDeviceRetrieveInformation(void *globals, void *usbDevice, void *info)
+{
+    WDF2_LOG(1, "[WDF2] WdfUsbTargetDeviceRetrieveInformation\n");
+    if (info) {
+        ULONG sz = *(ULONG*)info;
+        if (sz >= 20) {
+            memset(info, 0, sz);
+            *(ULONG*)((char*)info + 0)  = sz;          // Size
+            *(ULONG*)((char*)info + 4)  = 0x00050000;  // USBD_Version (5.0 = WinXP+)
+            *(ULONG*)((char*)info + 8)  = 0x00000200;  // Supported_USB_Version (USB 2.0)
+            *(ULONG*)((char*)info + 12) = 0;           // HcdPortCapabilities
+            *(ULONG*)((char*)info + 16) = 2;           // Traits: WDF_USB_DEVICE_TRAIT_AT_HIGH_SPEED
+        }
+    }
+    return 0;
+}
+
+// --- WdfUsbTargetDeviceGetDeviceDescriptor (index 205) --- void return
+static void WINAPI
+stub_WdfUsbTargetDeviceGetDeviceDescriptor(void *globals, void *usbDevice, void *desc)
+{
+    auto *ud = (Wdf2UsbDevice*)usbDevice;
+    HLOG_USER("[WDF2] WdfUsbTargetDeviceGetDeviceDescriptor -> %04x:%04x\n",
+              ud ? ud->idVendor : 0, ud ? ud->idProduct : 0);
+    if (!desc) return;
+    // USB_DEVICE_DESCRIPTOR layout (18 bytes)
+    UCHAR *d = (UCHAR*)desc;
+    memset(d, 0, 18);
+    d[0]  = 18;    d[1] = 0x01;               // bLength, bDescriptorType
+    d[2]  = 0x00;  d[3] = 0x02;               // bcdUSB = 0x0200
+    d[4]  = 0x00;  d[5] = 0x00; d[6] = 0x00; // bDeviceClass/Sub/Protocol
+    d[7]  = 0x40;                              // bMaxPacketSize0 = 64
+    *(USHORT*)(d+8)  = ud ? ud->idVendor  : 0x27c6;
+    *(USHORT*)(d+10) = ud ? ud->idProduct : 0x6594;
+    *(USHORT*)(d+12) = 0x0100;                // bcdDevice
+    d[14] = 1; d[15] = 2; d[16] = 3;         // iManufacturer, iProduct, iSerial
+    d[17] = 1;                                 // bNumConfigurations
+}
+
+// --- WdfUsbTargetDeviceGetNumInterfaces (index 210) --- returns UCHAR
+static UCHAR WINAPI
+stub_WdfUsbTargetDeviceGetNumInterfaces(void *globals, void *usbDevice)
+{
+    HLOG_USER("[WDF2] WdfUsbTargetDeviceGetNumInterfaces -> 1\n");
+    return 1;
+}
+
+// --- WdfUsbTargetDeviceSelectConfig (index 211) ---
+// Output (for SingleInterface): Types.SingleInterface.NumberConfiguredPipes (at +8)
+//                               Types.SingleInterface.ConfiguredUsbInterface (at +16)
+static NTSTATUS WINAPI
+stub_WdfUsbTargetDeviceSelectConfig(void *globals, void *usbDevice,
+                                    void *pipeAttrs, void *params)
+{
+    auto *ud = (Wdf2UsbDevice*)usbDevice;
+    HLOG_USER("[WDF2] WdfUsbTargetDeviceSelectConfig\n");
+    if (params && ud) {
+        // Types union starts at offset 8; SingleInterface layout:
+        //   +0 (=+8):  NumberConfiguredPipes (UCHAR)
+        //   +8 (=+16): ConfiguredUsbInterface (ptr, 8-byte aligned)
+        *((UCHAR*)params + 8)         = ud->iface.numPipes;
+        *(void**)((char*)params + 16) = &ud->iface;
+    }
+    return 0;
+}
+
+// --- WdfUsbTargetPipeGetInformation (index 216) --- void return
+// WDF_USB_PIPE_INFORMATION: Size(+0), MaxPacketSize(+4), EndpointAddr(+8),
+//   Interval(+9), SettingIndex(+10), PipeType(+12), MaxTransferSize(+16)
+static void WINAPI
+stub_WdfUsbTargetPipeGetInformation(void *globals, void *pipe, void *info)
+{
+    auto *p = (Wdf2UsbPipe*)pipe;
+    WDF2_LOG(1, "[WDF2] WdfUsbTargetPipeGetInformation(pipe=%p ep=0x%02x)\n",
+             pipe, p ? p->endpointAddr : 0);
+    if (!info || !p) return;
+    ULONG sz = *(ULONG*)info;
+    if (sz < 20) return;
+    memset(info, 0, sz);
+    *(ULONG*)((char*)info + 0)  = sz;
+    *(ULONG*)((char*)info + 4)  = p->maxPacketSize;
+    *((UCHAR*)info + 8)         = p->endpointAddr;
+    *((UCHAR*)info + 9)         = 0;   // Interval
+    *((UCHAR*)info + 10)        = 0;   // SettingIndex
+    *(ULONG*)((char*)info + 12) = p->pipeType;
+    *(ULONG*)((char*)info + 16) = 4096; // MaximumTransferSize
+}
+
+// --- WdfUsbTargetPipeIsInEndpoint (index 217) --- returns BOOLEAN
+static UCHAR WINAPI
+stub_WdfUsbTargetPipeIsInEndpoint(void *globals, void *pipe)
+{
+    auto *p = (Wdf2UsbPipe*)pipe;
+    UCHAR r = (p && (p->endpointAddr & 0x80)) ? 1 : 0;
+    WDF2_LOG(2, "[WDF2] WdfUsbTargetPipeIsInEndpoint(ep=0x%02x) -> %u\n",
+             p ? p->endpointAddr : 0, r);
+    return r;
+}
+
+// --- WdfUsbTargetPipeIsOutEndpoint (index 218) --- returns BOOLEAN
+static UCHAR WINAPI
+stub_WdfUsbTargetPipeIsOutEndpoint(void *globals, void *pipe)
+{
+    auto *p = (Wdf2UsbPipe*)pipe;
+    UCHAR r = (p && !(p->endpointAddr & 0x80)) ? 1 : 0;
+    WDF2_LOG(2, "[WDF2] WdfUsbTargetPipeIsOutEndpoint(ep=0x%02x) -> %u\n",
+             p ? p->endpointAddr : 0, r);
+    return r;
+}
+
+// --- WdfUsbTargetPipeSetNoMaximumPacketSizeCheck (index 220) --- void, no-op
+static void WINAPI
+stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(void *globals, void *pipe)
+{
+    WDF2_LOG(2, "[WDF2] WdfUsbTargetPipeSetNoMaximumPacketSizeCheck no-op\n");
+}
+
+// --- WdfUsbTargetPipeConfigContinuousReader (index 225) --- no-op
+// Sets up a continuous reader on bulk/interrupt-in pipe; we have no real USB,
+// so just succeed and let the driver proceed.
+static NTSTATUS WINAPI
+stub_WdfUsbTargetPipeConfigContinuousReader(void *globals, void *pipe, void *config)
+{
+    HLOG_USER("[WDF2] WdfUsbTargetPipeConfigContinuousReader no-op\n");
+    return 0;
+}
+
+// --- WdfUsbTargetDeviceGetInterface (index 236) ---
+static void* WINAPI
+stub_WdfUsbTargetDeviceGetInterface(void *globals, void *usbDevice, UCHAR ifaceIdx)
+{
+    auto *ud = (Wdf2UsbDevice*)usbDevice;
+    HLOG_USER("[WDF2] WdfUsbTargetDeviceGetInterface(idx=%u)\n", (unsigned)ifaceIdx);
+    return (ud && ifaceIdx == 0) ? &ud->iface : nullptr;
+}
+
+// --- WdfUsbInterfaceGetNumConfiguredPipes (index 238) --- returns UCHAR
+static UCHAR WINAPI
+stub_WdfUsbInterfaceGetNumConfiguredPipes(void *globals, void *iface)
+{
+    auto *i = (Wdf2UsbInterface*)iface;
+    UCHAR n = i ? i->numPipes : 0;
+    HLOG_USER("[WDF2] WdfUsbInterfaceGetNumConfiguredPipes -> %u\n", (unsigned)n);
+    return n;
+}
+
+// --- WdfUsbInterfaceGetConfiguredPipe (index 239) ---
+static void* WINAPI
+stub_WdfUsbInterfaceGetConfiguredPipe(void *globals, void *iface, UCHAR pipeIdx, void *pipeInfo)
+{
+    auto *i = (Wdf2UsbInterface*)iface;
+    if (!i || pipeIdx >= i->numPipes) {
+        HLOG_USER("[WDF2] WdfUsbInterfaceGetConfiguredPipe(idx=%u) -> NULL\n", (unsigned)pipeIdx);
+        return nullptr;
+    }
+    auto *p = &i->pipes[pipeIdx];
+    HLOG_USER("[WDF2] WdfUsbInterfaceGetConfiguredPipe(idx=%u) -> ep=0x%02x\n",
+              (unsigned)pipeIdx, p->endpointAddr);
+    if (pipeInfo) stub_WdfUsbTargetPipeGetInformation(globals, p, pipeInfo);
+    return p;
+}
+
+// Generic catch-all stubs (used for unimplemented slots).
+// Each index gets its own instantiation so the log shows the exact slot.
+template<int N>
+struct WdfStubSlot {
+    static NTSTATUS WINAPI stub(void *g, ...) {
+        WDF2_LOG(1, "[WDF2] STUB: unimplemented WDF table entry [%d] called\n", N);
+        return 0;
+    }
+    static void fill() {
+        g_wdf2Table[N] = (WDFFUNC)stub;
+        WdfStubSlot<N-1>::fill();
+    }
+};
+template<> struct WdfStubSlot<-1> { static void fill() {} };
 
 // -----------------------------------------------------------------------
 // Fill g_wdf2Table with stub function pointers
 // -----------------------------------------------------------------------
 static void fill_wdf2_table(void)
 {
-    // Default all slots to the generic no-op
-    for (int i = 0; i < 257; i++)
-        g_wdf2Table[i] = (WDFFUNC)stub_nop_ntstatus;
+    // Default all slots to per-index stubs (so log shows which slot was hit)
+    WdfStubSlot<256>::fill();
 
 #define SET(idx, fn) g_wdf2Table[idx] = (WDFFUNC)(fn)
     SET(13,  stub_WdfDeviceSetDeviceState);
@@ -982,6 +1200,19 @@ static void fill_wdf2_table(void)
     SET(175, stub_WdfRequestGetIoQueue);
     SET(186, stub_WdfCmResourceListGetCount);
     SET(187, stub_WdfCmResourceListGetDescriptor);
+    SET(202, stub_WdfUsbTargetDeviceCreate);
+    SET(204, stub_WdfUsbTargetDeviceRetrieveInformation);
+    SET(205, stub_WdfUsbTargetDeviceGetDeviceDescriptor);
+    SET(210, stub_WdfUsbTargetDeviceGetNumInterfaces);
+    SET(211, stub_WdfUsbTargetDeviceSelectConfig);
+    SET(216, stub_WdfUsbTargetPipeGetInformation);
+    SET(217, stub_WdfUsbTargetPipeIsInEndpoint);
+    SET(218, stub_WdfUsbTargetPipeIsOutEndpoint);
+    SET(220, stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck);
+    SET(225, stub_WdfUsbTargetPipeConfigContinuousReader);
+    SET(236, stub_WdfUsbTargetDeviceGetInterface);
+    SET(238, stub_WdfUsbInterfaceGetNumConfiguredPipes);
+    SET(239, stub_WdfUsbInterfaceGetConfiguredPipe);
 #undef SET
 }
 
@@ -1026,6 +1257,31 @@ host_VersionBind(WDF2_BIND_INFO *bindInfo, void **ppComponentGlobals)
 // Returns STATUS and copies at most outBufLen bytes to outBuf.
 // -----------------------------------------------------------------------
 #pragma pop_macro("HLOG_USER")
+
+// -----------------------------------------------------------------------
+// host_BindClient — stored at loaderIface.BindClient (+0x08).
+// Called by FxDriverEntryUm as: BindClient(versionBind, bindInfo, ppGlobals)
+//   versionBind = param_2 from FxDriverEntryUm call (= host_VersionBind)
+//   bindInfo    = &WdfFunctions_02015_bindInfo embedded in driver .data
+//   ppGlobals   = &WdfDriverGlobals global ptr in driver .data
+// We simply delegate to host_VersionBind.
+// -----------------------------------------------------------------------
+static NTSTATUS WINAPI
+host_BindClient(void *versionBind, WDF2_BIND_INFO *bindInfo, void **ppGlobals)
+{
+    WDF2_LOG(2, "[WDF2] host_BindClient: versionBind=%p bindInfo=%p ppGlobals=%p\n",
+             versionBind, (void*)bindInfo, (void*)ppGlobals);
+    if (bindInfo)
+        WDF2_LOG(2, "[WDF2]   bindInfo: ver=%lu.%lu.%lu FuncCount=%lu FuncTable=%p\n",
+                 (unsigned long)bindInfo->Version.Major,
+                 (unsigned long)bindInfo->Version.Minor,
+                 (unsigned long)bindInfo->Version.Build,
+                 (unsigned long)bindInfo->FuncCount,
+                 (void*)bindInfo->FuncTable);
+    // Delegate to host_VersionBind (or call the passed-in versionBind if different)
+    auto *fn = (PWDF2_VERSION_BIND)versionBind;
+    return fn ? fn(bindInfo, ppGlobals) : host_VersionBind(bindInfo, ppGlobals);
+}
 
 static NTSTATUS
 wdf2_dispatch_ioctl(ULONG ioctlCode,

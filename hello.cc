@@ -3503,7 +3503,8 @@ main(int argc, char *argv[])
 
         WUDF_LOADER_INTERFACE loaderIface = {};
         loaderIface.Size        = sizeof(WUDF_LOADER_INTERFACE); // 0x38
-        loaderIface.VersionBind = (void*)host_VersionBind;
+        loaderIface.BindClient  = (void*)host_BindClient;   // +0x08: called as BindClient(versionBind,bindInfo,ppGlobals)
+        loaderIface.VersionBind = (void*)host_VersionBind;  // +0x18
 
         { const char *lv = getenv("WDF2_LOGLEVEL"); if (lv) g_umdf2_loglevel = atoi(lv); }
         HLOG_USER(">>> calling FxDriverEntryUm (WDF2_LOGLEVEL=%d)\n", g_umdf2_loglevel);
