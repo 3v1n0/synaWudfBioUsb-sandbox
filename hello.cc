@@ -5892,7 +5892,7 @@ nop()
 void
 usage()
 {
-    puts("Usage: wine a.exe <nop|identify|enroll|set-led [on|off]|list-db|clear-db|delete-record|refresh-cache|identify>");
+    puts("Usage: wine a.exe <nop|identify|enroll|set-led [on|off]|list-db|clear-db|delete-record|identify>");
 }
 
 
@@ -6119,11 +6119,6 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "delete-record") == 0) {
         deleteRecord((DWORD)atoi(argv[2]));
-        listDatabase();
-    }
-    else if(strcasecmp(argv[1], "refresh-cache") == 0) {
-        // subfactor 0 triggers RefreshCache without deleting any records
-        deleteRecord(0);
         listDatabase();
     }
     else if(what) {
