@@ -4420,7 +4420,9 @@ identifyFeatureSet()
         (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
         (unsigned long)stl_obuf.PayloadSize, (long long)stl_req.informationSize);
 
-    UCHAR ia_obuf[4096] = {0};
+    // WBF serializes a variable-length WINBIO_PRESENCE array into this buffer.
+    static UCHAR ia_obuf[8 * 1024];
+    memset(ia_obuf, 0, sizeof(ia_obuf));
     MyMem ia_in(NULL, 0), ia_out(ia_obuf, sizeof(ia_obuf));
     MyRequest ia_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &ia_out, &ia_in);
 
@@ -4988,7 +4990,9 @@ identifyAll()
         }
     }
 
-    UCHAR obuf[4096] = {0};
+    // WBF serializes a variable-length WINBIO_PRESENCE array into this buffer.
+    static UCHAR obuf[8 * 1024];
+    memset(obuf, 0, sizeof(obuf));
     MyMem in(NULL, 0), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &out, &in);
 
