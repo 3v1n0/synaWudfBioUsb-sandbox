@@ -4918,7 +4918,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
         }
 
         // scan failed?
-        if(data->SensorStatus == 2) {
+        if(data->SensorStatus == WINBIO_SENSOR_REJECT) {
             HLOG_USER("Capture rejected: SensorStatus=%lu RejectDetail=0x%lx (%s)\n",
                 (unsigned long)data->SensorStatus,
                 (unsigned long)data->RejectDetail,
