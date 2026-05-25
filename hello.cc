@@ -4932,7 +4932,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
             // UPDATE_ENROLLMENT: driver expects WDF in/out both 0x48 bytes.
             // Names are aligned with WINBIO_EXTENDED_ENROLLMENT_STATUS where possible.
             // NOTE: only TemplateStatus/PercentComplete are confirmed here.
-            typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT {
+            typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE {
                 HRESULT TemplateStatus;
                 UCHAR Reserved1[0x24];
                 ULONG PercentComplete;
@@ -4945,13 +4945,11 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
                     ULONG LeftEdge;
                     ULONG RightEdge;
                 } Fingerprint;
-            } SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT;
-            typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_INPUT {
-                UCHAR Data[0x48];
-            } SYNA_UPDATE_ENROLLMENT_WIRE_INPUT;
+            } SYNA_UPDATE_ENROLLMENT_WIRE;
+            static_assert(sizeof(SYNA_UPDATE_ENROLLMENT_WIRE) == 0x48, "Update Enrollment wire size must be 0x48");
 
-            SYNA_UPDATE_ENROLLMENT_WIRE_INPUT ueInput = {0};
-            SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT ueOutput = {0};
+            SYNA_UPDATE_ENROLLMENT_WIRE ueInput = {0};
+            SYNA_UPDATE_ENROLLMENT_WIRE ueOutput = {0};
             MyMem in((UCHAR*)&ueInput, sizeof(ueInput)), out((UCHAR*)&ueOutput, sizeof(ueOutput));
             MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, &out, &in);
 
