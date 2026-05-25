@@ -5279,6 +5279,21 @@ clearDatabase()
 }
 
 void
+resetOwnership()
+{
+    MyMem in(NULL, 0), out(NULL, 0);
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_RESET_OWNERSHIP, &out, &in);
+
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_RESET_OWNERSHIP (OnResetOwnership)\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_RESET_OWNERSHIP, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    HLOG_USER("RESET_OWNERSHIP: hresult=0x%lx (%s)\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+}
+
+void
 resetIoctl()
 {
     char buf[1024*10];
@@ -6135,7 +6150,7 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
 void
 usage(const char *prog)
 {
-    printf("Usage: %s <nop|enroll|identify|identify-all|reset|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
+    printf("Usage: %s <nop|enroll|identify|identify-all|reset|reset-ownership|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
 }
 
 static void
@@ -6189,6 +6204,7 @@ main(int argc, char *argv[])
             strcasecmp(argv[1], "identify-all") == 0 ||
             strcasecmp(argv[1], "list-db") == 0 ||
             strcasecmp(argv[1], "clear-db") == 0 ||
+            strcasecmp(argv[1], "reset-ownership") == 0 ||
             strcasecmp(argv[1], "reset") == 0 ||
             strcasecmp(argv[1], "nop") == 0) {
         // valid, no extra args needed
@@ -6342,6 +6358,9 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "clear-db") == 0) {
         clearDatabase();
+    }
+    else if(strcasecmp(argv[1], "reset-ownership") == 0) {
+        resetOwnership();
     }
     else if(strcasecmp(argv[1], "reset") == 0) {
         reset();
