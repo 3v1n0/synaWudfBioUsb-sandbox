@@ -4420,13 +4420,8 @@ identifyFeatureSet()
         (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
         (unsigned long)stl_obuf.PayloadSize, (long long)stl_req.informationSize);
 
-    const DWORD ia_obuf_size = 4096;
-    UCHAR *ia_obuf = (UCHAR *)calloc(1, ia_obuf_size);
-    if(!ia_obuf) {
-        HLOG_USER("identifyFeatureSet: failed to allocate identify buffer\n");
-        return;
-    }
-    MyMem ia_in(NULL, 0), ia_out(ia_obuf, ia_obuf_size);
+    UCHAR ia_obuf[4096] = {0};
+    MyMem ia_in(NULL, 0), ia_out(ia_obuf, sizeof(ia_obuf));
     MyRequest ia_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &ia_out, &ia_in);
 
     HLOG_USER("GET_IDENTIFY_ALL\n");
@@ -4458,8 +4453,6 @@ identifyFeatureSet()
     for(LONG_PTR i=0;i<ia_req.informationSize && i<96;i++)
         HLOG_DEBUG("%02x", ia_obuf[i]);
     HLOG_DEBUG("\n");
-
-    free(ia_obuf);
 }
 
 void setIndicator(WINBIO_INDICATOR_STATUS status);
@@ -4995,13 +4988,8 @@ identifyAll()
         }
     }
 
-    DWORD obufSize = 4096;
-    UCHAR *obuf = (UCHAR *)calloc(1, obufSize);
-    if(!obuf) {
-        HLOG_USER("identifyAll: failed to allocate output buffer\n");
-        return;
-    }
-    MyMem in(NULL, 0), out(obuf, obufSize);
+    UCHAR obuf[4096] = {0};
+    MyMem in(NULL, 0), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &out, &in);
 
     HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
@@ -5031,8 +5019,6 @@ identifyAll()
     for(LONG_PTR i=0;i<req.informationSize && i<96;i++)
         HLOG_DEBUG("%02x", obuf[i]);
     HLOG_DEBUG("\n");
-
-    free(obuf);
 }
 
 void
@@ -5043,22 +5029,23 @@ setLed(WINBIO_INDICATOR_STATUS state)
     MyMem in((UCHAR*)&ibuf, sizeof(ibuf)), out((UCHAR*)&obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, &out, &in);
 
-    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE (OnSetLedState, state=%s)\r\n",
+    HLOG_USER("SET_LED_STATE (state=%s)\r\n",
         state == WINBIO_INDICATOR_ON ? "WINBIO_INDICATOR_ON" : "WINBIO_INDICATOR_OFF");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, 0, 0);
     while(!req.complete)
         Sleep(200);
 
-    HLOG_INFO("SET_LED_STATE: hresult=0x%lx (%s)\r\n",
-        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+    HLOG_USER("SET_LED_STATE: hresult=0x%lx (%s), out=%lu\r\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+        (unsigned long)obuf);
 }
 
 void
 listDatabase()
 {
-    UCHAR ibuf_rc[8] = {0};
+    uint64_t ibuf_rc = 0;
     SIZE_T recordCount = 0;
-    MyMem in_rc(ibuf_rc, sizeof(ibuf_rc)), out_rc((UCHAR*)&recordCount, sizeof(recordCount));
+    MyMem in_rc((UCHAR*)&ibuf_rc, sizeof(ibuf_rc)), out_rc((UCHAR*)&recordCount, sizeof(recordCount));
     MyRequest req_rc(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out_rc, &in_rc);
 
     HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT (WbioStorageGetRecordCount)\r\n");
@@ -5066,15 +5053,14 @@ listDatabase()
     while(!req_rc.complete)
         Sleep(200);
 
-    HLOG_INFO("GET_RECORD_COUNT: hresult=0x%lx (%s)\r\n",
-        (unsigned long)req_rc.completionStatus, hresult_to_sting(req_rc.completionStatus));
+    HLOG_USER("GET_RECORD_COUNT: hresult=0x%lx (%s), count=%zu\r\n",
+        (unsigned long)req_rc.completionStatus, hresult_to_sting(req_rc.completionStatus),
+        recordCount);
 
     if(FAILED(req_rc.completionStatus)) {
         HLOG_USER("GET_RECORD_COUNT failed\r\n");
         return;
     }
-
-    HLOG_USER("Record count: %zu\r\n", recordCount);
 
     if(recordCount == 0) {
         HLOG_USER("Database is empty\r\n");
@@ -5082,17 +5068,21 @@ listDatabase()
     }
 
     {
-        UCHAR gcd_ibuf[4] = {0};
-        UCHAR gcd_obuf[256] = {0};
-        MyMem gcd_in(gcd_ibuf, sizeof(gcd_ibuf)), gcd_out(gcd_obuf, sizeof(gcd_obuf));
+        uint32_t gcd_ibuf = 0;
+        UCHAR gcd_obuf[252] = {0};
+        MyMem gcd_in((UCHAR*)&gcd_ibuf, sizeof(gcd_ibuf)), gcd_out(gcd_obuf, sizeof(gcd_obuf));
         MyRequest gcd_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, &gcd_out, &gcd_in);
         HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA (OnGetCommonData)\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &gcd_req, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, 0, 0);
         while(!gcd_req.complete)
             Sleep(200);
-        HLOG_INFO("GET_COMMON_DATA: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        HLOG_USER("GET_COMMON_DATA: hresult=0x%lx (%s), infoSize=%lld\r\n",
             (unsigned long)gcd_req.completionStatus, hresult_to_sting(gcd_req.completionStatus),
             (long long)gcd_req.informationSize);
+        HLOG_DEBUG("  Data: ");
+        for(LONG_PTR i=0;i<gcd_req.informationSize && i<32;i++)
+            HLOG_DEBUG("%02x", gcd_obuf[i]);
+        HLOG_DEBUG("\n");
     }
 
     {
@@ -5354,11 +5344,12 @@ setMode(WINBIO_SENSOR_MODE mode)
     // 0x44204C has no handler in driver dispatch - falls to OnControlUnit (E_NOTIMPL)
     MyRequest req(WdfRequestOther, 0x44204C, &out, &in);
 
-    HLOG_USER("about to setMode (0x44204C - no handler)\r\n");
+    HLOG_USER("setMode (0x44204C - no handler): mode=%u, arg2=%u\r\n",
+        (unsigned)ibuf[0], (unsigned)ibuf[1]);
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44204C, 0, 0);
     while(!req.complete)
         Sleep(200);
-    HLOG_INFO("setMode complete: hresult=0x%lx (%s), infoSize=%lld\n",
+    HLOG_USER("setMode: hresult=0x%lx (%s), infoSize=%lld\n",
         (unsigned long)req.completionStatus,
         hresult_to_sting(req.completionStatus),
         (long long)req.informationSize);
@@ -5480,9 +5471,9 @@ getIndicator()
 void
 getDatabaseSize()
 {
-    UCHAR ibuf[8] = {0};
+    uint64_t ibuf = 0;
     SIZE_T recordCount = 0;
-    MyMem in(ibuf, sizeof(ibuf)), out((UCHAR *)&recordCount, sizeof(recordCount));
+    MyMem in((UCHAR*)&ibuf, sizeof(ibuf)), out((UCHAR *)&recordCount, sizeof(recordCount));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out, &in);
 
     HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT\r\n");
@@ -5490,7 +5481,7 @@ getDatabaseSize()
     while(!req.complete)
         Sleep(200);
 
-    HLOG_INFO("GET_RECORD_COUNT: hresult=0x%lx (%s), infoSize=%lld, count=%zu\n",
+    HLOG_USER("GET_RECORD_COUNT: hresult=0x%lx (%s), infoSize=%lld, count=%zu\n",
         (unsigned long)req.completionStatus,
         hresult_to_sting(req.completionStatus),
         (long long)req.informationSize,
