@@ -1,5 +1,5 @@
 
-#define NTDDI_VERSION NTDDI_WIN7
+#define NTDDI_VERSION NTDDI_WINTHRESHOLD
 #include <windows.h>
 #include <ksguid.h>
 #include <stdio.h>
@@ -4515,9 +4515,32 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
             (unsigned)identifyOut->SubFactor,
             subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)identifyOut->SubFactor));
         display_identity(&identifyOut->Identity, "");
-        LONG_PTR extra = ia_req.informationSize - sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
-        if(extra > 0)
-            HLOG_USER("  TrailingData: %lld bytes\n", (long long)extra);
+
+        LONG_PTR trailingBytes = ia_req.informationSize - (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
+        UCHAR *trailing = ia_obuf + sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
+        if(trailingBytes >= (LONG_PTR)sizeof(SIZE_T)) {
+            SIZE_T presenceCount = *(SIZE_T *)trailing;
+            SIZE_T expectedBytes = sizeof(SIZE_T) + presenceCount * sizeof(WINBIO_PRESENCE);
+            if(presenceCount > 0 && presenceCount <= 64 && (LONG_PTR)expectedBytes <= trailingBytes) {
+                WINBIO_PRESENCE *presences = (WINBIO_PRESENCE *)(trailing + sizeof(SIZE_T));
+                HLOG_USER("PresenceCount=%zu\n", presenceCount);
+                for(SIZE_T i = 0; i < presenceCount; i++) {
+                    WINBIO_PRESENCE *p = &presences[i];
+                    HLOG_USER("  [%zu] Factor=0x%lx SubFactor=%u (%s)\n",
+                        i, (unsigned long)p->Factor,
+                        (unsigned)p->SubFactor,
+                        subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)p->SubFactor));
+                    HLOG_USER("       Status=0x%lx (%s) RejectDetail=0x%lx (%s)\n",
+                        (unsigned long)p->Status, hresult_to_sting(p->Status),
+                        (unsigned long)p->RejectDetail, reject_detail_to_string(p->RejectDetail));
+                    display_identity(&p->Identity, "       ");
+                    HLOG_USER("       TrackingId=0x%llx\n", (unsigned long long)p->TrackingId);
+                }
+            } else {
+                HLOG_USER("TrailingData: %lld bytes (count=%zu, does not match WINBIO_PRESENCE[])\n",
+                    (long long)trailingBytes, presenceCount);
+            }
+        }
     }
 
     HLOG_DEBUG("IDENTIFY_ALL raw (%lld bytes): ", (long long)ia_req.informationSize);
@@ -5034,6 +5057,33 @@ identifyAll(WINBIO_SENSOR_STATUS sensorStatus)
             (unsigned)identifyOut->SubFactor,
             subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)identifyOut->SubFactor));
         display_identity(&identifyOut->Identity, "");
+
+        // Attempt to parse trailing bytes as SIZE_T presenceCount + WINBIO_PRESENCE[]
+        LONG_PTR trailingBytes = req.informationSize - (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
+        UCHAR *trailing = obuf + sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
+        if(trailingBytes >= (LONG_PTR)sizeof(SIZE_T)) {
+            SIZE_T presenceCount = *(SIZE_T *)trailing;
+            SIZE_T expectedBytes = sizeof(SIZE_T) + presenceCount * sizeof(WINBIO_PRESENCE);
+            if(presenceCount > 0 && presenceCount <= 64 && (LONG_PTR)expectedBytes <= trailingBytes) {
+                WINBIO_PRESENCE *presences = (WINBIO_PRESENCE *)(trailing + sizeof(SIZE_T));
+                HLOG_USER("PresenceCount=%zu\n", presenceCount);
+                for(SIZE_T i = 0; i < presenceCount; i++) {
+                    WINBIO_PRESENCE *p = &presences[i];
+                    HLOG_USER("  [%zu] Factor=0x%lx SubFactor=%u (%s)\n",
+                        i, (unsigned long)p->Factor,
+                        (unsigned)p->SubFactor,
+                        subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)p->SubFactor));
+                    HLOG_USER("       Status=0x%lx (%s) RejectDetail=0x%lx (%s)\n",
+                        (unsigned long)p->Status, hresult_to_sting(p->Status),
+                        (unsigned long)p->RejectDetail, reject_detail_to_string(p->RejectDetail));
+                    display_identity(&p->Identity, "       ");
+                    HLOG_USER("       TrackingId=0x%llx\n", (unsigned long long)p->TrackingId);
+                }
+            } else {
+                HLOG_USER("TrailingData: %lld bytes (count=%zu, does not match WINBIO_PRESENCE[])\n",
+                    (long long)trailingBytes, presenceCount);
+            }
+        }
     }
 
     HLOG_DEBUG("IDENTIFY_ALL raw (%lld bytes): ", (long long)req.informationSize);
@@ -6088,7 +6138,6 @@ int
 main(int argc, char *argv[])
 {
     char *br = getenv("SANDBOX_BREAKPOINTS");
-    void (*what)() = NULL;
     WINBIO_INDICATOR_STATUS ledState = WINBIO_INDICATOR_OFF;
     IClassFactory *fact = 0;
 
@@ -6097,21 +6146,13 @@ main(int argc, char *argv[])
         return 3;
     }
 
-    if(strcasecmp(argv[1], "reset") == 0) {
-        what = reset;
-    }
-    else if(strcasecmp(argv[1], "set-led") == 0) {
+    // Validate arguments early before touching hardware
+    if(strcasecmp(argv[1], "set-led") == 0) {
         if(argc < 3 || (strcasecmp(argv[2], "on") != 0 && strcasecmp(argv[2], "off") != 0)) {
             printf("Usage: %s set-led <on|off>\n", argv[0]);
             return 3;
         }
         ledState = (strcasecmp(argv[2], "on") == 0) ? WINBIO_INDICATOR_ON : WINBIO_INDICATOR_OFF;
-    }
-    else if(strcasecmp(argv[1], "list-db") == 0) {
-        what = listDatabase;
-    }
-    else if(strcasecmp(argv[1], "clear-db") == 0) {
-        what = clearDatabase;
     }
     else if(strcasecmp(argv[1], "delete-record") == 0) {
         if(argc < 3) {
@@ -6119,10 +6160,15 @@ main(int argc, char *argv[])
             return 3;
         }
     }
-    else if(strcasecmp(argv[1], "nop") == 0) {
-        what = nop;
-    }
-    else if(strcasecmp(argv[1], "refresh-cache") == 0) {;
+    else if(strcasecmp(argv[1], "identify") == 0 ||
+            strcasecmp(argv[1], "enroll") == 0 ||
+            strcasecmp(argv[1], "identify-all") == 0 ||
+            strcasecmp(argv[1], "list-db") == 0 ||
+            strcasecmp(argv[1], "clear-db") == 0 ||
+            strcasecmp(argv[1], "reset") == 0 ||
+            strcasecmp(argv[1], "nop") == 0 ||
+            strcasecmp(argv[1], "refresh-cache") == 0) {
+        // valid, no extra args needed
     }
     else {
         usage(argv[0]);
@@ -6249,14 +6295,7 @@ main(int argc, char *argv[])
     getAttributes();
     WINBIO_SENSOR_STATUS sensorStatus = getSensorStatus();
 
-    if(strcasecmp(argv[1], "set-led") == 0) {
-        setLed(ledState);
-    }
-    else if(strcasecmp(argv[1], "delete-record") == 0) {
-        deleteRecord((DWORD)atoi(argv[2]));
-        listDatabase();
-    }
-    else if(strcasecmp(argv[1], "identify") == 0) {
+    if(strcasecmp(argv[1], "identify") == 0) {
         identify(sensorStatus);
     }
     else if(strcasecmp(argv[1], "enroll") == 0) {
@@ -6265,8 +6304,24 @@ main(int argc, char *argv[])
     else if(strcasecmp(argv[1], "identify-all") == 0) {
         identifyAll(sensorStatus);
     }
-    else if(what) {
-        what();
+    else if(strcasecmp(argv[1], "set-led") == 0) {
+        setLed(ledState);
+    }
+    else if(strcasecmp(argv[1], "delete-record") == 0) {
+        deleteRecord((DWORD)atoi(argv[2]));
+        listDatabase();
+    }
+    else if(strcasecmp(argv[1], "list-db") == 0) {
+        listDatabase();
+    }
+    else if(strcasecmp(argv[1], "clear-db") == 0) {
+        clearDatabase();
+    }
+    else if(strcasecmp(argv[1], "reset") == 0) {
+        reset();
+    }
+    else if(strcasecmp(argv[1], "nop") == 0) {
+        nop();
     }
 
     HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to release hw\r\n");
