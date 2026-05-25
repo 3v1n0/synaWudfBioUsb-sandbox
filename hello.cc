@@ -4577,9 +4577,18 @@ identify()
                 hdr->BiometricDataFormat.Owner, hdr->BiometricDataFormat.Type,
                 hdr->ProductId.Owner, hdr->ProductId.Type);
         }
+        HLOG_DEBUG("Raw capture data (%lu bytes): ", data->CaptureData.Size);
+        for(ULONG i=0;i<data->CaptureData.Size && i<64;i++)
+            HLOG_DEBUG("%02x", ((UCHAR*)data->CaptureData.Data)[i]);
+        if(data->CaptureData.Size > 64)
+            HLOG_DEBUG("...");
+        HLOG_DEBUG("\n");
     }
 
     setIndicator(WINBIO_INDICATOR_OFF);
+
+    HLOG_USER("=== Identify Match ===\n");
+    identifyFeatureSet();
 }
 
 void
