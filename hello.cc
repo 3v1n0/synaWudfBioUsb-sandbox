@@ -1575,6 +1575,7 @@ display_identity(WINBIO_IDENTITY *identity, const char *prefix)
 }
 
 #include "host_umdf1.h"
+#include "host_umdf2.h"
 
 WINBIO_SENSOR_STATUS
 getSensorStatus()
@@ -3490,6 +3491,75 @@ main(int argc, char *argv[])
         HLOG_USER("Failed to LoadLibrary: %s\n", dllPath);
         return 3;
     }
+
+    // ---- UMDF v2 path ----
+    if (umdfMajorVersion == 2) {
+        PFN_FxDriverEntryUm fxEntry =
+            (PFN_FxDriverEntryUm)GetProcAddress(pDll, "FxDriverEntryUm");
+        if (!fxEntry) {
+            HLOG_USER("FxDriverEntryUm not exported from %s\n", dllPath);
+            return 3;
+        }
+
+        WUDF_LOADER_INTERFACE loaderIface = {};
+        loaderIface.Size        = sizeof(WUDF_LOADER_INTERFACE); // 0x38
+        loaderIface.VersionBind = (void*)host_VersionBind;
+
+        { const char *lv = getenv("WDF2_LOGLEVEL"); if (lv) g_umdf2_loglevel = atoi(lv); }
+        HLOG_USER(">>> calling FxDriverEntryUm (WDF2_LOGLEVEL=%d)\n", g_umdf2_loglevel);
+        NTSTATUS hr = fxEntry(&loaderIface, (void*)host_VersionBind, nullptr, nullptr);
+        HLOG_USER("<<< FxDriverEntryUm -> 0x%lx\n", (long)hr);
+        if (hr < 0) {
+            HLOG_USER("FxDriverEntryUm failed: 0x%lx\n", (long)hr);
+            return 3;
+        }
+
+        if (!g_wdf2Driver || !g_wdf2Driver->evtDeviceAdd) {
+            HLOG_USER("no EvtDriverDeviceAdd after FxDriverEntryUm\n");
+            return 3;
+        }
+
+        // Call EvtDriverDeviceAdd — driver calls WdfDeviceCreate / WdfIoQueueCreate
+        auto *devInit = new Wdf2DeviceInit();
+        HLOG_USER(">>> calling EvtDriverDeviceAdd\n");
+        hr = g_wdf2Driver->evtDeviceAdd(g_wdf2Driver, devInit);
+        HLOG_USER("<<< EvtDriverDeviceAdd -> 0x%lx\n", (long)hr);
+        if (hr < 0) {
+            HLOG_USER("EvtDriverDeviceAdd failed: 0x%lx\n", (long)hr);
+            return 3;
+        }
+
+        if (!g_wdf2Device) {
+            HLOG_USER("no Wdf2Device after EvtDriverDeviceAdd\n");
+            return 3;
+        }
+
+        // Call EvtDevicePrepareHardware (with empty/NULL resource lists)
+        auto *prepHw = g_wdf2Device->EvtPrepareHw();
+        if (prepHw) {
+            HLOG_USER(">>> calling EvtDevicePrepareHardware\n");
+            hr = prepHw(g_wdf2Device, nullptr, nullptr);
+            HLOG_USER("<<< EvtDevicePrepareHardware -> 0x%lx\n", (long)hr);
+        }
+
+        // Call EvtDeviceD0Entry
+        auto *d0entry = g_wdf2Device->EvtD0Entry();
+        if (d0entry && hr >= 0) {
+            HLOG_USER(">>> calling EvtDeviceD0Entry\n");
+            hr = d0entry(g_wdf2Device, 0 /* WdfPowerDeviceD3Final */);
+            HLOG_USER("<<< EvtDeviceD0Entry -> 0x%lx\n", (long)hr);
+        }
+
+        if (strcasecmp(argv[1], "nop") == 0) {
+            HLOG_USER("nop done (WDF v2)\n");
+            return 0;
+        }
+
+        HLOG_USER("v2 IOCTL dispatch not yet implemented for action '%s'\n", argv[1]);
+        return 1;
+    }
+    // ---- end UMDF v2 path ----
+
     DllGetClassObject_t *proc = (DllGetClassObject_t*)GetProcAddress(pDll, "DllGetClassObject");
     if(!proc) {
         printf("DllGetClassObject was not exported from %s\n", dllPath);
