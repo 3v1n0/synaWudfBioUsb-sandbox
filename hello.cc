@@ -4929,18 +4929,16 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
 
         Sleep(100);
         {
-            // UPDATE_ENROLLMENT: driver expects WDF in/out both 0x48 bytes
-            // EIS->vtable[2] (offset 0x10): accepts 0x48-byte buffer
-            // Output layout:
-            //   [0x00] HRESULT EnrollmentStatus
-            //   [0x28] ULONG Progress
-            //   [0x2c] ULONG RejectDetail
+            // UPDATE_ENROLLMENT: driver expects WDF in/out both 0x48 bytes.
+            // Names are aligned with WINBIO_EXTENDED_ENROLLMENT_STATUS where possible.
+            // NOTE: only TemplateStatus/PercentComplete are confirmed here.
             typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT {
-                HRESULT EnrollmentStatus;
+                HRESULT TemplateStatus;
                 UCHAR Reserved1[0x24];
-                ULONG Progress;
+                ULONG PercentComplete;
                 ULONG RejectDetail;
-                UCHAR Reserved2[0x18];
+                // Possibly maps to fingerprint-specific progress fields.
+                ULONG Fingerprint[6];
             } SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT;
             typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_INPUT {
                 UCHAR Data[0x48];
@@ -4970,14 +4968,17 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
                 break;
             }
 
-            // Enrollment status in output: WINBIO_I_MORE_DATA = need more samples, S_OK = complete
-            DWORD enrollStatus = ueOutput.EnrollmentStatus;
-            DWORD enrollProgress = ueOutput.Progress;
-            DWORD enrollReject = ueOutput.RejectDetail;
-            HLOG_USER("Enrollment status=0x%lx (%s) progress=%lu%% reject=%s\n",
-                (unsigned long)enrollStatus, hresult_to_sting(enrollStatus),
-                (unsigned long)enrollProgress, reject_detail_to_string(enrollReject));
-            if(enrollStatus != WINBIO_I_MORE_DATA)
+            // TemplateStatus: WINBIO_I_MORE_DATA = need more samples, S_OK = complete
+            DWORD templateStatus = ueOutput.TemplateStatus;
+            DWORD percentComplete = ueOutput.PercentComplete;
+            DWORD rejectDetail = ueOutput.RejectDetail;
+            HLOG_USER("Enrollment TemplateStatus=0x%lx (%s) PercentComplete=%lu RejectDetail=0x%lx (%s)\n",
+                (unsigned long)templateStatus,
+                hresult_to_sting(templateStatus),
+                (unsigned long)percentComplete,
+                (unsigned long)rejectDetail,
+                reject_detail_to_string(rejectDetail));
+            if(templateStatus != WINBIO_I_MORE_DATA)
                 break;
         }
         Sleep(100);
