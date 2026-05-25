@@ -1502,25 +1502,32 @@ static void
 capabilities_to_string(WINBIO_CAPABILITIES caps, char *buf, size_t bufsize)
 {
     buf[0] = '\0';
+    if(caps == 0) {
+        snprintf(buf, bufsize, "NONE(0x%08lx)", (unsigned long)caps);
+        return;
+    }
     size_t pos = 0;
-    #define APPEND_FLAG(flag, name) do { \
+    #define ADD_FLAG(flag, name) do { \
         if(caps & (flag)) { \
-            if(pos > 0 && pos < bufsize - 2) { buf[pos++] = '|'; } \
-            size_t n = strlen(name); \
-            if(pos + n < bufsize - 1) { memcpy(buf + pos, name, n); pos += n; } \
+            if(pos > 0) { \
+                if(pos < bufsize - 1) buf[pos++] = '|'; \
+            } \
+            size_t sl = strlen(name); \
+            if(pos + sl < bufsize - 1) { \
+                memcpy(buf + pos, name, sl); \
+                pos += sl; \
+            } \
         } \
     } while(0)
-    APPEND_FLAG(WINBIO_CAPABILITY_SENSOR, "SENSOR");
-    APPEND_FLAG(WINBIO_CAPABILITY_MATCHING, "MATCHING");
-    APPEND_FLAG(WINBIO_CAPABILITY_DATABASE, "DATABASE");
-    APPEND_FLAG(WINBIO_CAPABILITY_PROCESSING, "PROCESSING");
-    APPEND_FLAG(WINBIO_CAPABILITY_ENCRYPTION, "ENCRYPTION");
-    APPEND_FLAG(WINBIO_CAPABILITY_NAVIGATION, "NAVIGATION");
-    APPEND_FLAG(WINBIO_CAPABILITY_INDICATOR, "INDICATOR");
-    #undef APPEND_FLAG
-    if(pos == 0) {
-        snprintf(buf, bufsize, "NONE(0x%08lx)", (unsigned long)caps);
-    }
+    ADD_FLAG(WINBIO_CAPABILITY_SENSOR, "SENSOR");
+    ADD_FLAG(WINBIO_CAPABILITY_MATCHING, "MATCHING");
+    ADD_FLAG(WINBIO_CAPABILITY_DATABASE, "DATABASE");
+    ADD_FLAG(WINBIO_CAPABILITY_PROCESSING, "PROCESSING");
+    ADD_FLAG(WINBIO_CAPABILITY_ENCRYPTION, "ENCRYPTION");
+    ADD_FLAG(WINBIO_CAPABILITY_NAVIGATION, "NAVIGATION");
+    ADD_FLAG(WINBIO_CAPABILITY_INDICATOR, "INDICATOR");
+    #undef ADD_FLAG
+    buf[pos] = '\0';
 }
 
 static void
