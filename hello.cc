@@ -5312,15 +5312,28 @@ resetOwnership()
 }
 
 void
-getTemplate()
+getTemplate(DWORD templateId)
 {
     // OnGetTemplate validates input size == 0x54 and output size >= 4.
-    UCHAR ibuf[0x54] = {0};
+    typedef struct _WINBIO_HOST_GET_TEMPLATE_INPUT_WIRE {
+        WINBIO_IDENTITY Identity;
+        WINBIO_BIOMETRIC_SUBTYPE SubFactor;
+        UCHAR Reserved[3];
+        ULONG TemplateId;
+    } WINBIO_HOST_GET_TEMPLATE_INPUT_WIRE;
+    static_assert(sizeof(WINBIO_HOST_GET_TEMPLATE_INPUT_WIRE) == 0x54, "GET_TEMPLATE input wire must be 0x54");
+
+    WINBIO_HOST_GET_TEMPLATE_INPUT_WIRE ibuf = {0};
     UCHAR obuf[0x54] = {0};
-    MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+    ibuf.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
+    ibuf.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
+    ibuf.SubFactor = WINBIO_SUBTYPE_ANY;
+    ibuf.TemplateId = templateId;
+
+    MyMem in((UCHAR *)&ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, &out, &in);
 
-    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE (templateId=%lu)\r\n", (unsigned long)templateId);
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, 0, 0);
     while(!req.complete)
         Sleep(200);
@@ -6193,7 +6206,7 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
 void
 usage(const char *prog)
 {
-    printf("Usage: %s <nop|enroll|identify|identify-all|reset|reset-ownership|get-template|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
+    printf("Usage: %s <nop|enroll|identify|identify-all|reset|reset-ownership|get-template <id>|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
 }
 
 static void
@@ -6239,6 +6252,12 @@ main(int argc, char *argv[])
     else if(strcasecmp(argv[1], "delete-record") == 0) {
         if(argc < 3) {
             printf("Usage: %s delete-record <subfactor>\n", argv[0]);
+            return 3;
+        }
+    }
+    else if(strcasecmp(argv[1], "get-template") == 0) {
+        if(argc < 3) {
+            printf("Usage: %s get-template <id>\n", argv[0]);
             return 3;
         }
     }
@@ -6404,7 +6423,7 @@ main(int argc, char *argv[])
         clearDatabase();
     }
     else if(strcasecmp(argv[1], "get-template") == 0) {
-        getTemplate();
+        getTemplate((DWORD)atoi(argv[2]));
     }
     else if(strcasecmp(argv[1], "reset-ownership") == 0) {
         resetOwnership();
