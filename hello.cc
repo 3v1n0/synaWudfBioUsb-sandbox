@@ -5312,6 +5312,31 @@ resetOwnership()
 }
 
 void
+getTemplate()
+{
+    // OnGetTemplate validates input size == 0x54 and output size >= 4.
+    UCHAR ibuf[0x54] = {0};
+    UCHAR obuf[0x54] = {0};
+    MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, &out, &in);
+
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    HLOG_USER("GET_TEMPLATE: hresult=0x%lx (%s), infoSize=%lld\n",
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize);
+
+    SIZE_T dumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+    HLOG_USER("GET_TEMPLATE data (%zu bytes): ", dumpSize);
+    for(SIZE_T i = 0; i < dumpSize; i++)
+        HLOG_USER("%02x", obuf[i]);
+    HLOG_USER("\n");
+}
+
+void
 resetIoctl()
 {
     char buf[1024*10];
@@ -6168,7 +6193,7 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
 void
 usage(const char *prog)
 {
-    printf("Usage: %s <nop|enroll|identify|identify-all|reset|reset-ownership|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
+    printf("Usage: %s <nop|enroll|identify|identify-all|reset|reset-ownership|get-template|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
 }
 
 static void
@@ -6222,6 +6247,7 @@ main(int argc, char *argv[])
             strcasecmp(argv[1], "identify-all") == 0 ||
             strcasecmp(argv[1], "list-db") == 0 ||
             strcasecmp(argv[1], "clear-db") == 0 ||
+            strcasecmp(argv[1], "get-template") == 0 ||
             strcasecmp(argv[1], "reset-ownership") == 0 ||
             strcasecmp(argv[1], "reset") == 0 ||
             strcasecmp(argv[1], "nop") == 0) {
@@ -6376,6 +6402,9 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "clear-db") == 0) {
         clearDatabase();
+    }
+    else if(strcasecmp(argv[1], "get-template") == 0) {
+        getTemplate();
     }
     else if(strcasecmp(argv[1], "reset-ownership") == 0) {
         resetOwnership();
