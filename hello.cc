@@ -5281,29 +5281,45 @@ setMode(unsigned short mode)
 void
 deleteRecord(DWORD subfactor)
 {
-    UCHAR ibuf[0x50] = {0};
-    UCHAR obuf[8] = {0};
-    WINBIO_IDENTITY *identity = (WINBIO_IDENTITY *)ibuf;
-    identity->Type = WINBIO_ID_TYPE_WILDCARD;
-    identity->Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
-    ibuf[0x4c] = (UCHAR)subfactor;
+    // DELETE_RECORD: driver expects WDF in/out. Buffer layout:
+    //   [0x00] WINBIO_IDENTITY (0x4c bytes): Type=2/3 identity for matching
+    //   [0x4c] UCHAR SubFactor
+    //   [0x4d] UCHAR Reserved[3]
+    //   wire total = 0x50 bytes
+    // Type=3 with Wildcard=0 matches all records with given subfactor
+    {
+        typedef struct _SYNA_DELETE_RECORD_WIRE {
+            WINBIO_IDENTITY Identity;
+            UCHAR SubFactor;
+            UCHAR Reserved[3];
+        } SYNA_DELETE_RECORD_WIRE;
+        static_assert(sizeof(SYNA_DELETE_RECORD_WIRE) == 0x50, "DeleteRecord wire must be 0x50");
 
-    MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
-    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
+        SYNA_DELETE_RECORD_WIRE wireBuf = {0};
+        wireBuf.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
+        wireBuf.Identity.Value.Wildcard = 0;  // 0 = match all, 0xFFFFFFFF hits guard → E_INVALIDARG
+        wireBuf.SubFactor = (UCHAR)subfactor;
 
-    HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD (OnDeleteFinger, subfactor=%lu)\r\n",
-        (unsigned long)subfactor);
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, 0, 0);
-    while(!req.complete)
-        Sleep(200);
+        UCHAR obuf[8] = {0};
+        MyMem in((UCHAR*)&wireBuf, sizeof(wireBuf)), out(obuf, sizeof(obuf));
+        MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
 
-    HLOG_INFO("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
-        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
-    HLOG_INFO("Raw output: ");
-    SIZE_T deleteDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
-    for(SIZE_T i=0;i<deleteDumpSize;i++)
-        HLOG_DEBUG("%02x", obuf[i]);
-    HLOG_DEBUG("\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD (Type=%lu, Wildcard=%lu, subfactor=%u)\r\n",
+            (unsigned long)wireBuf.Identity.Type,
+            (unsigned long)wireBuf.Identity.Value.Wildcard,
+            (unsigned)wireBuf.SubFactor);
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, 0, 0);
+        while(!req.complete)
+            Sleep(200);
+
+        HLOG_USER("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
+            (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+        HLOG_INFO("Raw output: ");
+        SIZE_T deleteDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+        for(SIZE_T i=0;i<deleteDumpSize;i++)
+            HLOG_DEBUG("%02x", obuf[i]);
+        HLOG_DEBUG("\n");
+    }
 }
 
 void
