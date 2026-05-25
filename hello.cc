@@ -383,8 +383,8 @@ clampInfoSize(LONG_PTR informationSize, SIZE_T bufferSize)
 #define IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT             VENDOR_IOCTL(11)  // 0x44202C
 #define IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY                 VENDOR_IOCTL(12)  // 0x442030
 #define IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD                VENDOR_IOCTL(13)  // 0x442034
-#define IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA               VENDOR_IOCTL(14)  // 0x442038
-#define IOCTL_BIOMETRIC_ENGINE_SET_COMMON_DATA               VENDOR_IOCTL(15)  // 0x44203C
+#define IOCTL_BIOMETRIC_ENGINE_GET_PROPERTY                  VENDOR_IOCTL(14)  // 0x442038; input: WINBIO_PROPERTY_ID (4 bytes); PropertyType=WINBIO_PROPERTY_TYPE_UNIT hardcoded
+#define IOCTL_BIOMETRIC_ENGINE_SET_PROPERTY                  VENDOR_IOCTL(15)  // 0x44203C; input: WINBIO_PROPERTY_ID (4 bytes) + payload
 #define IOCTL_BIOMETRIC_ENGINE_RESET_OWNERSHIP               VENDOR_IOCTL(16)  // 0x442040
 #define IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE                 VENDOR_IOCTL(17)  // 0x442044
 #define IOCTL_BIOMETRIC_ENGINE_SAP_REQUEST                   VENDOR_IOCTL(18)  // 0x442048
@@ -5175,24 +5175,6 @@ listDatabase()
         return;
     }
 
-    {
-        uint32_t gcd_ibuf = 0;
-        UCHAR gcd_obuf[252] = {0};
-        MyMem gcd_in((UCHAR*)&gcd_ibuf, sizeof(gcd_ibuf)), gcd_out(gcd_obuf, sizeof(gcd_obuf));
-        MyRequest gcd_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, &gcd_out, &gcd_in);
-        HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA (OnGetCommonData)\r\n");
-        myQueue->ioctl->OnDeviceIoControl(myQueue, &gcd_req, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, 0, 0);
-        while(!gcd_req.complete)
-            Sleep(200);
-        HLOG_USER("GET_COMMON_DATA: hresult=0x%lx (%s), infoSize=%lld\r\n",
-            (unsigned long)gcd_req.completionStatus, hresult_to_sting(gcd_req.completionStatus),
-            (long long)gcd_req.informationSize);
-        HLOG_DEBUG("  Data: ");
-        for(LONG_PTR i=0;i<gcd_req.informationSize && i<32;i++)
-            HLOG_DEBUG("%02x", gcd_obuf[i]);
-        HLOG_DEBUG("\n");
-    }
-
     size_t maxRecords = recordCount > 128 ? 128 : recordCount;
 
     {
@@ -6153,7 +6135,26 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
 void
 usage(const char *prog)
 {
-    printf("Usage: %s <nop|enroll|identify|reset|set-led [on|off]|list-db|clear-db|delete-record|identify>\n", prog);
+    printf("Usage: %s <nop|enroll|identify|identify-all|reset|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
+}
+
+static void
+getPropertyExample(WINBIO_PROPERTY_ID propertyId)
+{
+    ULONG value = 0;
+    MyMem in((UCHAR*)&propertyId, sizeof(propertyId)), out((UCHAR*)&value, sizeof(value));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_PROPERTY, &out, &in);
+
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_PROPERTY (propertyId=%lu)\r\n",
+        (unsigned long)propertyId);
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_PROPERTY, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    HLOG_USER("GET_PROPERTY(id=%lu): hresult=0x%lx (%s), infoSize=%lld, value=%lu\r\n",
+        (unsigned long)propertyId,
+        (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
+        (long long)req.informationSize, (unsigned long)value);
 }
 
 
@@ -6315,6 +6316,9 @@ main(int argc, char *argv[])
     Sleep(1000);
 
     getAttributes();
+
+    getPropertyExample(WINBIO_PROPERTY_SAMPLE_HINT);
+
     WINBIO_SENSOR_STATUS sensorStatus = getSensorStatus();
 
     if(strcasecmp(argv[1], "identify") == 0) {
