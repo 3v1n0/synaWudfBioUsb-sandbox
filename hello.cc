@@ -4465,8 +4465,9 @@ void
 identify()
 {
     {
-        char calibrate_obuf[1024];
-        MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
+        char calibrate_buf[1024];
+        WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
+        MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
         MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
@@ -4622,7 +4623,7 @@ commitEnrollment()
 
     {
         SYNA_COMMIT_ENROLLMENT_INPUT_WIRE input = {0};
-        UCHAR obuf[8] = {0};
+        WINBIO_BLANK_PAYLOAD obuf = {0};
 
         input.Identity.Type = WINBIO_ID_TYPE_GUID;
         if(FAILED(CoCreateGuid(&input.Identity.Value.TemplateGuid))) {
@@ -4637,7 +4638,7 @@ commitEnrollment()
         input.PayloadBlobSize = sizeof(input.PayloadBlob);
         memcpy(input.PayloadBlob, "Unicorn", sizeof(input.PayloadBlob));
 
-        MyMem in((UCHAR *)&input, sizeof(input)), out(obuf, sizeof(obuf));
+        MyMem in((UCHAR *)&input, sizeof(input)), out((UCHAR *)&obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (typed input, inSize=%zu)\r\n", sizeof(input));
@@ -4650,7 +4651,7 @@ commitEnrollment()
             (long long)req.informationSize);
         SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
         for(SIZE_T i=0;i<commitDumpSize;i++)
-            HLOG_DEBUG("%02x", obuf[i]);
+            HLOG_DEBUG("%02x", ((UCHAR*)&obuf)[i]);
         if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
             HLOG_INFO("...(truncated)");
         HLOG_DEBUG("\n");
@@ -4660,9 +4661,9 @@ commitEnrollment()
     }
 
     if(FAILED(commitStatus)) {
-        UCHAR ibuf[8] = {0};
-        UCHAR obuf[8] = {0};
-        MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+        uint64_t ibuf = 0;
+        WINBIO_BLANK_PAYLOAD obuf = {0};
+        MyMem in((UCHAR *)&ibuf, sizeof(ibuf)), out((UCHAR *)&obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (fallback inSize=8)\r\n");
@@ -4675,7 +4676,7 @@ commitEnrollment()
             (long long)req.informationSize);
         SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
         for(SIZE_T i=0;i<commitDumpSize;i++)
-            HLOG_DEBUG("%02x", obuf[i]);
+            HLOG_DEBUG("%02x", ((UCHAR*)&obuf)[i]);
         if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
             HLOG_INFO("...(truncated)");
         HLOG_DEBUG("\n");
@@ -4735,8 +4736,9 @@ enroll()
 {
     Sleep(500);
 
-    char calibrate_obuf[1024];
-    MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
+    char calibrate_buf[1024];
+    WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
+    MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
     MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
     HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
@@ -4948,8 +4950,9 @@ void
 identifyAll()
 {
     {
-        char calibrate_obuf[1024];
-        MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
+        char calibrate_buf[1024];
+        WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
+        MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
         MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
@@ -5377,8 +5380,8 @@ deleteRecord(DWORD subfactor)
         wireBuf.Identity.Value.Wildcard = 0;  // 0 = match all, 0xFFFFFFFF hits guard → E_INVALIDARG
         wireBuf.SubFactor = (UCHAR)subfactor;
 
-        UCHAR obuf[8] = {0};
-        MyMem in((UCHAR*)&wireBuf, sizeof(wireBuf)), out(obuf, sizeof(obuf));
+        WINBIO_BLANK_PAYLOAD obuf = {0};
+        MyMem in((UCHAR*)&wireBuf, sizeof(wireBuf)), out((UCHAR*)&obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD (Type=%lu, Wildcard=%lu, subfactor=%u)\r\n",
@@ -5394,7 +5397,7 @@ deleteRecord(DWORD subfactor)
         HLOG_INFO("Raw output: ");
         SIZE_T deleteDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
         for(SIZE_T i=0;i<deleteDumpSize;i++)
-            HLOG_DEBUG("%02x", obuf[i]);
+            HLOG_DEBUG("%02x", ((UCHAR*)&obuf)[i]);
         HLOG_DEBUG("\n");
     }
 }
