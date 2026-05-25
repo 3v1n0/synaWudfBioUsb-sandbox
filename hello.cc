@@ -4455,7 +4455,6 @@ static void
 calibrate()
 {
     char calibrate_buf[1024];
-    WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
     MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
     MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
@@ -6166,8 +6165,7 @@ main(int argc, char *argv[])
             strcasecmp(argv[1], "list-db") == 0 ||
             strcasecmp(argv[1], "clear-db") == 0 ||
             strcasecmp(argv[1], "reset") == 0 ||
-            strcasecmp(argv[1], "nop") == 0 ||
-            strcasecmp(argv[1], "refresh-cache") == 0) {
+            strcasecmp(argv[1], "nop") == 0) {
         // valid, no extra args needed
     }
     else {
