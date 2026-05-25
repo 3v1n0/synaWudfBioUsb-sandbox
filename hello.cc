@@ -1,5 +1,5 @@
 
-#define NTDDI_VERSION NTDDI_WINTHRESHOLD
+#define NTDDI_VERSION NTDDI_WIN7
 #include <windows.h>
 #include <ksguid.h>
 #include <stdio.h>
@@ -4488,10 +4488,12 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
         (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
         (unsigned long)stl_obuf.PayloadSize, (long long)stl_req.informationSize);
 
-    // WBF serializes a variable-length WINBIO_PRESENCE array into this buffer.
-    static UCHAR ia_obuf[8 * 1024];
-    memset(ia_obuf, 0, sizeof(ia_obuf));
-    MyMem ia_in(NULL, 0), ia_out(ia_obuf, sizeof(ia_obuf));
+    // OnIdentifyAll: driver fills WINBIO_IDENTIFY_ALL_OUTPUT_WIRE (0x54 bytes) directly.
+    // The engine adapter writes Identity+SubFactor (offsets 0x00-0x4b), wrapper writes
+    // EngineHresult at +0x50.  No trailing data beyond the fixed 0x54-byte struct.
+    WINBIO_IDENTIFY_ALL_OUTPUT_WIRE ia_obuf;
+    memset(&ia_obuf, 0, sizeof(ia_obuf));
+    MyMem ia_in(NULL, 0), ia_out((UCHAR *)&ia_obuf, sizeof(ia_obuf));
     MyRequest ia_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &ia_out, &ia_in);
 
     HLOG_USER("GET_IDENTIFY_ALL\n");
@@ -4505,46 +4507,19 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
         (long long)ia_req.informationSize);
 
     if(!FAILED(ia_req.completionStatus) && ia_req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
-        WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)ia_obuf;
         HLOG_USER("=== Match Result ===\n");
         HLOG_USER("EngineHresult=0x%lx (%s)\n",
-            (unsigned long)identifyOut->EngineHresult,
-            hresult_to_sting(identifyOut->EngineHresult));
+            (unsigned long)ia_obuf.EngineHresult,
+            hresult_to_sting(ia_obuf.EngineHresult));
         HLOG_USER("SubFactor=%u (%s)\n",
-            (unsigned)identifyOut->SubFactor,
-            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)identifyOut->SubFactor));
-        display_identity(&identifyOut->Identity, "");
-
-        LONG_PTR trailingBytes = ia_req.informationSize - (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
-        UCHAR *trailing = ia_obuf + sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
-        if(trailingBytes >= (LONG_PTR)sizeof(SIZE_T)) {
-            SIZE_T presenceCount = *(SIZE_T *)trailing;
-            SIZE_T expectedBytes = sizeof(SIZE_T) + presenceCount * sizeof(WINBIO_PRESENCE);
-            if(presenceCount > 0 && presenceCount <= 64 && (LONG_PTR)expectedBytes <= trailingBytes) {
-                WINBIO_PRESENCE *presences = (WINBIO_PRESENCE *)(trailing + sizeof(SIZE_T));
-                HLOG_USER("PresenceCount=%zu\n", presenceCount);
-                for(SIZE_T i = 0; i < presenceCount; i++) {
-                    WINBIO_PRESENCE *p = &presences[i];
-                    HLOG_USER("  [%zu] Factor=0x%lx SubFactor=%u (%s)\n",
-                        i, (unsigned long)p->Factor,
-                        (unsigned)p->SubFactor,
-                        subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)p->SubFactor));
-                    HLOG_USER("       Status=0x%lx (%s) RejectDetail=0x%lx (%s)\n",
-                        (unsigned long)p->Status, hresult_to_sting(p->Status),
-                        (unsigned long)p->RejectDetail, reject_detail_to_string(p->RejectDetail));
-                    display_identity(&p->Identity, "       ");
-                    HLOG_USER("       TrackingId=0x%llx\n", (unsigned long long)p->TrackingId);
-                }
-            } else {
-                HLOG_USER("TrailingData: %lld bytes (count=%zu, does not match WINBIO_PRESENCE[])\n",
-                    (long long)trailingBytes, presenceCount);
-            }
-        }
+            (unsigned)ia_obuf.SubFactor,
+            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)ia_obuf.SubFactor));
+        display_identity(&ia_obuf.Identity, "");
     }
 
     HLOG_DEBUG("IDENTIFY_ALL raw (%lld bytes): ", (long long)ia_req.informationSize);
-    for(LONG_PTR i=0;i<ia_req.informationSize && i<96;i++)
-        HLOG_DEBUG("%02x", ia_obuf[i]);
+    for(LONG_PTR i = 0; i < (LONG_PTR)sizeof(ia_obuf); i++)
+        HLOG_DEBUG("%02x", ((UCHAR *)&ia_obuf)[i]);
     HLOG_DEBUG("\n");
 }
 
@@ -5029,10 +5004,12 @@ identifyAll(WINBIO_SENSOR_STATUS sensorStatus)
         }
     }
 
-    // WBF serializes a variable-length WINBIO_PRESENCE array into this buffer.
-    static UCHAR obuf[8 * 1024];
-    memset(obuf, 0, sizeof(obuf));
-    MyMem in(NULL, 0), out(obuf, sizeof(obuf));
+    // OnIdentifyAll: driver fills WINBIO_IDENTIFY_ALL_OUTPUT_WIRE (0x54 bytes) directly.
+    // The engine adapter writes Identity+SubFactor (offsets 0x00-0x4b), wrapper writes
+    // EngineHresult at +0x50.  No trailing data beyond the fixed 0x54-byte struct.
+    WINBIO_IDENTIFY_ALL_OUTPUT_WIRE obuf;
+    memset(&obuf, 0, sizeof(obuf));
+    MyMem in(NULL, 0), out((UCHAR *)&obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &out, &in);
 
     HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
@@ -5046,48 +5023,18 @@ identifyAll(WINBIO_SENSOR_STATUS sensorStatus)
         (long long)req.informationSize);
 
     if(!FAILED(req.completionStatus) && req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
-        WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)obuf;
-        HRESULT engineHr = identifyOut->EngineHresult;
-
         HLOG_USER("=== Match Result ===\n");
         HLOG_USER("EngineHresult=0x%lx (%s)\n",
-            (unsigned long)engineHr, hresult_to_sting(engineHr));
+            (unsigned long)obuf.EngineHresult, hresult_to_sting(obuf.EngineHresult));
         HLOG_USER("SubFactor=%u (%s)\n",
-            (unsigned)identifyOut->SubFactor,
-            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)identifyOut->SubFactor));
-        display_identity(&identifyOut->Identity, "");
-
-        // Attempt to parse trailing bytes as SIZE_T presenceCount + WINBIO_PRESENCE[]
-        LONG_PTR trailingBytes = req.informationSize - (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
-        UCHAR *trailing = obuf + sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
-        if(trailingBytes >= (LONG_PTR)sizeof(SIZE_T)) {
-            SIZE_T presenceCount = *(SIZE_T *)trailing;
-            SIZE_T expectedBytes = sizeof(SIZE_T) + presenceCount * sizeof(WINBIO_PRESENCE);
-            if(presenceCount > 0 && presenceCount <= 64 && (LONG_PTR)expectedBytes <= trailingBytes) {
-                WINBIO_PRESENCE *presences = (WINBIO_PRESENCE *)(trailing + sizeof(SIZE_T));
-                HLOG_USER("PresenceCount=%zu\n", presenceCount);
-                for(SIZE_T i = 0; i < presenceCount; i++) {
-                    WINBIO_PRESENCE *p = &presences[i];
-                    HLOG_USER("  [%zu] Factor=0x%lx SubFactor=%u (%s)\n",
-                        i, (unsigned long)p->Factor,
-                        (unsigned)p->SubFactor,
-                        subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)p->SubFactor));
-                    HLOG_USER("       Status=0x%lx (%s) RejectDetail=0x%lx (%s)\n",
-                        (unsigned long)p->Status, hresult_to_sting(p->Status),
-                        (unsigned long)p->RejectDetail, reject_detail_to_string(p->RejectDetail));
-                    display_identity(&p->Identity, "       ");
-                    HLOG_USER("       TrackingId=0x%llx\n", (unsigned long long)p->TrackingId);
-                }
-            } else {
-                HLOG_USER("TrailingData: %lld bytes (count=%zu, does not match WINBIO_PRESENCE[])\n",
-                    (long long)trailingBytes, presenceCount);
-            }
-        }
+            (unsigned)obuf.SubFactor,
+            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)obuf.SubFactor));
+        display_identity(&obuf.Identity, "");
     }
 
     HLOG_DEBUG("IDENTIFY_ALL raw (%lld bytes): ", (long long)req.informationSize);
-    for(LONG_PTR i=0;i<req.informationSize && i<96;i++)
-        HLOG_DEBUG("%02x", obuf[i]);
+    for(LONG_PTR i = 0; i < (LONG_PTR)sizeof(obuf); i++)
+        HLOG_DEBUG("%02x", ((UCHAR *)&obuf)[i]);
     HLOG_DEBUG("\n");
 }
 
