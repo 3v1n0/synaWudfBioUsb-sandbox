@@ -5371,7 +5371,7 @@ deleteRecord(DWORD subfactor)
 
         SYNA_DELETE_RECORD_WIRE wireBuf = {0};
         wireBuf.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
-        wireBuf.Identity.Value.Wildcard = 0;  // 0 = match all, 0xFFFFFFFF hits guard → E_INVALIDARG
+        wireBuf.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
         wireBuf.SubFactor = (UCHAR)subfactor;
 
         WINBIO_BLANK_PAYLOAD obuf = {0};
