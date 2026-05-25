@@ -411,12 +411,12 @@ int WINAPI PropVariantToStringAlloc(
 }
 
 typedef WINAPI DllGetClassObject_t(_In_ REFCLSID rclsid, _In_ REFIID riid, _Out_ LPVOID* ppv);
-// typedef WINAPI DllGetClassObject_t(_In_ REFCLSID rclsid, _In_ long long *IID, _Out_ LPVOID* ppv);
-//WINAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, _Out_ LPVOID* ppv);
 
-// 96710705-B080-4B29-A3EC-B16935AE663A
-// 96710705-B080-4B29-A3EC-B16935AE663A
-DEFINE_GUID(SYNA_CLSID, 0x96710705, 0xb080, 0x4b29, 0xa3, 0xec, 0xb1, 0x69, 0x35, 0xae, 0x66, 0x3a);
+// INF file from which DriverCLSID and ServiceBinary are read at startup
+#define INF_FILE "synaWudfBioUsb.inf"
+
+// Filled at runtime from INF_FILE's [synaWudfBioUsb_Install] DriverCLSID entry
+GUID DriverCLSID;
 
 // 1BEC7499-8881-4F2B-B01C-A1A907304AFC
 DEFINE_GUID(IID_IDriverEntry, 0x1BEC7499, 0x8881, 0x4F2B, 0xB0, 0x1C, 0xA1, 0xA9, 0x07, 0x30, 0x4A, 0xFC);
@@ -5995,6 +5995,119 @@ nop()
 {
 }
 
+static bool
+parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize)
+{
+    FILE *f = fopen(infPath, "r");
+    if(!f) {
+        HLOG_USER("Failed to open INF: %s\n", infPath);
+        return false;
+    }
+    char line[512];
+    char installSection[64] = "";
+    bool inWdfSection = false;
+
+    // First pass: find the first [*.Wdf] section with an UmdfService= line
+    // and extract the install section name after the comma.
+    while(fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while(len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
+        if(len == 0 || line[0] == ';')
+            continue;
+        if(line[0] == '[') {
+            inWdfSection = (strstr(line, ".Wdf]") != NULL);
+            continue;
+        }
+        if(!inWdfSection)
+            continue;
+        if(strncmp(line, "UmdfService=", 12) != 0)
+            continue;
+        // Extract the install section name (after the comma)
+        char *comma = strchr(line + 12, ',');
+        if(!comma)
+            continue;
+        char *sec = comma + 1;
+        while(*sec == ' ' || *sec == '\t') sec++;
+        char *s = sec;
+        while(*s && *s != ' ' && *s != '\t') s++;
+        *s = '\0';
+        strncpy(installSection, sec, sizeof(installSection) - 1);
+        installSection[sizeof(installSection) - 1] = '\0';
+        break;
+    }
+    if(installSection[0] == '\0') {
+        HLOG_USER("INF has no [*.Wdf]/UmdfService entry\n");
+        fclose(f);
+        return false;
+    }
+    HLOG_USER("Found install section: %s\n", installSection);
+
+    // Second pass: find the install section and extract DriverCLSID / ServiceBinary
+    char targetSection[72];
+    snprintf(targetSection, sizeof(targetSection), "[%s]", installSection);
+    bool inTarget = false;
+    bool foundClsid = false;
+    bool foundDll = false;
+    rewind(f);
+    while(fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while(len > 0 && (line[len-1] == '\n' || line[len-1] == '\r' || line[len-1] == ' ' || line[len-1] == '\t'))
+            line[--len] = '\0';
+        if(len == 0 || line[0] == ';')
+            continue;
+        if(line[0] == '[') {
+            inTarget = (strcmp(line, targetSection) == 0);
+            continue;
+        }
+        if(!inTarget)
+            continue;
+        char *eq = strchr(line, '=');
+        if(!eq)
+            continue;
+        *eq = '\0';
+        char *key = line;
+        char *val = eq + 1;
+        while(*key == ' ' || *key == '\t') key++;
+        char *kend = key + strlen(key) - 1;
+        while(kend > key && (*kend == ' ' || *kend == '\t')) *kend-- = '\0';
+        while(*val == ' ' || *val == '\t') val++;
+        char *vend = val + strlen(val) - 1;
+        while(vend > val && (*vend == ' ' || *vend == '\t' || *vend == '"')) *vend-- = '\0';
+        if(val[0] == '"') val++;
+        if(strcmp(key, "DriverCLSID") == 0) {
+            unsigned d[11];
+            if(sscanf(val, "{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
+                &d[0], &d[1], &d[2], &d[3], &d[4], &d[5], &d[6], &d[7], &d[8], &d[9], &d[10]) == 11) {
+                clsid->Data1 = d[0];
+                clsid->Data2 = (unsigned short)d[1];
+                clsid->Data3 = (unsigned short)d[2];
+                for(int i=0;i<8;i++) clsid->Data4[i] = (unsigned char)d[3+i];
+                foundClsid = true;
+            }
+            if(!foundClsid) {
+                HLOG_USER("Failed to parse DriverCLSID in [%s] (val='%s')\n", installSection, val);
+                fclose(f);
+                return false;
+            }
+        }
+        if(strcmp(key, "ServiceBinary") == 0) {
+            char *bs = strrchr(val, '\\');
+            const char *fn = bs ? bs + 1 : val;
+            strncpy(dllName, fn, dllNameSize - 1);
+            dllName[dllNameSize - 1] = '\0';
+            foundDll = true;
+        }
+        if(foundClsid && foundDll)
+            break;
+    }
+    fclose(f);
+    if(!foundClsid)
+        HLOG_USER("INF missing DriverCLSID in [%s]\n", installSection);
+    if(!foundDll)
+        HLOG_USER("INF missing ServiceBinary in [%s]\n", installSection);
+    return foundClsid && foundDll;
+}
+
 void
 usage()
 {
@@ -6079,65 +6192,30 @@ main(int argc, char *argv[])
     //                         &FailureDeviceNotFound);
     // std::wcout << L"Checking for PATH " << hr << ", '"<<DeviceData->DevicePath<<"' not  found " << FailureDeviceNotFound << std::endl;
 
-    // What we do here...
-    // https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/understanding-the-umdf-template-code-for-usb
+    // Load INF to get DriverCLSID and ServiceBinary DLL name
+    char dllName[64];
+    if(!parseInfFile(INF_FILE, &DriverCLSID, dllName, sizeof(dllName)))
+        return 3;
+    HLOG_USER("DriverCLSID loaded from %s, DLL=%s\n", INF_FILE, dllName);
 
-    HMODULE pDll = LoadLibrary("synaWudfBioUsb132.dll");
+    HMODULE pDll = LoadLibrary(dllName);
     if(!pDll) {
-        puts("Failed to LoadLibrary dll");
+        HLOG_USER("Failed to LoadLibrary: %s\n", dllName);
         return 3;
     }
     DllGetClassObject_t *proc = (DllGetClassObject_t*)GetProcAddress(pDll, "DllGetClassObject");
     if(!proc) {
-        puts("DllGetClassObject was not exported from the synaWudfBioUsb132.dll");
+        printf("DllGetClassObject was not exported from %s\n", dllName);
         return 3;
     }
-    HRESULT pres;
-    // HMODULE synaDll = LoadLibrary("synaFpAdapter132.dll");
-    // if(!synaDll) {
-    //     puts("Failed to synaFpAdapter132 dll");
-    //     return 3;
-    // }
-    // DllGetClassObject_t *synaProc = (DllGetClassObject_t*)GetProcAddress(pDll, "DllGetClassObject");
-    // if(!proc) {
-    //     puts("DllGetClassObject was not exported from the synaFpAdapter132.dll");
-    //     return 3;
-    // }
-
-    // LPVOID dibr = 0;
-    // pres = proc(GUID_DEVINTERFACE_BIOMETRIC_READER, IID_IUnknown, (LPVOID *)&dibr);
-    // HLOG_DEBUG("res 0x%x %s GUID_DEVINTERFACE_BIOMETRIC_READER=%p\n", pres, hresult_to_sting(pres), dibr);
-    //Sleep(5000);
-    //DllGetClassObject(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
-    HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>>> about to create factory\r\n");
-    // long long iid[2];
-    // *iid = 1;
-    // iid[1] = 0x46000000000000c0;
-    // // HLOG_DEBUG("Using IID 0x%lx\n", iid);
-    // long long *iidptr = iid;
-    // HLOG_DEBUG("That would be 0x%lx | 0x%x, matches %d,%d\n", *iidptr, iidptr[1], *iidptr == 1, iidptr[1] == 0x46000000000000c0);
-    // pres = proc(SYNA_CLSID, iidptr, (LPVOID *)&fact);
-    pres = proc(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
-    // pres = proc(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
-    HLOG_USER("<<<<<<<<<<<<<<<<<<<<<<< Factory creation done (0x%lx, %s) = %p\r\n", pres, hresult_to_sting(pres), fact);
+    HLOG_USER("creating factory\r\n");
+    if(FAILED(proc(DriverCLSID, IID_IUnknown, (LPVOID *)&fact))) {
+        puts("DllGetClassObject failed");
+        return 3;
+    }
+    HLOG_USER("factory=%p\r\n", fact);
     IDriverEntry *inst;
-    if(!fact) {
-        puts("SYNA_CLSID not found in DLL");
-        return 3;
-    }
     fact->CreateInstance(NULL, IID_IDriverEntry, (LPVOID *)&inst);
-
-/*
-    unsigned char *trace_flags = (unsigned char *)0x0000000180233E20;
-    trace_flags[1]=0x7f;
-    trace_flags[4]=0x7f;
-    HLOG_DEBUG("*0000000180233E20: %p\n", *(PVOID*)0x0000000180233E20);
-    //return 1;
-    unsigned char *trace_flags = (unsigned char *)0x000000180240820;
-    trace_flags[1]=0x7f;
-    trace_flags[4]=0x7f;
-    HLOG_DEBUG("*0000000180240820: %p\n", *(PVOID*)0x0000000180240820);
-*/
 
     HRESULT rc;
 
