@@ -4289,6 +4289,8 @@ identifyFeatureSet()
     free(ia_obuf);
 }
 
+void setIndicator(WINBIO_INDICATOR_STATUS status);
+
 void
 identify()
 {
@@ -4299,14 +4301,20 @@ identify()
 
         printf("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
-        while(!cal_req.complete)
+        int waitedMs = 0;
+        while(!cal_req.complete && waitedMs < 5000) {
             Sleep(200);
+            waitedMs += 200;
+        }
 
-        printf("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
-            hresult_to_sting(cal_req.completionStatus));
-        if(FAILED(cal_req.completionStatus)) {
-            printf("CALIBRATE failed, aborting identify\n");
-            return;
+        if(!cal_req.complete) {
+            printf("CALIBRATE still pending after %d ms; continuing to CAPTURE_DATA\n", waitedMs);
+        }
+        else {
+            printf("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
+                hresult_to_sting(cal_req.completionStatus));
+            if(FAILED(cal_req.completionStatus))
+                printf("CALIBRATE failed; continuing to CAPTURE_DATA anyway\n");
         }
     }
 
@@ -4330,6 +4338,8 @@ identify()
     params->Format.Owner = 0;//WINBIO_ANSI_381_FORMAT_OWNER;
     params->Format.Type = 0;//WINBIO_ANSI_381_FORMAT_TYPE;
     params->Flags = WINBIO_DATA_FLAG_PROCESSED;
+
+    setIndicator(WINBIO_INDICATOR_ON);
 
     MyMem in(ibuf, sizeof(*params)), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CAPTURE_DATA, &out, &in);
@@ -4356,6 +4366,7 @@ identify()
 
     if(!req.complete) {
         printf("CAPTURE_DATA did not complete; capture thread is still waiting for sensor event\n");
+        setIndicator(WINBIO_INDICATOR_OFF);
         return;
     }
 
@@ -4380,6 +4391,8 @@ identify()
         << L"CaptureData.Size " << data->CaptureData.Size << std::endl
         << L"=======================" << std::endl
         ;
+
+    setIndicator(WINBIO_INDICATOR_OFF);
 
     if(FAILED(req.completionStatus) || FAILED(data->WinBioHresult) || data->CaptureData.Size == 0) {
         printf("Capture did not produce a usable sample; skipping identify stage\n");
@@ -4419,6 +4432,29 @@ identify()
 void
 commitEnrollment()
 {
+    // UCHAR arecord[] = {
+    //     /* 4c, identity  */ 0x03, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x15, 0x00, 0x00, 0x00, 0xc5, 0x69, 0x85, 0x17, 0xbc, 0xff, 0x12, 0xe7, 0x24, 0x96, 0xb7, 0x63, 0xed, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    //     /* 04, subfactor */ 0xf6, 0x00, 0x00, 0x00,
+    //     /* 08, payload sz*/ 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    //     /* 08, payload   */ 'U', 'n', 'i', 'c', 'o', 'r', 'n', 0x00
+    // };
+
+    // UCHAR obuf[1];
+    // MyMem in(arecord, sizeof(arecord)), out(obuf, sizeof(obuf));
+    // MyRequest req(WdfRequestOther, 0x442018, &out, &in);
+
+    // printf("about to Commit Enrollment\r\n");
+    // myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x442018, 0, 0);
+    // while(!req.complete)
+    //     Sleep(200);
+
+    // printf("Got back 0x%llx bytes: ", req.informationSize);
+    // for(LONG_PTR i=0;i<req.informationSize;i++)
+    //     printf("%02x", obuf[i]);
+    // printf("\n");
+    // return;
+
+
     typedef struct _SYNA_COMMIT_ENROLLMENT_INPUT_WIRE {
         WINBIO_IDENTITY Identity;
         ULONG SubFactor;
@@ -4431,6 +4467,9 @@ commitEnrollment()
     static_assert(sizeof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE) == 0x60, "Commit input wire size must be 0x60");
 
     HRESULT commitStatus = E_FAIL;
+    WINBIO_IDENTITY commitIdentity;
+    WINBIO_BIOMETRIC_SUBTYPE commitSubFactor = WINBIO_SUBTYPE_NO_INFORMATION;
+    bool haveCommitIdentity = false;
 
     {
         SYNA_COMMIT_ENROLLMENT_INPUT_WIRE input = {0};
@@ -4468,6 +4507,10 @@ commitEnrollment()
         printf("\n");
 
         commitStatus = req.completionStatus;
+
+        memcpy(&commitIdentity, &input.Identity, sizeof(WINBIO_IDENTITY));
+        commitSubFactor = input.SubFactor;
+        haveCommitIdentity = true;
     }
 
     if(FAILED(commitStatus)) {
@@ -4494,7 +4537,12 @@ commitEnrollment()
         commitStatus = req.completionStatus;
     }
 
-    if(SUCCEEDED(commitStatus) || commitStatus == 1) {
+    if(commitStatus == 1) {
+        printf("COMMIT_ENROLLMENT error: EnrollmentCommit returned 1 (VFM write failed), treating as failure\n");
+        commitStatus = E_FAIL;
+    }
+
+    if(SUCCEEDED(commitStatus)) {
         if(!refreshTemplateCacheFromGetTemplate()) {
             printf("GET_TEMPLATE direct path failed, trying STORAGE_QUERY fallback\n");
 
@@ -4543,6 +4591,7 @@ commitEnrollment()
             }
         }
     }
+
 }
 
 void
@@ -5473,10 +5522,11 @@ print_biometric_device(uint64_t *rcx)
                         printf("%02x", cal_blob[k]);
                     }
                     printf("...\n");
-                }
             }
         }
     }
+
+}
 }
 
 void
