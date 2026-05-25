@@ -438,8 +438,10 @@ DEFINE_GUID(IID_IWDFUsbTargetFactory, 0x3f7becf9, 0x3a65, 0x4348, 0xa4, 0xf3, 0x
 
 DEFINE_GUID(IID_IWDFUsbTargetDevice, 0x4cd12e96,0x900a,0x44c3,0xa1,0xb7,0x05,0xb8,0x95,0x4d,0xab,0x76);
 
-// x46000000000000c0
-DEFINE_GUID(IID_IUnknown, 0x00000001, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+// {00000000-0000-0000-C000-000000000046}
+DEFINE_GUID(IID_IUnknown, 0x00000000, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
+// {00000001-0000-0000-C000-000000000046}
+DEFINE_GUID(IID_IClassFactory, 0x00000001, 0x0000, 0x0000, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46);
 
 DEFINE_GUID(WINUSB_GUID, 0x88BAE032, 0x5A81, 0x49f0, 0xBC, 0x3D, 0xA4, 0xFF, 0x13, 0x82, 0x16, 0xD6);
 
@@ -6198,6 +6200,7 @@ main(int argc, char *argv[])
         return 3;
     HLOG_USER("DriverCLSID loaded from %s, DLL=%s\n", INF_FILE, dllName);
 
+    // https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/understanding-the-umdf-template-code-for-usb
     HMODULE pDll = LoadLibrary(dllName);
     if(!pDll) {
         HLOG_USER("Failed to LoadLibrary: %s\n", dllName);
@@ -6209,7 +6212,7 @@ main(int argc, char *argv[])
         return 3;
     }
     HLOG_USER("creating factory\r\n");
-    if(FAILED(proc(DriverCLSID, IID_IUnknown, (LPVOID *)&fact))) {
+    if(FAILED(proc(DriverCLSID, IID_IClassFactory, (LPVOID *)&fact))) {
         puts("DllGetClassObject failed");
         return 3;
     }
