@@ -421,6 +421,7 @@ typedef WINAPI DllGetClassObject_t(_In_ REFCLSID rclsid, _In_ REFIID riid, _Out_
 
 // Filled at runtime from the INF's DriverCLSID entry (UMDF v1 only)
 GUID DriverCLSID;
+static bool g_is_synaptics_inf = false;
 
 // 1BEC7499-8881-4F2B-B01C-A1A907304AFC
 DEFINE_GUID(IID_IDriverEntry, 0x1BEC7499, 0x8881, 0x4F2B, 0xB0, 0x1C, 0xA1, 0xA9, 0x07, 0x30, 0x4A, 0xFC);
@@ -1740,15 +1741,21 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
 
 void setIndicator(WINBIO_INDICATOR_STATUS status);
 
-static bool use_synaptics_vendor_format()
+static bool is_synaptics_inf_path(const char *infPath)
 {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *env = getenv("USE_SYNAPTICS_FORMAT");
-        cached = (env && env[0] && !(env[0] == '0' && env[1] == '\0')) ? 1 : 0;
-        HLOG_INFO("Capture format: %s\n", cached ? "Synaptics vendor UUID" : "ANSI-381");
-    }
-    return cached != 0;
+    if (!infPath || !*infPath)
+        return false;
+
+    const char *base = strrchr(infPath, '/');
+    const char *base2 = strrchr(infPath, '\\');
+    if (!base || (base2 && base2 > base))
+        base = base2;
+    if (base)
+        base++;
+    else
+        base = infPath;
+
+    return strcasecmp(base, "synaWudfBioUsb.inf") == 0;
 }
 
 static void configure_capture_format(WINBIO_CAPTURE_PARAMETERS *params)
@@ -1757,7 +1764,7 @@ static void configure_capture_format(WINBIO_CAPTURE_PARAMETERS *params)
     params->Format.Type = WINBIO_ANSI_381_FORMAT_TYPE;
     params->VendorFormat = {};
 
-    if (use_synaptics_vendor_format()) {
+    if (g_is_synaptics_inf) {
         params->Format.Owner = 0;
         params->Format.Type = 0;
         params->VendorFormat = WINBIO_SYNAPTICS_VENDOR_FORMAT_UUID;
@@ -3481,6 +3488,9 @@ main(int argc, char *argv[])
     // Select INF via env var, default to the Synaptics v1 INF
     const char *infPath = getenv("HELLO_INF");
     if(!infPath) infPath = "synaWudfBioUsb.inf";
+    g_is_synaptics_inf = is_synaptics_inf_path(infPath);
+    HLOG_INFO("Capture format policy: %s\n",
+        g_is_synaptics_inf ? "Synaptics vendor UUID (INF detected)" : "ANSI-381");
 
     // Derive the directory containing the INF for DLL path construction
     char infDir[512] = ".";
