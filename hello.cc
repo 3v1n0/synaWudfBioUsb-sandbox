@@ -4948,9 +4948,8 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
             } SYNA_UPDATE_ENROLLMENT_WIRE;
             static_assert(sizeof(SYNA_UPDATE_ENROLLMENT_WIRE) == 0x48, "Update Enrollment wire size must be 0x48");
 
-            SYNA_UPDATE_ENROLLMENT_WIRE ueInput = {0};
-            SYNA_UPDATE_ENROLLMENT_WIRE ueOutput = {0};
-            MyMem in((UCHAR*)&ueInput, sizeof(ueInput)), out((UCHAR*)&ueOutput, sizeof(ueOutput));
+            SYNA_UPDATE_ENROLLMENT_WIRE ueWire = {0};
+            MyMem in((UCHAR*)&ueWire, sizeof(ueWire)), out((UCHAR*)&ueWire, sizeof(ueWire));
             MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, &out, &in);
 
             HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT\r\n");
@@ -4960,9 +4959,9 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
 
             HLOG_INFO("UPDATE_ENROLLMENT hresult=0x%lx (%s), data: ", (unsigned long)req.completionStatus,
                 hresult_to_sting(req.completionStatus));
-            SIZE_T updateDumpSize = clampInfoSize(req.informationSize, sizeof(ueOutput));
+            SIZE_T updateDumpSize = clampInfoSize(req.informationSize, sizeof(ueWire));
             for(SIZE_T i=0;i<updateDumpSize;i++)
-                HLOG_DEBUG("%02x", ((UCHAR*)&ueOutput)[i]);
+                HLOG_DEBUG("%02x", ((UCHAR*)&ueWire)[i]);
             HLOG_DEBUG("\n");
 
             if(FAILED(req.completionStatus) || req.informationSize < 0x30) {
@@ -4973,9 +4972,9 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
             }
 
             // TemplateStatus: WINBIO_I_MORE_DATA = need more samples, S_OK = complete
-            DWORD templateStatus = ueOutput.TemplateStatus;
-            DWORD percentComplete = ueOutput.PercentComplete;
-            DWORD rejectDetail = ueOutput.RejectDetail;
+            DWORD templateStatus = ueWire.TemplateStatus;
+            DWORD percentComplete = ueWire.PercentComplete;
+            DWORD rejectDetail = ueWire.RejectDetail;
             HLOG_USER("Enrollment TemplateStatus=0x%lx (%s) PercentComplete=%lu RejectDetail=0x%lx (%s)\n",
                 (unsigned long)templateStatus,
                 hresult_to_sting(templateStatus),
