@@ -417,10 +417,9 @@ int WINAPI PropVariantToStringAlloc(
 
 typedef WINAPI DllGetClassObject_t(_In_ REFCLSID rclsid, _In_ REFIID riid, _Out_ LPVOID* ppv);
 
-// INF file from which DriverCLSID and ServiceBinary are read at startup
-#define INF_FILE "synaWudfBioUsb.inf"
+// INF file is selected at runtime via HELLO_INF env var (default: synaWudfBioUsb.inf)
 
-// Filled at runtime from INF_FILE's [synaWudfBioUsb_Install] DriverCLSID entry
+// Filled at runtime from the INF's DriverCLSID entry (UMDF v1 only)
 GUID DriverCLSID;
 
 // 1BEC7499-8881-4F2B-B01C-A1A907304AFC
@@ -3241,8 +3240,9 @@ nop()
 }
 
 static bool
-parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize)
+parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize, int *umdfMajorVersion)
 {
+    *umdfMajorVersion = 1; // default; overridden by UmdfLibraryVersion
     FILE *f = fopen(infPath, "r");
     if(!f) {
         HLOG_USER("Failed to open INF: %s\n", infPath);
@@ -3319,6 +3319,12 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
         char *vend = val + strlen(val) - 1;
         while(vend > val && (*vend == ' ' || *vend == '\t' || *vend == '"')) *vend-- = '\0';
         if(val[0] == '"') val++;
+        if(strcmp(key, "UmdfLibraryVersion") == 0) {
+            int major = 0;
+            sscanf(val, "%d", &major);
+            if(major > 0) *umdfMajorVersion = major;
+            HLOG_USER("UmdfLibraryVersion=%s -> major=%d\n", val, *umdfMajorVersion);
+        }
         if(strcmp(key, "DriverCLSID") == 0) {
             unsigned d[11];
             if(sscanf(val, "{%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x}",
@@ -3346,11 +3352,12 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
             break;
     }
     fclose(f);
-    if(!foundClsid)
+    if(*umdfMajorVersion == 1 && !foundClsid)
         HLOG_USER("INF missing DriverCLSID in [%s]\n", installSection);
     if(!foundDll)
         HLOG_USER("INF missing ServiceBinary in [%s]\n", installSection);
-    return foundClsid && foundDll;
+    bool clsidOk = (*umdfMajorVersion != 1) || foundClsid;
+    return clsidOk && foundDll;
 }
 
 void
@@ -3450,21 +3457,42 @@ main(int argc, char *argv[])
     //                         &FailureDeviceNotFound);
     // std::wcout << L"Checking for PATH " << hr << ", '"<<DeviceData->DevicePath<<"' not  found " << FailureDeviceNotFound << std::endl;
 
-    // Load INF to get DriverCLSID and ServiceBinary DLL name
+    // Select INF via env var, default to the Synaptics v1 INF
+    const char *infPath = getenv("HELLO_INF");
+    if(!infPath) infPath = "synaWudfBioUsb.inf";
+
+    // Derive the directory containing the INF for DLL path construction
+    char infDir[512] = ".";
+    const char *lastSep = strrchr(infPath, '/');
+    if(!lastSep) lastSep = strrchr(infPath, '\\');
+    if(lastSep) {
+        size_t dirLen = (size_t)(lastSep - infPath);
+        if(dirLen < sizeof(infDir) - 1) {
+            memcpy(infDir, infPath, dirLen);
+            infDir[dirLen] = '\0';
+        }
+    }
+
+    // Load INF to get UMDF version, DriverCLSID and ServiceBinary DLL name
     char dllName[64];
-    if(!parseInfFile(INF_FILE, &DriverCLSID, dllName, sizeof(dllName)))
+    int umdfMajorVersion = 1;
+    if(!parseInfFile(infPath, &DriverCLSID, dllName, sizeof(dllName), &umdfMajorVersion))
         return 3;
-    HLOG_USER("DriverCLSID loaded from %s, DLL=%s\n", INF_FILE, dllName);
+    HLOG_USER("INF=%s, UMDF v%d, DLL=%s\n", infPath, umdfMajorVersion, dllName);
+
+    // Build full path to the DLL: <infDir>\<dllName>
+    char dllPath[576];
+    snprintf(dllPath, sizeof(dllPath), "%s\\%s", infDir, dllName);
 
     // https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/understanding-the-umdf-template-code-for-usb
-    HMODULE pDll = LoadLibrary(dllName);
+    HMODULE pDll = LoadLibrary(dllPath);
     if(!pDll) {
-        HLOG_USER("Failed to LoadLibrary: %s\n", dllName);
+        HLOG_USER("Failed to LoadLibrary: %s\n", dllPath);
         return 3;
     }
     DllGetClassObject_t *proc = (DllGetClassObject_t*)GetProcAddress(pDll, "DllGetClassObject");
     if(!proc) {
-        printf("DllGetClassObject was not exported from %s\n", dllName);
+        printf("DllGetClassObject was not exported from %s\n", dllPath);
         return 3;
     }
     HLOG_USER("creating factory\r\n");
