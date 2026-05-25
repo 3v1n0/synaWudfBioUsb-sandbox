@@ -1497,6 +1497,21 @@ sensor_subtype_to_string(WINBIO_BIOMETRIC_SENSOR_SUBTYPE sub)
     }
 }
 
+static const char *
+sensor_status_to_string(WINBIO_SENSOR_STATUS status)
+{
+    switch(status) {
+    case WINBIO_SENSOR_STATUS_UNKNOWN:  return "STATUS_UNKNOWN";
+    case WINBIO_SENSOR_ACCEPT:          return "ACCEPT";
+    case WINBIO_SENSOR_REJECT:          return "REJECT";
+    case WINBIO_SENSOR_READY:           return "READY";
+    case WINBIO_SENSOR_BUSY:            return "BUSY";
+    case WINBIO_SENSOR_NOT_CALIBRATED:  return "NOT_CALIBRATED";
+    case WINBIO_SENSOR_FAILURE:         return "FAILURE";
+    default:                            return "UNKNOWN";
+    }
+}
+
 static void
 capabilities_to_string(WINBIO_CAPABILITIES caps, char *buf, size_t bufsize)
 {
@@ -4403,8 +4418,62 @@ operator << (std::basic_ostream<wchar_t> &os, WINBIO_REGISTERED_FORMAT r)
     return os << L"Owher=" << r.Owner << L", Type=" << r.Type;
 }
 
+WINBIO_SENSOR_STATUS
+getSensorStatus()
+{
+    char buf[1024*10];
+    WINBIO_DIAGNOSTICS *diag = (WINBIO_DIAGNOSTICS*)buf;
+
+    MyMem in(NULL, 0), out(buf, sizeof(buf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, &out, &in);
+
+    HLOG_USER("about to IOCTL_BIOMETRIC_GET_SENSOR_STATUS\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, 0, 0);
+    while(!req.complete)
+        Sleep(200);
+
+    if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(WINBIO_DIAGNOSTICS)) {
+        HLOG_INFO("GET_SENSOR_STATUS returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus),
+            (long long)req.informationSize);
+        return WINBIO_SENSOR_STATUS_UNKNOWN;
+    }
+
+    WINBIO_SENSOR_STATUS sensorStatus = diag->SensorStatus;
+    HLOG_USER("GET_SENSOR_STATUS: PayloadSize=%lu WinBioHresult=0x%lx SensorStatus=%lu (%s) VendorSize=%lu\n",
+        (unsigned long)diag->PayloadSize,
+        (unsigned long)diag->WinBioHresult,
+        (unsigned long)sensorStatus, sensor_status_to_string(sensorStatus),
+        (unsigned long)diag->VendorDiagnostics.Size);
+
+    return sensorStatus;
+}
+
+// sensorStatus comes from the getSensorStatus() call in main().
+static void
+calibrate()
+{
+    char calibrate_buf[1024];
+    WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
+    MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
+    MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
+
+    HLOG_USER("calibrate: CALIBRATE\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
+    while(!cal_req.complete)
+        Sleep(200);
+
+    if(FAILED(cal_req.completionStatus)) {
+        HLOG_USER("calibrate: CALIBRATE failed: 0x%lx (%s)\n",
+            (unsigned long)cal_req.completionStatus, hresult_to_sting(cal_req.completionStatus));
+        return;
+    }
+    HLOG_USER("calibrate: calibration complete\n");
+}
+
 void
-identifyFeatureSet()
+identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
 {
     ULONGLONG stl_zero = 0;
     WINBIO_BLANK_PAYLOAD stl_obuf = {0};
@@ -4460,32 +4529,10 @@ identifyFeatureSet()
 void setIndicator(WINBIO_INDICATOR_STATUS status);
 
 void
-identify()
+identify(WINBIO_SENSOR_STATUS sensorStatus)
 {
-    {
-        char calibrate_buf[1024];
-        WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
-        MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
-        MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
-
-        HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
-        myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
-        int waitedMs = 0;
-        while(!cal_req.complete && waitedMs < 5000) {
-            Sleep(200);
-            waitedMs += 200;
-        }
-
-        if(!cal_req.complete) {
-            HLOG_USER("CALIBRATE still pending after %d ms; continuing to CAPTURE_DATA\n", waitedMs);
-        }
-        else {
-            HLOG_INFO("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
-                hresult_to_sting(cal_req.completionStatus));
-            if(FAILED(cal_req.completionStatus))
-                HLOG_USER("CALIBRATE failed; continuing to CAPTURE_DATA anyway\n");
-        }
-    }
+    if (sensorStatus == WINBIO_SENSOR_NOT_CALIBRATED)
+        calibrate();
 
     char obuf[1024*100];
     WINBIO_CAPTURE_DATA *data = (WINBIO_CAPTURE_DATA *)obuf;
@@ -4586,7 +4633,7 @@ identify()
     setIndicator(WINBIO_INDICATOR_OFF);
 
     HLOG_USER("=== Identify Match ===\n");
-    identifyFeatureSet();
+    identifyFeatureSet(sensorStatus);
 }
 
 void
@@ -4733,26 +4780,12 @@ reset()
 }
 
 void
-enroll()
+enroll(WINBIO_SENSOR_STATUS sensorStatus)
 {
     Sleep(500);
 
-    char calibrate_buf[1024];
-    WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
-    MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
-    MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
-
-    HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
-    while(!cal_req.complete)
-        Sleep(200);
-
-    if(FAILED(cal_req.completionStatus)) {
-        HLOG_USER("CALIBRATE failed in enroll: hresult=0x%lx (%s)\n",
-            (unsigned long)cal_req.completionStatus,
-            hresult_to_sting(cal_req.completionStatus));
-        return;
-    }
+    if (sensorStatus == WINBIO_SENSOR_NOT_CALIBRATED)
+        calibrate();
 
     Sleep(100);
 
@@ -4948,26 +4981,10 @@ enroll()
 }
 
 void
-identifyAll()
+identifyAll(WINBIO_SENSOR_STATUS sensorStatus)
 {
-    {
-        char calibrate_buf[1024];
-        WINBIO_CALIBRATION_INFO *cal = (WINBIO_CALIBRATION_INFO *)calibrate_buf;
-        MyMem cal_in(NULL, 0), cal_out(calibrate_buf, sizeof(calibrate_buf));
-        MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
-
-        HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
-        myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
-        while(!cal_req.complete)
-            Sleep(200);
-
-        HLOG_INFO("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
-            hresult_to_sting(cal_req.completionStatus));
-        if(FAILED(cal_req.completionStatus)) {
-            HLOG_USER("CALIBRATE failed, aborting identify-all\n");
-            return;
-        }
-    }
+    if (sensorStatus == WINBIO_SENSOR_NOT_CALIBRATED)
+        calibrate();
 
     {
         ULONGLONG stl_zero = 0;
@@ -5207,41 +5224,6 @@ clearDatabase()
 }
 
 void
-getSensorStatus()
-{
-    char buf[1024*10];
-    WINBIO_DIAGNOSTICS *diag = (WINBIO_DIAGNOSTICS*)buf;
-
-    MyMem in(NULL, 0), out(buf, sizeof(buf));
-    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, &out, &in);
-
-    HLOG_USER("about to IOCTL_BIOMETRIC_GET_SENSOR_STATUS\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, 0, 0);
-    while(!req.complete)
-        Sleep(200);
-    //Sleep(4000);
-    //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
-    //Sleep(4000);
-    IFLOG(1) {
-        std::wcout
-            << L"=======================" << std::endl
-            << L"PayloadSize " << diag->PayloadSize << std::endl
-            << L"WinBioHresult " << diag->WinBioHresult << std::endl
-            << L"SensorStatus " << diag->SensorStatus << std::endl
-            << L"VendorDiagnostics.Size " << diag->VendorDiagnostics.Size << std::endl
-            << L"=======================" << std::endl;
-    }
-
-    if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(WINBIO_DIAGNOSTICS)) {
-        HLOG_INFO("GET_SENSOR_STATUS returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
-            (unsigned long)req.completionStatus,
-            hresult_to_sting(req.completionStatus),
-            (long long)req.informationSize);
-    }
-
-}
-
-void
 resetIoctl()
 {
     char buf[1024*10];
@@ -5281,8 +5263,6 @@ getAttributes()
 
     HLOG_USER("about to IOCTL_BIOMETRIC_GET_ATTRIBUTES\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_ATTRIBUTES, 0, 0);
-    //Sleep(1000);
-    //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     while(!req.complete)
         Sleep(200);
 
@@ -6117,13 +6097,7 @@ main(int argc, char *argv[])
         return 3;
     }
 
-    if(strcasecmp(argv[1], "identify") == 0) {
-        what = identify;
-    }
-    else if(strcasecmp(argv[1], "enroll") == 0) {
-        what = enroll;
-    }
-    else if(strcasecmp(argv[1], "reset") == 0) {
+    if(strcasecmp(argv[1], "reset") == 0) {
         what = reset;
     }
     else if(strcasecmp(argv[1], "set-led") == 0) {
@@ -6135,12 +6109,6 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "list-db") == 0) {
         what = listDatabase;
-    }
-    else if(strcasecmp(argv[1], "identify-all") == 0) {
-        what = identifyAll;
-    }
-    else if(strcasecmp(argv[1], "identify") == 0) {
-        what = identify;
     }
     else if(strcasecmp(argv[1], "clear-db") == 0) {
         what = clearDatabase;
@@ -6279,6 +6247,7 @@ main(int argc, char *argv[])
     Sleep(1000);
 
     getAttributes();
+    WINBIO_SENSOR_STATUS sensorStatus = getSensorStatus();
 
     if(strcasecmp(argv[1], "set-led") == 0) {
         setLed(ledState);
@@ -6286,6 +6255,15 @@ main(int argc, char *argv[])
     else if(strcasecmp(argv[1], "delete-record") == 0) {
         deleteRecord((DWORD)atoi(argv[2]));
         listDatabase();
+    }
+    else if(strcasecmp(argv[1], "identify") == 0) {
+        identify(sensorStatus);
+    }
+    else if(strcasecmp(argv[1], "enroll") == 0) {
+        enroll(sensorStatus);
+    }
+    else if(strcasecmp(argv[1], "identify-all") == 0) {
+        identifyAll(sensorStatus);
     }
     else if(what) {
         what();
