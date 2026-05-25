@@ -4646,15 +4646,12 @@ commitEnrollment()
         while(!req.complete)
             Sleep(200);
 
-        HLOG_INFO("COMMIT_ENROLLMENT structured: hresult=0x%lx (%s), infoSize=%lld, raw: ",
+        HLOG_INFO("COMMIT_ENROLLMENT structured: hresult=0x%lx (%s), infoSize=%lld\n",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
-        SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
-        for(SIZE_T i=0;i<commitDumpSize;i++)
-            HLOG_DEBUG("%02x", ((UCHAR*)&obuf)[i]);
-        if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
-            HLOG_INFO("...(truncated)");
-        HLOG_DEBUG("\n");
+        HLOG_DEBUG("  PayloadSize=%lu WinBioHresult=0x%lx (%s)\n",
+            obuf.PayloadSize, (unsigned long)obuf.WinBioHresult,
+            hresult_to_sting(obuf.WinBioHresult));
 
         commitStatus = req.completionStatus;
 
@@ -4671,15 +4668,12 @@ commitEnrollment()
         while(!req.complete)
             Sleep(200);
 
-        HLOG_INFO("COMMIT_ENROLLMENT fallback: hresult=0x%lx (%s), infoSize=%lld, raw: ",
+        HLOG_INFO("COMMIT_ENROLLMENT fallback: hresult=0x%lx (%s), infoSize=%lld\n",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
-        SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
-        for(SIZE_T i=0;i<commitDumpSize;i++)
-            HLOG_DEBUG("%02x", ((UCHAR*)&obuf)[i]);
-        if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
-            HLOG_INFO("...(truncated)");
-        HLOG_DEBUG("\n");
+        HLOG_DEBUG("  PayloadSize=%lu WinBioHresult=0x%lx (%s)\n",
+            obuf.PayloadSize, (unsigned long)obuf.WinBioHresult,
+            hresult_to_sting(obuf.WinBioHresult));
 
         commitStatus = req.completionStatus;
     }
@@ -5394,11 +5388,9 @@ deleteRecord(DWORD subfactor)
 
         HLOG_USER("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
-        HLOG_INFO("Raw output: ");
-        SIZE_T deleteDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
-        for(SIZE_T i=0;i<deleteDumpSize;i++)
-            HLOG_DEBUG("%02x", ((UCHAR*)&obuf)[i]);
-        HLOG_DEBUG("\n");
+        HLOG_DEBUG("  PayloadSize=%lu WinBioHresult=0x%lx (%s)\n",
+            obuf.PayloadSize, (unsigned long)obuf.WinBioHresult,
+            hresult_to_sting(obuf.WinBioHresult));
     }
 }
 
