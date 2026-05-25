@@ -4937,8 +4937,14 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
                 UCHAR Reserved1[0x24];
                 ULONG PercentComplete;
                 ULONG RejectDetail;
-                // Possibly maps to fingerprint-specific progress fields.
-                ULONG Fingerprint[6];
+                struct {
+                    ULONG GeneralSamples;
+                    ULONG Center;
+                    ULONG TopEdge;
+                    ULONG BottomEdge;
+                    ULONG LeftEdge;
+                    ULONG RightEdge;
+                } Fingerprint;
             } SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT;
             typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_INPUT {
                 UCHAR Data[0x48];
