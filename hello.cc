@@ -315,7 +315,8 @@ typedef struct _SYNA_STORAGE_QUERY_INPUT {
 typedef struct _SYNA_STORAGE_RECORD {
     WINBIO_IDENTITY Identity;
     WINBIO_BIOMETRIC_SUBTYPE SubFactor;
-    UCHAR Reserved[0x20];
+    ULONGLONG TemplateBlobSize;
+    UCHAR TemplateBlob[24];
 } SYNA_STORAGE_RECORD;
 
 typedef struct _SYNA_STORAGE_QUERY_RESULT {
@@ -1391,6 +1392,7 @@ static const char *reject_detail_to_string(DWORD detail)
     default:                    return "NONE";
     }
 }
+
 
 struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
     std::map<std::wstring, PROPVARIANT*> m_store;
@@ -5039,6 +5041,14 @@ listDatabase()
             printf("Value=%lu", (unsigned long)rec->Identity.Value.Wildcard);
         }
         printf("\n");
+        printf("    TemplateBlobSize=%llu\n", (unsigned long long)rec->TemplateBlobSize);
+        if(rec->TemplateBlobSize > 0) {
+            SIZE_T showSize = rec->TemplateBlobSize < sizeof(rec->TemplateBlob) ? rec->TemplateBlobSize : sizeof(rec->TemplateBlob);
+            printf("    TemplateBlob[%zu]=", showSize);
+            for(SIZE_T j=0;j<showSize;j++)
+                printf("%02x", rec->TemplateBlob[j]);
+            printf("\n");
+        }
     }
 
     free(sbuf);
