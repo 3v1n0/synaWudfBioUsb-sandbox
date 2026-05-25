@@ -4919,18 +4919,20 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
 
         Sleep(100);
         {
-            // UPDATE_ENROLLMENT: driver expects WDF in/out both 0x48 bytes
-            // EIS->vtable[2] (offset 0x10): accepts 0x48-byte buffer
-            // Output layout:
+            // UPDATE_ENROLLMENT: driver expects WDF in/out both 0x48 bytes.
+            // Decompiled EnrollmentUpdate writes:
             //   [0x00] HRESULT EnrollmentStatus
-            //   [0x28] ULONG Progress
-            //   [0x2c] ULONG RejectDetail
+            //   [0x28] ULONG detail-like value (local_29a0[1])
+            //   [0x2c] ULONG secondary value
+            //   [0x30..0x44] six ULONG flags in one branch
+            // Reject-detail offset is ambiguous in public docs, so we log both.
             typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT {
                 HRESULT EnrollmentStatus;
-                UCHAR Reserved1[0x24];
-                ULONG Progress;
-                ULONG RejectDetail;
-                UCHAR Reserved2[0x18];
+                ULONG Dword04;
+                UCHAR Reserved1[0x20];
+                ULONG Dword28;
+                ULONG Dword2C;
+                ULONG Flags[6];
             } SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT;
             typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_INPUT {
                 UCHAR Data[0x48];
@@ -4960,13 +4962,29 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
                 break;
             }
 
-            // Enrollment status in output: WINBIO_I_MORE_DATA = need more samples, S_OK = complete
+            // Enrollment status: WINBIO_I_MORE_DATA = need more samples, S_OK = complete.
             DWORD enrollStatus = ueOutput.EnrollmentStatus;
-            DWORD enrollProgress = ueOutput.Progress;
-            DWORD enrollReject = ueOutput.RejectDetail;
-            HLOG_USER("Enrollment status=0x%lx (%s) progress=%lu%% reject=%s\n",
-                (unsigned long)enrollStatus, hresult_to_sting(enrollStatus),
-                (unsigned long)enrollProgress, reject_detail_to_string(enrollReject));
+            DWORD enrollReject = ueOutput.Dword28;
+            if(enrollReject == 0 && ueOutput.Dword2C != 0)
+                enrollReject = ueOutput.Dword2C;
+
+            HLOG_DEBUG("UPDATE_ENROLLMENT fields: dword04=0x%lx dword28=0x%lx dword2C=0x%lx flags=[%lu,%lu,%lu,%lu,%lu,%lu]\n",
+                (unsigned long)ueOutput.Dword04,
+                (unsigned long)ueOutput.Dword28,
+                (unsigned long)ueOutput.Dword2C,
+                (unsigned long)ueOutput.Flags[0],
+                (unsigned long)ueOutput.Flags[1],
+                (unsigned long)ueOutput.Flags[2],
+                (unsigned long)ueOutput.Flags[3],
+                (unsigned long)ueOutput.Flags[4],
+                (unsigned long)ueOutput.Flags[5]);
+
+            HLOG_USER("Enrollment status=0x%lx (%s) reject=0x%lx (%s) [from %s]\n",
+                (unsigned long)enrollStatus,
+                hresult_to_sting(enrollStatus),
+                (unsigned long)enrollReject,
+                reject_detail_to_string(enrollReject),
+                (enrollReject == ueOutput.Dword2C && ueOutput.Dword2C != 0 && ueOutput.Dword28 == 0) ? "offset 0x2c" : "offset 0x28");
             if(enrollStatus != WINBIO_I_MORE_DATA)
                 break;
         }
