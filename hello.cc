@@ -4407,18 +4407,18 @@ void
 identifyFeatureSet()
 {
     ULONGLONG stl_zero = 0;
-    UCHAR stl_obuf[4] = {0};
-    MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
+    WINBIO_BLANK_PAYLOAD stl_obuf = {0};
+    MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out((UCHAR *)&stl_obuf, sizeof(stl_obuf));
     MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
 
-    HLOG_INFO("SET_TEMPLATE_LIST (zero-list)\n");
+    HLOG_USER("SET_TEMPLATE_LIST (zero-list)\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
     while(!stl_req.complete)
         Sleep(200);
 
-    HLOG_INFO("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\n",
+    HLOG_USER("SET_TEMPLATE_LIST: hresult=0x%lx (%s), PayloadSize=%lu, infoSize=%lld\n",
         (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
-        (long long)stl_req.informationSize);
+        (unsigned long)stl_obuf.PayloadSize, (long long)stl_req.informationSize);
 
     const DWORD ia_obuf_size = 4096;
     UCHAR *ia_obuf = (UCHAR *)calloc(1, ia_obuf_size);
@@ -4429,13 +4429,13 @@ identifyFeatureSet()
     MyMem ia_in(NULL, 0), ia_out(ia_obuf, ia_obuf_size);
     MyRequest ia_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &ia_out, &ia_in);
 
-    HLOG_INFO("GET_IDENTIFY_ALL\n");
+    HLOG_USER("GET_IDENTIFY_ALL\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &ia_req, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, 0, 0);
     HLOG_DEBUG("returned from IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL dispatch, complete=%d\n", ia_req.complete ? 1 : 0);
     while(!ia_req.complete)
         Sleep(200);
 
-    HLOG_INFO("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\n",
+    HLOG_USER("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\n",
         (unsigned long)ia_req.completionStatus, hresult_to_sting(ia_req.completionStatus),
         (long long)ia_req.informationSize);
 
@@ -4449,6 +4449,9 @@ identifyFeatureSet()
             (unsigned)identifyOut->SubFactor,
             subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)identifyOut->SubFactor));
         display_identity(&identifyOut->Identity, "");
+        LONG_PTR extra = ia_req.informationSize - sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE);
+        if(extra > 0)
+            HLOG_USER("  TrailingData: %lld bytes\n", (long long)extra);
     }
 
     HLOG_DEBUG("IDENTIFY_ALL raw (%lld bytes): ", (long long)ia_req.informationSize);
@@ -4973,18 +4976,18 @@ identifyAll()
 
     {
         ULONGLONG stl_zero = 0;
-        UCHAR stl_obuf[4] = {0};
-        MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
+        WINBIO_BLANK_PAYLOAD stl_obuf = {0};
+        MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out((UCHAR *)&stl_obuf, sizeof(stl_obuf));
         MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
 
-        HLOG_INFO("SET_TEMPLATE_LIST (zero-list)\n");
+        HLOG_USER("SET_TEMPLATE_LIST (zero-list)\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
         while(!stl_req.complete)
             Sleep(200);
 
-        HLOG_INFO("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\n",
+        HLOG_USER("SET_TEMPLATE_LIST: hresult=0x%lx (%s), PayloadSize=%lu, infoSize=%lld\n",
             (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
-            (long long)stl_req.informationSize);
+            (unsigned long)stl_obuf.PayloadSize, (long long)stl_req.informationSize);
 
         if(FAILED(stl_req.completionStatus)) {
             HLOG_USER("SET_TEMPLATE_LIST failed, aborting identify-all\n");
@@ -5094,16 +5097,16 @@ listDatabase()
 
     {
         ULONGLONG stl_zero = 0;
-        UCHAR stl_obuf[4] = {0};
-        MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
+        WINBIO_BLANK_PAYLOAD stl_obuf = {0};
+        MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out((UCHAR *)&stl_obuf, sizeof(stl_obuf));
         MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
-        HLOG_INFO("SET_TEMPLATE_LIST (zero-list)\n");
+        HLOG_USER("SET_TEMPLATE_LIST (zero-list)\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
         while(!stl_req.complete)
             Sleep(200);
-        HLOG_INFO("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\n",
+        HLOG_USER("SET_TEMPLATE_LIST: hresult=0x%lx (%s), PayloadSize=%lu, infoSize=%lld\n",
             (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
-            (long long)stl_req.informationSize);
+            (unsigned long)stl_obuf.PayloadSize, (long long)stl_req.informationSize);
     }
 
     size_t maxRecords = recordCount > 128 ? 128 : recordCount;
