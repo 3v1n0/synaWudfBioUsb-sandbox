@@ -327,25 +327,28 @@ static int hello_get_log_level() {
 #define STORAGE_QUERY_TYPE_CONTENT  3
 #define STORAGE_QUERY_TYPE_GET_SINGLE 4
 
-typedef struct _SYNA_STORAGE_QUERY_INPUT {
+typedef struct _WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE {
     DWORD QueryType;
     WINBIO_IDENTITY Identity;
     WINBIO_BIOMETRIC_SUBTYPE SubFactor;
     DWORD IndexElementCount;
     ULONG IndexVector[1];
-} SYNA_STORAGE_QUERY_INPUT;
+} WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE;
 
-typedef struct _SYNA_STORAGE_RECORD {
+typedef struct _WINBIO_HOST_STORAGE_RECORD_WIRE {
     WINBIO_IDENTITY Identity;
     WINBIO_BIOMETRIC_SUBTYPE SubFactor;
     ULONGLONG TemplateBlobSize;
     UCHAR TemplateBlob[24];
-} SYNA_STORAGE_RECORD;
+} WINBIO_HOST_STORAGE_RECORD_WIRE;
 
-typedef struct _SYNA_STORAGE_QUERY_RESULT {
+typedef struct _WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE {
     ULONGLONG RecordCount;
-    SYNA_STORAGE_RECORD Records[1];
-} SYNA_STORAGE_QUERY_RESULT;
+    WINBIO_HOST_STORAGE_RECORD_WIRE Records[1];
+} WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE;
+
+// These *_WIRE structs model WinBio host/framework private wire layouts seen on
+// IOCTL boundaries. They are not exposed by public WinBio headers.
 
 typedef struct _WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE {
     WINBIO_IDENTITY Identity;
@@ -353,7 +356,7 @@ typedef struct _WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE {
     HRESULT EngineHresult;
 } WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE;
 
-static_assert(sizeof(SYNA_STORAGE_RECORD) == 0x70, "SYNA_STORAGE_RECORD must be 0x70 bytes");
+static_assert(sizeof(WINBIO_HOST_STORAGE_RECORD_WIRE) == 0x70, "WINBIO_HOST_STORAGE_RECORD_WIRE must be 0x70 bytes");
 static_assert(offsetof(WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE, SubFactor) == 0x4c, "SubFactor offset must be 0x4c");
 static_assert(offsetof(WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE, EngineHresult) == 0x50, "EngineHresult offset must be 0x50");
 static_assert(sizeof(WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE) == 0x54, "WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE must be 0x54 bytes");
@@ -4481,14 +4484,14 @@ calibrate()
 // Returns the number of records written into `out` (capped at `maxRecords`).
 // Returns -1 on IOCTL failure.  Caller allocates out[maxRecords].
 static int
-queryAllRecords(SYNA_STORAGE_RECORD *out, size_t maxRecords)
+queryAllRecords(WINBIO_HOST_STORAGE_RECORD_WIRE *out, size_t maxRecords)
 {
-    DWORD queryBufSize = sizeof(SYNA_STORAGE_QUERY_INPUT) - sizeof(ULONG) + 0x78;
+    DWORD queryBufSize = sizeof(WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE) - sizeof(ULONG) + 0x78;
     UCHAR *sbuf = (UCHAR *)calloc(1, queryBufSize);
-    SYNA_STORAGE_QUERY_INPUT *query = (SYNA_STORAGE_QUERY_INPUT *)sbuf;
+    WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE *query = (WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE *)sbuf;
     query->QueryType = STORAGE_QUERY_TYPE_ALL;
 
-    DWORD resultBufSize = (DWORD)(sizeof(SYNA_STORAGE_QUERY_RESULT) + (maxRecords - 1) * sizeof(SYNA_STORAGE_RECORD));
+    DWORD resultBufSize = (DWORD)(sizeof(WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE) + (maxRecords - 1) * sizeof(WINBIO_HOST_STORAGE_RECORD_WIRE));
     UCHAR *rbuf = (UCHAR *)calloc(1, resultBufSize);
 
     MyMem qin(sbuf, queryBufSize), qout(rbuf, resultBufSize);
@@ -4499,9 +4502,9 @@ queryAllRecords(SYNA_STORAGE_RECORD *out, size_t maxRecords)
 
     int ret = -1;
     if(!FAILED(qreq.completionStatus)) {
-        SYNA_STORAGE_QUERY_RESULT *result = (SYNA_STORAGE_QUERY_RESULT *)rbuf;
+        WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE *result = (WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE *)rbuf;
         size_t count = result->RecordCount < maxRecords ? result->RecordCount : maxRecords;
-        memcpy(out, result->Records, count * sizeof(SYNA_STORAGE_RECORD));
+        memcpy(out, result->Records, count * sizeof(WINBIO_HOST_STORAGE_RECORD_WIRE));
         ret = (int)count;
     }
     free(sbuf);
@@ -4514,18 +4517,18 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
 {
     // Build SET_TEMPLATE_LIST input from actual DB records: ULONGLONG count + records[].
     // This restricts matching to the enrolled templates present in the database.
-    static SYNA_STORAGE_RECORD stlRecords[128];
+    static WINBIO_HOST_STORAGE_RECORD_WIRE stlRecords[128];
     int nRecords = queryAllRecords(stlRecords, 128);
     if(nRecords < 0) {
         HLOG_USER("SET_TEMPLATE_LIST: STORAGE_QUERY failed, aborting\n");
         return;
     }
 
-    // Wire format: ULONGLONG record count + nRecords * SYNA_STORAGE_RECORD (0x70 bytes each)
-    size_t stlBufSize = sizeof(ULONGLONG) + (size_t)nRecords * sizeof(SYNA_STORAGE_RECORD);
+    // Wire format: ULONGLONG record count + nRecords * WINBIO_HOST_STORAGE_RECORD_WIRE (0x70 bytes each)
+    size_t stlBufSize = sizeof(ULONGLONG) + (size_t)nRecords * sizeof(WINBIO_HOST_STORAGE_RECORD_WIRE);
     UCHAR *stlBuf = (UCHAR *)calloc(1, stlBufSize);
     *(ULONGLONG *)stlBuf = (ULONGLONG)nRecords;
-    memcpy(stlBuf + sizeof(ULONGLONG), stlRecords, (size_t)nRecords * sizeof(SYNA_STORAGE_RECORD));
+    memcpy(stlBuf + sizeof(ULONGLONG), stlRecords, (size_t)nRecords * sizeof(WINBIO_HOST_STORAGE_RECORD_WIRE));
 
     WINBIO_BLANK_PAYLOAD stl_obuf = {0};
     MyMem stl_in(stlBuf, (ULONG)stlBufSize), stl_out((UCHAR *)&stl_obuf, sizeof(stl_obuf));
@@ -4718,21 +4721,21 @@ commitEnrollment()
     // return;
 
 
-    typedef struct _SYNA_COMMIT_ENROLLMENT_INPUT_WIRE {
+    typedef struct _WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE {
         WINBIO_IDENTITY Identity;
         ULONG SubFactor;
         ULONGLONG PayloadBlobSize;
         UCHAR PayloadBlob[8];
-    } SYNA_COMMIT_ENROLLMENT_INPUT_WIRE;
-    static_assert(offsetof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE, SubFactor) == 0x4c, "Commit SubFactor offset must be 0x4c");
-    static_assert(offsetof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE, PayloadBlobSize) == 0x50, "Commit PayloadBlobSize offset must be 0x50");
-    static_assert(offsetof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE, PayloadBlob) == 0x58, "Commit PayloadBlob offset must be 0x58");
-    static_assert(sizeof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE) == 0x60, "Commit input wire size must be 0x60");
+    } WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE;
+    static_assert(offsetof(WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE, SubFactor) == 0x4c, "Commit SubFactor offset must be 0x4c");
+    static_assert(offsetof(WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE, PayloadBlobSize) == 0x50, "Commit PayloadBlobSize offset must be 0x50");
+    static_assert(offsetof(WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE, PayloadBlob) == 0x58, "Commit PayloadBlob offset must be 0x58");
+    static_assert(sizeof(WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE) == 0x60, "Commit input wire size must be 0x60");
 
     HRESULT commitStatus = E_FAIL;
 
     {
-        SYNA_COMMIT_ENROLLMENT_INPUT_WIRE input = {0};
+        WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE input = {0};
         WINBIO_BLANK_PAYLOAD obuf = {0};
 
         input.Identity.Type = WINBIO_ID_TYPE_GUID;
@@ -4849,15 +4852,15 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
     // EIS->vtable[1] EnrollmentCreate(interface, inputBuffer, outputBuffer):
     //   (communication with sensor VFM to start enrollment session)
     {
-        typedef struct _SYNA_CREATE_ENROLLMENT_WIRE_INPUT {
+        typedef struct _WINBIO_HOST_CREATE_ENROLLMENT_INPUT_WIRE {
             UCHAR Data[8];
-        } SYNA_CREATE_ENROLLMENT_WIRE_INPUT;
-        typedef struct _SYNA_CREATE_ENROLLMENT_WIRE_OUTPUT {
+        } WINBIO_HOST_CREATE_ENROLLMENT_INPUT_WIRE;
+        typedef struct _WINBIO_HOST_CREATE_ENROLLMENT_OUTPUT_WIRE {
             UCHAR Data[0x28];
-        } SYNA_CREATE_ENROLLMENT_WIRE_OUTPUT;
+        } WINBIO_HOST_CREATE_ENROLLMENT_OUTPUT_WIRE;
 
-        SYNA_CREATE_ENROLLMENT_WIRE_INPUT ceInput = {0};
-        SYNA_CREATE_ENROLLMENT_WIRE_OUTPUT ceOutput = {0};
+        WINBIO_HOST_CREATE_ENROLLMENT_INPUT_WIRE ceInput = {0};
+        WINBIO_HOST_CREATE_ENROLLMENT_OUTPUT_WIRE ceOutput = {0};
         MyMem in((UCHAR*)&ceInput, sizeof(ceInput)), out((UCHAR*)&ceOutput, sizeof(ceOutput));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, &out, &in);
 
@@ -4932,7 +4935,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
             // UPDATE_ENROLLMENT: driver expects WDF in/out both 0x48 bytes.
             // Names are aligned with WINBIO_EXTENDED_ENROLLMENT_STATUS where possible.
             // NOTE: only TemplateStatus/PercentComplete are confirmed here.
-            typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE {
+            typedef struct _WINBIO_HOST_UPDATE_ENROLLMENT_WIRE {
                 HRESULT TemplateStatus;
                 UCHAR Reserved1[0x24];
                 ULONG PercentComplete;
@@ -4945,10 +4948,10 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
                     ULONG LeftEdge;
                     ULONG RightEdge;
                 } Fingerprint;
-            } SYNA_UPDATE_ENROLLMENT_WIRE;
-            static_assert(sizeof(SYNA_UPDATE_ENROLLMENT_WIRE) == 0x48, "Update Enrollment wire size must be 0x48");
+            } WINBIO_HOST_UPDATE_ENROLLMENT_WIRE;
+            static_assert(sizeof(WINBIO_HOST_UPDATE_ENROLLMENT_WIRE) == 0x48, "Update Enrollment wire size must be 0x48");
 
-            SYNA_UPDATE_ENROLLMENT_WIRE ueWire = {0};
+            WINBIO_HOST_UPDATE_ENROLLMENT_WIRE ueWire = {0};
             MyMem in((UCHAR*)&ueWire, sizeof(ueWire)), out((UCHAR*)&ueWire, sizeof(ueWire));
             MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, &out, &in);
 
@@ -4995,15 +4998,15 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
     //   [0x4d] UCHAR Duplicate (1 = duplicate found)
     //   [0x4e] UCHAR Reserved[2]
     {
-        typedef struct _SYNA_CHECK_FOR_DUPLICATE_WIRE {
+        typedef struct _WINBIO_HOST_CHECK_FOR_DUPLICATE_WIRE {
             WINBIO_IDENTITY Identity;
             UCHAR SubFactor;
             UCHAR Duplicate;
             UCHAR Reserved[2];
-        } SYNA_CHECK_FOR_DUPLICATE_WIRE;
-        static_assert(sizeof(SYNA_CHECK_FOR_DUPLICATE_WIRE) == 0x50, "CheckForDuplicate wire size must be 0x50");
+        } WINBIO_HOST_CHECK_FOR_DUPLICATE_WIRE;
+        static_assert(sizeof(WINBIO_HOST_CHECK_FOR_DUPLICATE_WIRE) == 0x50, "CheckForDuplicate wire size must be 0x50");
 
-        SYNA_CHECK_FOR_DUPLICATE_WIRE wireBuf = {0};
+        WINBIO_HOST_CHECK_FOR_DUPLICATE_WIRE wireBuf = {0};
         MyMem in((UCHAR*)&wireBuf, sizeof(wireBuf)), out((UCHAR*)&wireBuf, sizeof(wireBuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE, &out, &in);
 
@@ -5200,12 +5203,12 @@ listDatabase()
             eis_ptr ? *(void **)(eis_ptr + 0x128) : NULL);
     }
 
-    DWORD queryBufSize = sizeof(SYNA_STORAGE_QUERY_INPUT) - sizeof(ULONG) + 0x78;
+    DWORD queryBufSize = sizeof(WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE) - sizeof(ULONG) + 0x78;
     UCHAR *sbuf = (UCHAR *)calloc(1, queryBufSize);
-    SYNA_STORAGE_QUERY_INPUT *query = (SYNA_STORAGE_QUERY_INPUT *)sbuf;
+    WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE *query = (WINBIO_HOST_STORAGE_QUERY_INPUT_WIRE *)sbuf;
     query->QueryType = STORAGE_QUERY_TYPE_ALL;
 
-    DWORD resultBufSize = (DWORD)(sizeof(SYNA_STORAGE_QUERY_RESULT) + (maxRecords - 1) * sizeof(SYNA_STORAGE_RECORD));
+    DWORD resultBufSize = (DWORD)(sizeof(WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE) + (maxRecords - 1) * sizeof(WINBIO_HOST_STORAGE_RECORD_WIRE));
     UCHAR *rbuf = (UCHAR *)calloc(1, resultBufSize);
 
     MyMem in_s(sbuf, queryBufSize), out_s(rbuf, resultBufSize);
@@ -5230,7 +5233,7 @@ listDatabase()
         HLOG_DEBUG("%02x", sbuf[i]);
     HLOG_DEBUG("\n");
 
-    SYNA_STORAGE_QUERY_RESULT *result = (SYNA_STORAGE_QUERY_RESULT *)rbuf;
+    WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE *result = (WINBIO_HOST_STORAGE_QUERY_RESULT_WIRE *)rbuf;
 
     if(FAILED(req_s.completionStatus)) {
         HLOG_USER("STORAGE_QUERY failed\r\n");
@@ -5242,7 +5245,7 @@ listDatabase()
     HLOG_USER("Returned records: %llu\r\n", (unsigned long long)result->RecordCount);
 
     for(DWORD i=0; i<result->RecordCount && i<maxRecords; i++) {
-        SYNA_STORAGE_RECORD *rec = &result->Records[i];
+        WINBIO_HOST_STORAGE_RECORD_WIRE *rec = &result->Records[i];
         HLOG_USER("[%lu] IdentityType=%lu Subfactor=%u\n",
             (unsigned long)i,
             (unsigned long)rec->Identity.Type,
@@ -5433,14 +5436,14 @@ deleteRecord(DWORD subfactor)
     //   wire total = 0x50 bytes
     // Type=3 with Wildcard=0 matches all records with given subfactor
     {
-        typedef struct _SYNA_DELETE_RECORD_WIRE {
+        typedef struct _WINBIO_HOST_DELETE_RECORD_WIRE {
             WINBIO_IDENTITY Identity;
             UCHAR SubFactor;
             UCHAR Reserved[3];
-        } SYNA_DELETE_RECORD_WIRE;
-        static_assert(sizeof(SYNA_DELETE_RECORD_WIRE) == 0x50, "DeleteRecord wire must be 0x50");
+        } WINBIO_HOST_DELETE_RECORD_WIRE;
+        static_assert(sizeof(WINBIO_HOST_DELETE_RECORD_WIRE) == 0x50, "DeleteRecord wire must be 0x50");
 
-        SYNA_DELETE_RECORD_WIRE wireBuf = {0};
+        WINBIO_HOST_DELETE_RECORD_WIRE wireBuf = {0};
         wireBuf.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
         wireBuf.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
         wireBuf.SubFactor = (UCHAR)subfactor;
