@@ -26,6 +26,27 @@
 #define NTDDI_VERSION NTDDI_WIN7
 #include "winbio_ioctl.h"
 
+/* Logging levels controlled by HELLO_DEBUG env var:
+ *   0 or unset = USER messages only (progress, results, high-level steps)
+ *   1          = + INFO (IOCTL results, completion statuses)
+ *   2          = + DEBUG (object lifecycle, USB transfers, hex dumps)
+ *   3          = + TRACE (hash computation, BIR dumps, raw breakpoint data)
+ */
+static int hello_log_level = -1;
+static int hello_get_log_level() {
+    if (hello_log_level < 0) {
+        const char *env = getenv("HELLO_DEBUG");
+        hello_log_level = env ? atoi(env) : 0;
+    }
+    return hello_log_level;
+}
+#define HLOG_USER(...)   do { printf(__VA_ARGS__); } while(0)
+#define HLOG_INFO(...)   do { if (hello_get_log_level() >= 1) { printf(__VA_ARGS__); } } while(0)
+#define HLOG_DEBUG(...)  do { if (hello_get_log_level() >= 2) { printf(__VA_ARGS__); } } while(0)
+#define HLOG_TRACE(...)  do { if (hello_get_log_level() >= 3) { printf(__VA_ARGS__); } } while(0)
+#define IFLOG(level)     if (hello_get_log_level() >= (level))
+
+
 #ifndef WINBIO_I_MORE_DATA
 #define WINBIO_I_MORE_DATA                       ((HRESULT)0x00090001L)
 #endif
@@ -344,10 +365,6 @@ clampInfoSize(LONG_PTR informationSize, SIZE_T bufferSize)
     SIZE_T n = (SIZE_T)informationSize;
     return n < bufferSize ? n : bufferSize;
 }
-
-
-static bool
-refreshTemplateCacheFromGetTemplate();
 
 //
 // Vendor-range IOCTLs (function code = 0x800 + n)
@@ -1393,6 +1410,69 @@ static const char *reject_detail_to_string(DWORD detail)
     }
 }
 
+static const char *
+identity_type_to_string(WINBIO_IDENTITY_TYPE type)
+{
+    switch(type) {
+    case WINBIO_ID_TYPE_WILDCARD: return "WINBIO_ID_TYPE_WILDCARD";
+    case WINBIO_ID_TYPE_GUID:     return "WINBIO_ID_TYPE_GUID";
+    case WINBIO_ID_TYPE_SID:      return "WINBIO_ID_TYPE_SID";
+    default:                      return "UNKNOWN";
+    }
+}
+
+static const char *
+subfactor_to_string(WINBIO_BIOMETRIC_SUBTYPE sub)
+{
+    switch(sub) {
+    case WINBIO_SUBTYPE_NO_INFORMATION:    return "WINBIO_SUBTYPE_NO_INFORMATION(0)";
+    case WINBIO_SUBTYPE_ANY:               return "WINBIO_SUBTYPE_ANY";
+    case WINBIO_ANSI_381_POS_RH_THUMB:      return "RH_THUMB";
+    case WINBIO_ANSI_381_POS_RH_INDEX_FINGER: return "RH_INDEX_FINGER";
+    case WINBIO_ANSI_381_POS_RH_MIDDLE_FINGER: return "RH_MIDDLE_FINGER";
+    case WINBIO_ANSI_381_POS_RH_RING_FINGER: return "RH_RING_FINGER";
+    case WINBIO_ANSI_381_POS_RH_LITTLE_FINGER: return "RH_LITTLE_FINGER";
+    case WINBIO_ANSI_381_POS_LH_THUMB:      return "LH_THUMB";
+    case WINBIO_ANSI_381_POS_LH_INDEX_FINGER: return "LH_INDEX_FINGER";
+    case WINBIO_ANSI_381_POS_LH_MIDDLE_FINGER: return "LH_MIDDLE_FINGER";
+    case WINBIO_ANSI_381_POS_LH_RING_FINGER: return "LH_RING_FINGER";
+    case WINBIO_ANSI_381_POS_LH_LITTLE_FINGER: return "LH_LITTLE_FINGER";
+    case WINBIO_ANSI_381_POS_RH_FOUR_FINGERS: return "RH_FOUR_FINGERS";
+    case WINBIO_ANSI_381_POS_LH_FOUR_FINGERS: return "LH_FOUR_FINGERS";
+    case WINBIO_ANSI_381_POS_TWO_THUMBS:    return "TWO_THUMBS";
+    default: {
+        static char buf[32];
+        snprintf(buf, sizeof(buf), "UNKNOWN(%u)", (unsigned)sub);
+        return buf;
+    }
+    }
+}
+
+static void
+display_identity(WINBIO_IDENTITY *identity, const char *prefix)
+{
+    HLOG_USER("%sIdentityType=%lu (%s)\n", prefix,
+        (unsigned long)identity->Type,
+        identity_type_to_string(identity->Type));
+    if(identity->Type == WINBIO_ID_TYPE_SID) {
+        HLOG_USER("%s  SID[%lu]=", prefix, (unsigned long)identity->Value.AccountSid.Size);
+        for(ULONG j=0; j<identity->Value.AccountSid.Size && j<SECURITY_MAX_SID_SIZE; j++)
+            HLOG_USER("%02x", identity->Value.AccountSid.Data[j]);
+        HLOG_USER("\n");
+    } else if(identity->Type == WINBIO_ID_TYPE_GUID) {
+        HLOG_USER("%s  GUID=%08lx-%04x-%04x-",
+            prefix,
+            (unsigned long)identity->Value.TemplateGuid.Data1,
+            identity->Value.TemplateGuid.Data2,
+            identity->Value.TemplateGuid.Data3);
+        for(int j=0;j<2;j++) HLOG_USER("%02x", identity->Value.TemplateGuid.Data4[j]);
+        HLOG_USER("-");
+        for(int j=2;j<8;j++) HLOG_USER("%02x", identity->Value.TemplateGuid.Data4[j]);
+        HLOG_USER("\n");
+    } else {
+        HLOG_USER("%s  IdentityValue=%lu\n", prefix, (unsigned long)identity->Value.Wildcard);
+    }
+}
 
 struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
     std::map<std::wstring, PROPVARIANT*> m_store;
@@ -1402,21 +1482,21 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             StringFromIID(riid, &str);
             std::wcout << L"MyMem::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("New NamedPropertyStore: ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("New NamedPropertyStore: ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("MyNamedPropertyStore::AddRef\r\n");
+            HLOG_DEBUG("MyNamedPropertyStore::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyNamedPropertyStore::Release\r\n");
+            HLOG_DEBUG("MyNamedPropertyStore::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("MyNamedPropertyStore::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyNamedPropertyStore::DeleteWdfObject\r\n");
             return 0;
         }
 
@@ -1425,23 +1505,23 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) {
-            printf("MyNamedPropertyStore::AssignContext\r\n");
+            HLOG_DEBUG("MyNamedPropertyStore::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("MyNamedPropertyStore::RetrieveContext\r\n");
+            HLOG_DEBUG("MyNamedPropertyStore::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("MyNamedPropertyStore::AcquireLock\r\n");
+            HLOG_DEBUG("MyNamedPropertyStore::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("MyNamedPropertyStore::ReleaseLock\r\n");
+            HLOG_DEBUG("MyNamedPropertyStore::ReleaseLock\r\n");
         }
     public:
         virtual HRESULT STDMETHODCALLTYPE GetNamedValue(
@@ -1449,12 +1529,12 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             _In_  LPCWSTR pszName,
             /* [annotation][out] */
             _Out_  PROPVARIANT *pv){
-            std::wcout << L"MyNamedPropertyStore::GetNamedValue " << pszName << " " << pv->vt << std::endl;
+            HLOG_DEBUG("MyNamedPropertyStore::GetNamedValue %ls %d\n", pszName, pv->vt);
 
             auto name = std::wstring(pszName);
             auto it = m_store.find(name);
             if (it != m_store.end()) {
-                std::wcout << L"Return cached value " << it->second->vt << std::endl;
+                HLOG_INFO("Return cached value %d\n", it->second->vt);
                 *pv = *it->second;
                 return S_OK;
             }
@@ -1465,7 +1545,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             if(fname == "CalibrationData") {
                 std::ifstream input(fname + ".blob", std::ios::binary);
                 std::vector<char> buf((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-                std::cout << "Loaded " << buf.size() << " bytes of calibration data" << std::endl;
+                HLOG_INFO("Loaded %zu bytes of calibration data\n", buf.size());
                 if(buf.size() == 0) {
                     DECIMAL_SETZERO(pv->decVal);
                 } else {
@@ -1480,7 +1560,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                 if(input) {
                     pv->vt = VT_UINT;
                     input >> pv->uintVal;
-                    std::cout << "UINT " << fname << " = " << pv->uintVal << std::endl;
+                    HLOG_DEBUG("UINT %s = %d\n", fname.c_str(), pv->uintVal);
                 }
                 else {
                     DECIMAL_SETZERO(pv->decVal);
@@ -1511,13 +1591,13 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             //PropVariantToInt32(*pv, &num);
             //PropVariantToStringAlloc(*pv, &buf);
 
-            std::wcout << L"MyNamedPropertyStore::SetNamedValue " << pszName << " (" << pv->vt << ")" << std::endl;
+            HLOG_DEBUG("MyNamedPropertyStore::SetNamedValue %ls (%d)\n", pszName, pv->vt);
             switch(pv->vt) {
                 case VT_I1:
-                    printf("  VT_I1: %d\n", pv->cVal);
+                    HLOG_DEBUG("  VT_I1: %d\n", pv->cVal);
                     break;
                 case VT_UI4:
-                    printf("  VT_UI4: %u\n", pv->ulVal);
+                    HLOG_DEBUG("  VT_UI4: %u\n", pv->ulVal);
                     break;
                 case VT_UINT: {
                         std::string fname;
@@ -1525,7 +1605,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                         fname.assign(wfname.begin(), wfname.end());
                         std::ofstream output(fname + ".uint");
                         output << pv->uintVal << std::endl;
-                        printf("  VT_UINT: %d\n", pv->uintVal);
+                        HLOG_DEBUG("  VT_UINT: %d\n", pv->uintVal);
                     }
                     break;
                 case VT_BLOB: {
@@ -1541,7 +1621,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                             p+=sprintf(p, "%02x", pv->blob.pBlobData[i]);
                         }
                         *p=0;
-                        printf("  Blob value: %lu: %s\n", pv->blob.cbSize, hex);
+                        HLOG_DEBUG("  Blob value: %lu: %s\n", pv->blob.cbSize, hex);
                     }
                     break;
             }
@@ -1559,7 +1639,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
         virtual HRESULT STDMETHODCALLTYPE GetNameCount(
             /* [annotation][out] */
             _Out_  DWORD *pdwCount){
-            std::wcout << L"MyNamedPropertyStore::GetNameCount " << std::endl;
+            HLOG_DEBUG("MyNamedPropertyStore::GetNameCount\n");
             *pdwCount = 0;
             return 0;
         }
@@ -1570,7 +1650,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             _In_  DWORD iProp,
             /* [annotation][string][out] */
             _Out_  PWSTR *ppwszName){
-            std::wcout << L"MyNamedPropertyStore::GetNameAt " << iProp << std::endl;
+            HLOG_DEBUG("MyNamedPropertyStore::GetNameAt %d\n", iProp);
             *ppwszName = L"";
             return 0;
         }
@@ -1593,21 +1673,21 @@ struct MyPropertyStoreFactory : public IWDFPropertyStoreFactory {
             StringFromIID(riid, &str);
             std::wcout << L"MyPropertyStoreFactory::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("IWDFPropertyStoreFactory::AddRef\r\n");
+            HLOG_DEBUG("IWDFPropertyStoreFactory::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyPropertyStoreFactory::Release\r\n");
+            HLOG_DEBUG("MyPropertyStoreFactory::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("MyPropertyStoreFactory::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyPropertyStoreFactory::DeleteWdfObject\r\n");
             return 0;
         }
 
@@ -1616,23 +1696,23 @@ struct MyPropertyStoreFactory : public IWDFPropertyStoreFactory {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) {
-            printf("MyPropertyStoreFactory::AssignContext\r\n");
+            HLOG_DEBUG("MyPropertyStoreFactory::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("MyPropertyStoreFactory::RetrieveContext\r\n");
+            HLOG_DEBUG("MyPropertyStoreFactory::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("MyPropertyStoreFactory::AcquireLock\r\n");
+            HLOG_DEBUG("MyPropertyStoreFactory::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("MyPropertyStoreFactory::ReleaseLock\r\n");
+            HLOG_DEBUG("MyPropertyStoreFactory::ReleaseLock\r\n");
         }
     public:
         virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore(
@@ -1648,7 +1728,7 @@ struct MyPropertyStoreFactory : public IWDFPropertyStoreFactory {
             _Out_  IWDFNamedPropertyStore2 **PropertyStore,
             /* [annotation][unique][out] */
             _Out_opt_  WDF_PROPERTY_STORE_DISPOSITION *Disposition){
-            printf("MyPropertyStoreFactory::RetrieveDevicePropertyStore\r\n");
+            HLOG_DEBUG("MyPropertyStoreFactory::RetrieveDevicePropertyStore\r\n");
             *PropertyStore = new MyNamedPropertyStore();
             return 0;
         }
@@ -1668,21 +1748,21 @@ struct MyMem : public IWDFMemory {
             StringFromIID(riid, &str);
             std::wcout << L"MyMem::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("MyMem::AddRef\r\n");
+            HLOG_DEBUG("MyMem::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyMem::Release\r\n");
+            HLOG_DEBUG("MyMem::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("MyMem::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyMem::DeleteWdfObject\r\n");
             return 0;
         }
 
@@ -1691,23 +1771,23 @@ struct MyMem : public IWDFMemory {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) {
-            printf("AssignContext\r\n");
+            HLOG_DEBUG("AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("RetrieveContext\r\n");
+            HLOG_DEBUG("RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("AcquireLock\r\n");
+            HLOG_DEBUG("AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("ReleaseLock\r\n");
+            HLOG_DEBUG("ReleaseLock\r\n");
         }
     public:
         virtual HRESULT STDMETHODCALLTYPE CopyFromMemory(
@@ -1715,7 +1795,7 @@ struct MyMem : public IWDFMemory {
             _In_  IWDFMemory *Source,
             /* [annotation][unique][in] */
             _In_opt_  PWDFMEMORY_OFFSET SourceOffset){
-            printf("CopyFromMemory\r\n");
+            HLOG_DEBUG("CopyFromMemory\r\n");
             return 0;
         }
 
@@ -1727,7 +1807,7 @@ struct MyMem : public IWDFMemory {
             _Out_writes_bytes_(NumOfBytesToCopyTo)  void *TargetBuffer,
             /* [annotation][in] */
             _In_  SIZE_T NumOfBytesToCopyTo){
-            printf("CopyToBuffer\r\n");
+            HLOG_DEBUG("CopyToBuffer\r\n");
             return 0;
         }
 
@@ -1739,13 +1819,13 @@ struct MyMem : public IWDFMemory {
             _In_reads_bytes_(NumOfBytesToCopyFrom)  void *SourceBuffer,
             /* [annotation][in] */
             _In_  SIZE_T NumOfBytesToCopyFrom){
-            printf("CopyFromBuffer\r\n");
+            HLOG_DEBUG("CopyFromBuffer\r\n");
             return 0;
         }
 
 
         virtual SIZE_T STDMETHODCALLTYPE GetSize( void){
-            printf("GetSize\r\n");
+            HLOG_DEBUG("GetSize\r\n");
             return size;
         }
 
@@ -1756,7 +1836,7 @@ struct MyMem : public IWDFMemory {
             if(BufferSize) {
                 *BufferSize = size;
             }
-            printf("MyMem::GetDataBuffer size=%llu\r\n", size);
+            HLOG_DEBUG("MyMem::GetDataBuffer size=%llu\r\n", size);
             return buf;
         }
 
@@ -1766,7 +1846,7 @@ struct MyMem : public IWDFMemory {
             _In_reads_bytes_(BufferSize)  void *Buffer,
             /* [annotation][in] */
             _In_  SIZE_T BufferSize){
-            printf("SetBuffer\r\n");
+            HLOG_DEBUG("SetBuffer\r\n");
             buf = Buffer;
             size = BufferSize;
         }
@@ -1785,11 +1865,11 @@ class MyUsbRequestCompletionParams : public IWDFUsbRequestCompletionParams
             m_sent(sent) {}
 
         virtual ULONG STDMETHODCALLTYPE AddRef() override {
-            printf("MyUsbRequestCompletionParams::AddRef\r\n");
+            HLOG_DEBUG("MyUsbRequestCompletionParams::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() override {
-            printf("MyUsbRequestCompletionParams::Release\r\n");
+            HLOG_DEBUG("MyUsbRequestCompletionParams::Release\r\n");
             return 0;
         }
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
@@ -1797,27 +1877,27 @@ class MyUsbRequestCompletionParams : public IWDFUsbRequestCompletionParams
             StringFromIID(riid, &str);
             std::wcout << L"MyUsbRequestCompletionParams::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE GetCompletionStatus() override {
-            printf("MyUsbRequestCompletionParams::GetCompletionStatus\r\n");
+            HLOG_DEBUG("MyUsbRequestCompletionParams::GetCompletionStatus\r\n");
             return S_OK;
         }
 
         virtual ULONG_PTR STDMETHODCALLTYPE GetInformation() override {
-            printf("MyUsbRequestCompletionParams::GetInformation\r\n");
+            HLOG_DEBUG("MyUsbRequestCompletionParams::GetInformation\r\n");
             return m_sent;
         }
 
         virtual WDF_REQUEST_TYPE STDMETHODCALLTYPE GetCompletedRequestType() override {
-            printf("MyUsbRequestCompletionParams::GetCompletedRequestType: %d\r\n", m_request_type);
+            HLOG_DEBUG("MyUsbRequestCompletionParams::GetCompletedRequestType: %d\r\n", m_request_type);
             return m_request_type;
         }
 
         virtual WDF_USB_REQUEST_TYPE STDMETHODCALLTYPE GetCompletedUsbRequestType() override {
-            printf("MyUsbRequestCompletionParams::GetCompletedRequestType2: %d\r\n",
+            HLOG_DEBUG("MyUsbRequestCompletionParams::GetCompletedRequestType2: %d\r\n",
                 m_usb_request_type);
             return m_usb_request_type;
         };
@@ -1831,7 +1911,7 @@ class MyUsbRequestCompletionParams : public IWDFUsbRequestCompletionParams
             _Out_opt_  SIZE_T *pOffset,
             /* [annotation][unique][out] */
             _Out_opt_  PWINUSB_SETUP_PACKET pSetupPacket) override {
-            printf("MyUsbRequestCompletionParams::GetDeviceControlTransferParameters\r\n");
+            HLOG_DEBUG("MyUsbRequestCompletionParams::GetDeviceControlTransferParameters\r\n");
             assert(false && "NOT IMPLEMENTED");
         }
 
@@ -1842,7 +1922,7 @@ class MyUsbRequestCompletionParams : public IWDFUsbRequestCompletionParams
             _Out_opt_  SIZE_T *pBytesWritten,
             /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pWriteMemoryOffset) override {
-            printf("MyUsbRequestCompletionParams::GetPipeWriteParameters\r\n");
+            HLOG_DEBUG("MyUsbRequestCompletionParams::GetPipeWriteParameters\r\n");
             assert(false && "NOT IMPLEMENTED");
         }
 
@@ -1853,7 +1933,7 @@ class MyUsbRequestCompletionParams : public IWDFUsbRequestCompletionParams
             _Out_opt_  SIZE_T *pBytesRead,
             /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pReadMemoryOffset) override {
-            printf("MyUsbRequestCompletionParams::GetPipeReadParameters\r\n");
+            HLOG_DEBUG("MyUsbRequestCompletionParams::GetPipeReadParameters\r\n");
             assert(false && "NOT IMPLEMENTED");
         }
 
@@ -1893,21 +1973,21 @@ struct MyRequest : public IWDFIoRequest {
             StringFromIID(riid, &str);
             std::wcout << L"MyRequest::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("MyRequest::AddRef\r\n");
+            HLOG_DEBUG("MyRequest::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyRequest::Release\r\n");
+            HLOG_DEBUG("MyRequest::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("MyRequest::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyRequest::DeleteWdfObject\r\n");
             return 0;
         }
 
@@ -1916,23 +1996,23 @@ struct MyRequest : public IWDFIoRequest {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) {
-            printf("MyRequest::AssignContext\r\n");
+            HLOG_DEBUG("MyRequest::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("MyRequest::RetrieveContext\r\n");
+            HLOG_DEBUG("MyRequest::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("MyRequest::AcquireLock\r\n");
+            HLOG_DEBUG("MyRequest::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("MyRequest::ReleaseLock\r\n");
+            HLOG_DEBUG("MyRequest::ReleaseLock\r\n");
         }
     public:
         virtual void STDMETHODCALLTYPE CompleteWithInformation(
@@ -1940,7 +2020,7 @@ struct MyRequest : public IWDFIoRequest {
             _In_  HRESULT CompletionStatus,
             /* [annotation][in] */
             _In_  SIZE_T Information){
-            printf("MyRequest::CompleteWithInformation: %lx (%s)\r\n", (unsigned long)CompletionStatus,
+            HLOG_INFO("MyRequest::CompleteWithInformation: %lx (%s)\r\n", (unsigned long)CompletionStatus,
                 hresult_to_sting(CompletionStatus));
             completionStatus = CompletionStatus;
             informationSize = Information;
@@ -1950,14 +2030,14 @@ struct MyRequest : public IWDFIoRequest {
         virtual void STDMETHODCALLTYPE SetInformation(
             /* [annotation][in] */
             _In_  ULONG_PTR Information){
-            printf("MyRequest::SetInformation size=%lld\r\n", Information);
+            HLOG_INFO("MyRequest::SetInformation size=%lld\r\n", Information);
             informationSize = Information;
         }
 
         virtual void STDMETHODCALLTYPE Complete(
             /* [annotation][in] */
             _In_  HRESULT CompletionStatus){
-            printf("MyRequest::Complete: %lx (%s)\r\n", (unsigned long)CompletionStatus,
+            HLOG_INFO("MyRequest::Complete: %lx (%s)\r\n", (unsigned long)CompletionStatus,
                 hresult_to_sting(CompletionStatus));
             completionStatus = CompletionStatus;
             complete = TRUE;
@@ -1968,11 +2048,11 @@ struct MyRequest : public IWDFIoRequest {
             _In_  IRequestCallbackRequestCompletion *pCompletionCallback,
             /* [annotation][unique][in] */
             _In_opt_  void *pContext){
-            printf("MyRequest::SetCompletionCallback\r\n");
+            HLOG_DEBUG("MyRequest::SetCompletionCallback\r\n");
         }
 
         virtual WDF_REQUEST_TYPE STDMETHODCALLTYPE GetType( void){
-            printf("MyRequest::GetType\r\n");
+            HLOG_DEBUG("MyRequest::GetType\r\n");
             return reqType;
         }
 
@@ -1983,7 +2063,7 @@ struct MyRequest : public IWDFIoRequest {
             _Out_opt_  USHORT *pFileAttributes,
             /* [annotation][unique][out] */
             _Out_opt_  USHORT *pShareAccess){
-            printf("MyRequest::GetCreateParameters\r\n");
+            HLOG_DEBUG("MyRequest::GetCreateParameters\r\n");
         }
 
 
@@ -1994,7 +2074,7 @@ struct MyRequest : public IWDFIoRequest {
             _Out_opt_  LONGLONG *pullOffset,
             /* [annotation][unique][out] */
             _Out_opt_  ULONG *pulKey){
-            printf("MyRequest::GetReadParameters\r\n");
+            HLOG_DEBUG("MyRequest::GetReadParameters\r\n");
         }
 
 
@@ -2005,7 +2085,7 @@ struct MyRequest : public IWDFIoRequest {
             _Out_opt_  LONGLONG *pullOffset,
             /* [annotation][unique][out] */
             _Out_opt_  ULONG *pulKey){
-            printf("MyRequest::GetWriteParameters\r\n");
+            HLOG_DEBUG("MyRequest::GetWriteParameters\r\n");
         }
 
 
@@ -2016,7 +2096,7 @@ struct MyRequest : public IWDFIoRequest {
             _Out_opt_  SIZE_T *pInBufferSize,
             /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pOutBufferSize){
-            printf("MyRequest::GetDeviceIoControlParameters %p %p %p",
+            HLOG_DEBUG("MyRequest::GetDeviceIoControlParameters %p %p %p",
                 pControlCode, pInBufferSize, pOutBufferSize);
             if (pControlCode)
                 *pControlCode = ctl;
@@ -2025,7 +2105,7 @@ struct MyRequest : public IWDFIoRequest {
             if (pOutBufferSize)
                 *pOutBufferSize = outMem->size;
 
-            printf("=> %lu %lu\r\n", pInBufferSize ? *pInBufferSize : NULL,
+            HLOG_DEBUG("=> %lu %lu\r\n", pInBufferSize ? *pInBufferSize : NULL,
                     pOutBufferSize ? *pOutBufferSize : NULL);
         }
 
@@ -2036,46 +2116,46 @@ struct MyRequest : public IWDFIoRequest {
         virtual void STDMETHODCALLTYPE GetOutputMemory(
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory){
-            printf("MyRequest::GetOutputMemory => %p\r\n", outMem);
+            HLOG_DEBUG("MyRequest::GetOutputMemory => %p\r\n", outMem);
             *ppWdfMemory = outMem;
         }
 
         virtual void STDMETHODCALLTYPE GetInputMemory(
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory){
-            printf("MyRequest::GetInputMemory => %p\r\n", inMem);
+            HLOG_DEBUG("MyRequest::GetInputMemory => %p\r\n", inMem);
             *ppWdfMemory = inMem;
         }
 
         virtual void STDMETHODCALLTYPE MarkCancelable(
             /* [annotation][in] */
             _In_  IRequestCallbackCancel *pCancelCallback){
-            printf("MyRequest::MarkCancelable\r\n");
+            HLOG_DEBUG("MyRequest::MarkCancelable\r\n");
             this->cancelCallback = pCancelCallback;
         }
 
         virtual HRESULT STDMETHODCALLTYPE UnmarkCancelable( void){
-            printf("MyRequest::UnmarkCancelable\r\n");
+            HLOG_DEBUG("MyRequest::UnmarkCancelable\r\n");
             return 0;
         }
 
 
         virtual BOOL STDMETHODCALLTYPE CancelSentRequest( void){
-            printf("MyRequest::CancelSentRequest\r\n");
+            HLOG_DEBUG("MyRequest::CancelSentRequest\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE ForwardToIoQueue(
             /* [annotation][in] */
             _In_  IWDFIoQueue *pDestination){
-            printf("MyRequest::ForwardToIoQueue\r\n");
+            HLOG_DEBUG("MyRequest::ForwardToIoQueue\r\n");
             return 0;
         }
 
         void SetControlData(PWINUSB_SETUP_PACKET SetupPacket,
                             IWDFMemory *pMemory,
                             PWDFMEMORY_OFFSET Offset) {
-            printf("MyRequest::SetControlData: %p %p %u\r\n",
+            HLOG_DEBUG("MyRequest::SetControlData: %p %p %u\r\n",
                 SetupPacket, pMemory, Offset);
             m_setupPacket = *SetupPacket;
             outMem = (MyMem *) pMemory;
@@ -2092,10 +2172,10 @@ struct MyRequest : public IWDFIoRequest {
             /* [annotation][in] */
             _In_  LONGLONG Timeout){
             assert(reqType == WdfRequestUsb);
-            printf("MyRequest::Send %p | %u | %ld\r\n", pIoTarget, Flags, Timeout);
+            HLOG_DEBUG("MyRequest::Send %p | %u | %ld\r\n", pIoTarget, Flags, Timeout);
 
             if (Flags != WDF_REQUEST_SEND_OPTION_SYNCHRONOUS) {
-                printf("Flags are not supported: %d\r\n", Flags);
+                HLOG_INFO("Flags are not supported: %d\r\n", Flags);
                 return E_NOTIMPL;
             }
 
@@ -2108,46 +2188,46 @@ struct MyRequest : public IWDFIoRequest {
 
             if (m_usbOp == UsbPipeRead) {
                 if (!WinUsb_ReadPipe(m_pipeHandle, m_pipeId, buffer, bufLen, &m_sent, 0)) {
-                    printf("Fail to read pipe: %d (%s)\n", GetLastError(),
+                    HLOG_DEBUG("Fail to read pipe: %d (%s)\n", GetLastError(),
                         hresult_to_sting(GetLastError()));
                     return GetLastError();
                 }
-                printf("Pipe read: %d - Actual data transferred: %d.\n", bufLen, m_sent);
-                printf("<- ");
+                HLOG_DEBUG("Pipe read: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+                HLOG_DEBUG("<- ");
                 for (SIZE_T i = 0; i < m_sent; ++i)
-                    printf("%02x", buffer[i]);
-                printf("\r\n");
+                    HLOG_DEBUG("%02x", buffer[i]);
+                HLOG_DEBUG("\r\n");
             } else if (m_usbOp == UsbPipeWrite) {
                 if (!WinUsb_WritePipe(m_pipeHandle, m_pipeId, buffer, bufLen, &m_sent, 0)) {
-                    printf("Fail to write pipe: %d (%s)\n", GetLastError(),
+                    HLOG_DEBUG("Fail to write pipe: %d (%s)\n", GetLastError(),
                         hresult_to_sting(GetLastError()));
                     return GetLastError();
                 }
-                printf("Pipe write: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+                HLOG_DEBUG("Pipe write: %d - Actual data transferred: %d.\n", bufLen, m_sent);
             } else {
                 auto usbDev = (IWDFUsbTargetDevice *) pIoTarget;
 
                 if (m_setupPacket.Length && !(m_setupPacket.RequestType & 0b10000000)) {
-                    printf("-> ");
+                    HLOG_DEBUG("-> ");
                     for (SIZE_T i = 0; i < bufLen; ++i)
-                        printf("%02x", buffer[i]);
-                    printf("\r\n");
+                        HLOG_DEBUG("%02x", buffer[i]);
+                    HLOG_DEBUG("\r\n");
                 }
 
                 if (!WinUsb_ControlTransfer(usbDev->GetWinUsbHandle(), m_setupPacket,
                     buffer, bufLen, &m_sent, 0)) {
-                    printf("Fail to send data: %d (%s)\n", GetLastError(),
+                    HLOG_DEBUG("Fail to send data: %d (%s)\n", GetLastError(),
                         hresult_to_sting(GetLastError()));
                     return GetLastError();
                 }
 
-                printf("Data sent: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+                HLOG_DEBUG("Data sent: %d - Actual data transferred: %d.\n", bufLen, m_sent);
 
                 if (m_setupPacket.Length && (m_setupPacket.RequestType & 0b10000000)) {
-                    printf("<- ");
+                    HLOG_DEBUG("<- ");
                     for (SIZE_T i = 0; i < m_sent; ++i)
-                        printf("%02x", buffer[i]);
-                    printf("\r\n");
+                        HLOG_DEBUG("%02x", buffer[i]);
+                    HLOG_DEBUG("\r\n");
                 }
             }
 
@@ -2166,22 +2246,22 @@ struct MyRequest : public IWDFIoRequest {
         virtual void STDMETHODCALLTYPE GetFileObject(
             /* [annotation][out] */
             _Out_  IWDFFile **ppFileObject){
-            printf("MyRequest::GetFileObject\r\n");
+            HLOG_DEBUG("MyRequest::GetFileObject\r\n");
         }
 
         virtual void STDMETHODCALLTYPE FormatUsingCurrentType( void){
-            printf("MyRequest::FormatUsingCurrentType\r\n");
+            HLOG_DEBUG("MyRequest::FormatUsingCurrentType\r\n");
         }
 
         virtual ULONG STDMETHODCALLTYPE GetRequestorProcessId( void){
-            printf("MyRequest::GetRequestorProcessId\r\n");
+            HLOG_DEBUG("MyRequest::GetRequestorProcessId\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE GetIoQueue(
             /* [annotation][out] */
             _Out_  IWDFIoQueue **ppWdfIoQueue){
-            printf("MyRequest::GetIoQueue\r\n");
+            HLOG_DEBUG("MyRequest::GetIoQueue\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE Impersonate(
@@ -2191,20 +2271,20 @@ struct MyRequest : public IWDFIoRequest {
             _In_  IImpersonateCallback *pCallback,
             /* [annotation][unique][in] */
             _In_opt_  void *pvCallbackContext){
-            printf("MyRequest::Impersonate\r\n");
+            HLOG_DEBUG("MyRequest::Impersonate\r\n");
             return 0;
         }
 
 
         virtual BOOL STDMETHODCALLTYPE IsFrom32BitProcess( void){
-            printf("MyRequest::IsFrom32BitProcess\r\n");
+            HLOG_DEBUG("MyRequest::IsFrom32BitProcess\r\n");
             return 1;
         }
 
         virtual void STDMETHODCALLTYPE GetCompletionParams(
             /* [annotation][out] */
             _Out_  IWDFRequestCompletionParams **ppCompletionParams){
-            printf("MyRequest::GetCompletionParams\r\n");
+            HLOG_DEBUG("MyRequest::GetCompletionParams\r\n");
             *ppCompletionParams = new MyUsbRequestCompletionParams(reqType, m_sent);
         }
 };
@@ -2214,7 +2294,7 @@ struct MyQueue : public IWDFIoQueue {
         MyQueue(IUnknown *pCallbackInterface) {
             pCallbackInterface->AddRef();
             pCallbackInterface->QueryInterface(IID_IQueueCallbackDeviceIoControl, (LPVOID*)&ioctl);
-            printf("ioctl=%p\r\n", ioctl);
+            HLOG_DEBUG("ioctl=%p\r\n", ioctl);
         }
 
         IQueueCallbackDeviceIoControl *ioctl=0;
@@ -2225,21 +2305,21 @@ struct MyQueue : public IWDFIoQueue {
             StringFromIID(riid, &str);
             std::wcout << L"MyQueue::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("MyQueue::AddRef\r\n");
+            HLOG_DEBUG("MyQueue::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyQueue::Release\r\n");
+            HLOG_DEBUG("MyQueue::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("MyQueue::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyQueue::DeleteWdfObject\r\n");
             return 0;
         }
 
@@ -2248,29 +2328,29 @@ struct MyQueue : public IWDFIoQueue {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) {
-            printf("MyQueue::AssignContext\r\n");
+            HLOG_DEBUG("MyQueue::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("MyQueue::RetrieveContext\r\n");
+            HLOG_DEBUG("MyQueue::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("MyQueue::AcquireLock\r\n");
+            HLOG_DEBUG("MyQueue::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("MyQueue::ReleaseLock\r\n");
+            HLOG_DEBUG("MyQueue::ReleaseLock\r\n");
         }
     public:
         virtual void STDMETHODCALLTYPE GetDevice(
             /* [annotation][out] */
             _Out_  IWDFDevice **ppWdfDevice){
-            printf("MyQueue::GetDevice\r\n");
+            HLOG_DEBUG("MyQueue::GetDevice\r\n");
         }
 
 
@@ -2279,7 +2359,7 @@ struct MyQueue : public IWDFIoQueue {
             _In_  WDF_REQUEST_TYPE RequestType,
             /* [annotation][in] */
             _In_  BOOL Forward){
-            printf("MyDevice::ConfigureRequestDispatching (%d, %d)\r\n",
+            HLOG_DEBUG("MyDevice::ConfigureRequestDispatching (%d, %d)\r\n",
                 RequestType, Forward);
             return 0;
         }
@@ -2290,7 +2370,7 @@ struct MyQueue : public IWDFIoQueue {
             _Out_  ULONG *pulNumOfRequestsInQueue,
             /* [annotation][out] */
             _Out_  ULONG *pulNumOfRequestsInDriver){
-            printf("MyQueue::GetState\r\n");
+            HLOG_DEBUG("MyQueue::GetState\r\n");
             return (WDF_IO_QUEUE_STATE)(WdfIoQueueAcceptRequests |
                     WdfIoQueueDispatchRequests |
                     WdfIoQueueNoRequests |
@@ -2301,7 +2381,7 @@ struct MyQueue : public IWDFIoQueue {
         virtual HRESULT STDMETHODCALLTYPE RetrieveNextRequest(
             /* [annotation][out] */
             _Out_  IWDFIoRequest **ppRequest){
-            printf("MyQueue::RetrieveNextRequest\r\n");
+            HLOG_DEBUG("MyQueue::RetrieveNextRequest\r\n");
             return 0;
         }
 
@@ -2311,49 +2391,49 @@ struct MyQueue : public IWDFIoQueue {
             _In_  IWDFFile *pFile,
             /* [annotation][out] */
             _Out_  IWDFIoRequest **ppRequest){
-            printf("MyQueue::RetrieveNextRequestByFileObject\r\n");
+            HLOG_DEBUG("MyQueue::RetrieveNextRequestByFileObject\r\n");
             return 0;
         }
 
 
         virtual void STDMETHODCALLTYPE Start( void){
-            printf("MyQueue::Start\r\n");
+            HLOG_DEBUG("MyQueue::Start\r\n");
         }
 
 
         virtual void STDMETHODCALLTYPE Stop(
             /* [annotation][unique][in] */
             _In_opt_  IQueueCallbackStateChange *pStopComplete){
-            printf("MyQueue::Stop\r\n");
+            HLOG_DEBUG("MyQueue::Stop\r\n");
         }
 
 
         virtual void STDMETHODCALLTYPE StopSynchronously( void){
-            printf("MyQueue::StopSynchronously\r\n");
+            HLOG_DEBUG("MyQueue::StopSynchronously\r\n");
         }
 
 
         virtual void STDMETHODCALLTYPE Drain(
             /* [annotation][unique][in] */
             _In_opt_  IQueueCallbackStateChange *pDrainComplete){
-            printf("MyQueue::Drain\r\n");
+            HLOG_DEBUG("MyQueue::Drain\r\n");
         }
 
 
         virtual void STDMETHODCALLTYPE DrainSynchronously( void){
-            printf("MyQueue::Drain\r\n");
+            HLOG_DEBUG("MyQueue::Drain\r\n");
         }
 
 
         virtual void STDMETHODCALLTYPE Purge(
             /* [annotation][unique][in] */
             _In_opt_  IQueueCallbackStateChange *pPurgeComplete){
-            printf("MyQueue::Purge\r\n");
+            HLOG_DEBUG("MyQueue::Purge\r\n");
         }
 
 
         virtual void STDMETHODCALLTYPE PurgeSynchronously( void){
-            printf("MyQueue::Purge\r\n");
+            HLOG_DEBUG("MyQueue::Purge\r\n");
         }
 
 
@@ -2382,7 +2462,7 @@ typedef struct _DEVICE_INFO_NODE {
 } DEVICE_INFO_NODE, *PDEVICE_INFO_NODE;
 
 
-#define OOPS() { printf("Failed at %d\r\n", __LINE__); }
+#define OOPS() { HLOG_DEBUG("Failed at %d\r\n", __LINE__); }
 
 BOOL
 GetDeviceProperty(
@@ -2749,17 +2829,17 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
                 m_PipeType(PipeType),
                 m_MaxPacketSize(MaximumPacketSize),
                 m_Interval(Interval) {
-            printf("MyUsbTargetPipe::MyUsbTargetPipe %d 0x%x\r\n",
+            HLOG_DEBUG("MyUsbTargetPipe::MyUsbTargetPipe %d 0x%x\r\n",
                 m_PipeType, m_PipeId);
         }
 
         virtual ULONG STDMETHODCALLTYPE AddRef() override {
-            printf("MyUsbTargetPipe::AddRef\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::AddRef\r\n");
             return 0;
         }
 
         virtual ULONG STDMETHODCALLTYPE Release() override {
-            printf("MyUsbTargetPipe::Release\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::Release\r\n");
             return 0;
         }
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
@@ -2767,21 +2847,21 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             StringFromIID(riid, &str);
             std::wcout << L"MyUsbTargetPipe::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
-            printf("MyUsbTargetPipe::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::DeleteWdfObject\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock() override {
-            printf("MyUsbTargetPipe::AcquireLock\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock() override {
-            printf("MyUsbTargetPipe::ReleaseLock\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::ReleaseLock\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE AssignContext(
@@ -2789,28 +2869,28 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) override {
-            printf("MyUsbTargetPipe::AssignContext\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) override {
-            printf("MyUsbTargetPipe::RetrieveContext\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE GetTargetFile(
             /* [annotation][out] */
             _Out_  IWDFFile **ppWdfFile) override {
-            printf("MyUsbTargetPipe::GetTargetFile\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::GetTargetFile\r\n");
             *ppWdfFile = NULL;
         }
 
         virtual void STDMETHODCALLTYPE CancelSentRequestsForFile(
             /* [annotation][in] */
             _In_  IWDFFile *pFile) override {
-            printf("MyUsbTargetPipe::CancelSentRequestsForFile\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::CancelSentRequestsForFile\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE FormatRequestForRead(
@@ -2824,7 +2904,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset,
             /* [annotation][unique][in] */
             _In_opt_  PLONGLONG DeviceOffset) override {
-            printf("MyUsbTargetPipe::FormatRequestForRead\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::FormatRequestForRead\r\n");
             auto req = (MyRequest *)pRequest;
             req->m_usbOp = MyRequest::UsbPipeRead;
             req->m_pipeHandle = m_WinUsbHandle;
@@ -2844,7 +2924,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             _In_opt_  PWDFMEMORY_OFFSET pInputMemoryOffset,
             /* [annotation][unique][in] */
             _In_opt_  PLONGLONG DeviceOffset) override {
-            printf("MyUsbTargetPipe::FormatRequestForWrite\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::FormatRequestForWrite\r\n");
             auto req = (MyRequest *)pRequest;
             req->m_usbOp = MyRequest::UsbPipeWrite;
             req->m_pipeHandle = m_WinUsbHandle;
@@ -2868,12 +2948,12 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             _In_opt_  IWDFMemory *pOutputMemory,
             /* [annotation][unique][in] */
             _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset) override {
-            printf("MyUsbTargetPipe::FormatRequestForIoctl\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::FormatRequestForIoctl\r\n");
             return S_OK;
         }
 
         virtual HRESULT STDMETHODCALLTYPE Abort() override {
-            printf("MyUsbTargetPipe::Abort\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::Abort\r\n");
 
             if (!WinUsb_AbortPipe(m_WinUsbHandle, m_PipeId)) {
                 return HRESULT_FROM_WIN32(GetLastError());
@@ -2882,7 +2962,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
         }
 
         virtual HRESULT STDMETHODCALLTYPE Reset() override {
-            printf("MyUsbTargetPipe::Reset\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::Reset\r\n");
 
             if (!WinUsb_ResetPipe(m_WinUsbHandle, m_PipeId)) {
                 return HRESULT_FROM_WIN32(GetLastError());
@@ -2891,7 +2971,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
         }
 
         virtual HRESULT STDMETHODCALLTYPE Flush() override {
-            printf("MyUsbTargetPipe::Flush\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::Flush\r\n");
 
             if (!WinUsb_FlushPipe(m_WinUsbHandle, m_PipeId)) {
                 return HRESULT_FROM_WIN32(GetLastError());
@@ -2900,7 +2980,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
         }
 
         virtual void STDMETHODCALLTYPE GetInformation(_Out_ PWINUSB_PIPE_INFORMATION pInfo) override {
-            printf("MyUsbTargetPipe::GetInformation %d 0x%x\r\n", m_PipeType, m_PipeId);
+            HLOG_DEBUG("MyUsbTargetPipe::GetInformation %d 0x%x\r\n", m_PipeType, m_PipeId);
             pInfo->PipeType = m_PipeType;
             pInfo->PipeId = m_PipeId;
             pInfo->MaximumPacketSize = m_MaxPacketSize;
@@ -2908,19 +2988,19 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
         }
 
         virtual BOOL STDMETHODCALLTYPE IsInEndPoint() override {
-            printf("MyUsbTargetPipe::IsInEndPoint\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::IsInEndPoint\r\n");
 
             return (m_PipeId & 0x80) != 0;
         }
 
         virtual BOOL STDMETHODCALLTYPE IsOutEndPoint() override {
-            printf("MyUsbTargetPipe::IsOutEndPoint\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::IsOutEndPoint\r\n");
 
             return (m_PipeId & 0x80) == 0;
         }
 
         virtual USBD_PIPE_TYPE STDMETHODCALLTYPE GetType() override {
-            printf("MyUsbTargetPipe::GetType\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::GetType\r\n");
 
             return m_PipeType;
         }
@@ -2929,7 +3009,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             _In_ ULONG PolicyType,
             _Inout_ ULONG* ValueLength,
             _Out_ PVOID Value) override {
-            printf("MyUsbTargetPipe::RetrievePipePolicy\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::RetrievePipePolicy\r\n");
 
             if (!WinUsb_GetPipePolicy(
                     m_WinUsbHandle,
@@ -2946,7 +3026,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             _In_ ULONG PolicyType,
             _In_ ULONG ValueLength,
             _In_ PVOID Value) override {
-            printf("MyUsbTargetPipe::SetPipePolicy\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::SetPipePolicy\r\n");
 
             if (!WinUsb_SetPipePolicy(
                 m_WinUsbHandle,
@@ -2977,7 +3057,7 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             _In_opt_  PVOID pCompletionContext,
             /* [annotation][unique][in] */
             _In_opt_  IUsbTargetPipeContinuousReaderCallbackReadersFailed *pOnFailure) override {
-            printf("MyUsbTargetPipe::ConfigureContinuousReader\r\n");
+            HLOG_DEBUG("MyUsbTargetPipe::ConfigureContinuousReader\r\n");
             return S_OK;
         }
 
@@ -2995,11 +3075,11 @@ class MyUsbInterface : public IWDFUsbInterface {
             : m_idx(idx), m_handle(handle) {}
 
         virtual ULONG STDMETHODCALLTYPE AddRef() override {
-            printf("MyUsbInterface::AddRef\r\n");
+            HLOG_DEBUG("MyUsbInterface::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() override {
-            printf("MyUsbInterface::Release\r\n");
+            HLOG_DEBUG("MyUsbInterface::Release\r\n");
             return 0;
         }
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
@@ -3007,21 +3087,21 @@ class MyUsbInterface : public IWDFUsbInterface {
             StringFromIID(riid, &str);
             std::wcout << L"MyUsbInterface::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
-            printf("MyUsbInterface::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyUsbInterface::DeleteWdfObject\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock() override {
-            printf("MyUsbInterface::AcquireLock\r\n");
+            HLOG_DEBUG("MyUsbInterface::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock() override {
-            printf("MyUsbInterface::ReleaseLock\r\n");
+            HLOG_DEBUG("MyUsbInterface::ReleaseLock\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE AssignContext(
@@ -3029,47 +3109,47 @@ class MyUsbInterface : public IWDFUsbInterface {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) override {
-            printf("MyUsbInterface::AssignContext\r\n");
+            HLOG_DEBUG("MyUsbInterface::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) override {
-            printf("MyUsbInterface::RetrieveContext\r\n");
+            HLOG_DEBUG("MyUsbInterface::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE GetInterfaceDescriptor(
             /* [annotation][out] */
             _Out_  PUSB_INTERFACE_DESCRIPTOR UsbAltInterfaceDescriptor) override {
-            printf("MyUsbInterface::GetInterfaceDescriptor\r\n");
+            HLOG_DEBUG("MyUsbInterface::GetInterfaceDescriptor\r\n");
         }
 
         virtual UCHAR STDMETHODCALLTYPE GetInterfaceNumber() override {
-            printf("MyUsbInterface::GetInterfaceNumber\r\n");
+            HLOG_DEBUG("MyUsbInterface::GetInterfaceNumber\r\n");
             return m_idx;
         }
 
         virtual UCHAR STDMETHODCALLTYPE GetNumEndPoints() override {
-            printf("MyUsbInterface::GetNumEndPoints\r\n");
+            HLOG_DEBUG("MyUsbInterface::GetNumEndPoints\r\n");
             return 3;
         }
 
         virtual UCHAR STDMETHODCALLTYPE GetConfiguredSettingIndex() override {
-            printf("MyUsbInterface::GetConfiguredSettingIndex\r\n");
+            HLOG_DEBUG("MyUsbInterface::GetConfiguredSettingIndex\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE SelectSetting(
             /* [annotation][in] */
             _In_  UCHAR SettingNumber) override {
-            printf("MyUsbInterface::SelectSetting\r\n");
+            HLOG_DEBUG("MyUsbInterface::SelectSetting\r\n");
             return 0;
         }
 
         virtual WINUSB_INTERFACE_HANDLE STDMETHODCALLTYPE GetWinUsbHandle() override {
-            printf("MyUsbInterface::GetWinUsbHandle\r\n");
+            HLOG_DEBUG("MyUsbInterface::GetWinUsbHandle\r\n");
             return m_handle;
         }
 
@@ -3078,11 +3158,11 @@ class MyUsbInterface : public IWDFUsbInterface {
             _In_  UCHAR PipeIndex,
             /* [annotation][out] */
             _Out_  IWDFUsbTargetPipe **ppPipe) override {
-            printf("MyUsbInterface::IWDFUsbTargetPipe 0x%x\r\n", PipeIndex);
+            HLOG_DEBUG("MyUsbInterface::IWDFUsbTargetPipe 0x%x\r\n", PipeIndex);
 
             WINUSB_PIPE_INFORMATION pipeInfo;
             if (!WinUsb_QueryPipe(GetWinUsbHandle(), m_idx, PipeIndex, &pipeInfo)) {
-                printf("Impossible to get pipe informatio!\r\n");
+                HLOG_INFO("Impossible to get pipe informatio!\r\n");
                 return E_NOTIMPL;
             }
 
@@ -3099,16 +3179,16 @@ class MyUsbInterface : public IWDFUsbInterface {
 class MyUsbTargetDevice : public IWDFUsbTargetDevice {
 public:
         MyUsbTargetDevice(WINUSB_INTERFACE_HANDLE handle) : m_handle(handle) {
-            printf("MyUsbTargetDevice::MyUsbTargetDevice: %p\r\n", this);
+            HLOG_DEBUG("MyUsbTargetDevice::MyUsbTargetDevice: %p\r\n", this);
 
             // Get device descriptor (non-fatal -- wine winusb stubs this)
             USB_DEVICE_DESCRIPTOR devDesc;
             ULONG len;
             if (!WinUsb_GetDescriptor(m_handle, USB_DEVICE_DESCRIPTOR_TYPE,
                                       0, 0, (PUCHAR)&devDesc, sizeof(devDesc), &len)) {
-                printf("WinUsb_GetDescriptor (device) failed: %d (wine stub, continuing)\r\n", GetLastError());
+                HLOG_USER("WinUsb_GetDescriptor (device) failed: %d (wine stub, continuing)\r\n", GetLastError());
             } else {
-                printf("Found USB %lu configurations\n", devDesc.bNumConfigurations);
+                HLOG_USER("Found USB %lu configurations\n", devDesc.bNumConfigurations);
 
                 for (UCHAR i = 0; i < devDesc.bNumConfigurations; i++) {
                     USB_CONFIGURATION_DESCRIPTOR configHeader;
@@ -3120,15 +3200,15 @@ public:
                     }
 
                     m_configDesc = &configHeader;
-                    printf("Found USB Configuration descriptor %p (real size %lu)\n", m_configDesc, len);
+                    HLOG_USER("Found USB Configuration descriptor %p (real size %lu)\n", m_configDesc, len);
                     break;
                 }
 
                 if (!m_configDesc)
-                    printf("Active configuration not found\r\n");
+                    HLOG_USER("Active configuration not found\r\n");
             }
 
-            if (m_configDesc)
+            IFLOG(2) {
                 std::wcout
                     << L"  =======================" << std::endl
                     << L"  bLength: " << m_configDesc->bLength << std::endl
@@ -3140,6 +3220,7 @@ public:
                     << L"  bmAttributes: " << m_configDesc->bmAttributes << std::endl
                     << L"  MaxPower: " << m_configDesc->MaxPower << std::endl
                     << L"  =======================" << std::endl;
+            }
 
             // for (UCHAR i = 0; i < pConfigDesc->bNumInterfaces; i++) {
             //      USB_INTERFACE_DESCRIPTOR iface_desc;
@@ -3150,7 +3231,7 @@ public:
             //         continue;
             //     }
 
-            //     printf("Found USB Interface descriptor %u\n", i);
+            //     HLOG_USER("Found USB Interface descriptor %u\n", i);
             //     break;
             // }
 
@@ -3162,13 +3243,13 @@ public:
             // ULONG totalLength = pConfigDesc->wTotalLength - pConfigDesc->bLength;
 
             // while (totalLength > 0) {
-            //     printf("Handling p at %p | totalLength %lu\n", p, totalLength);
+            //     HLOG_DEBUG("Handling p at %p | totalLength %lu\n", p, totalLength);
             //     UCHAR descLen = p[0];
             //     UCHAR descType = p[1];
 
             //     if (descType == USB_INTERFACE_DESCRIPTOR_TYPE && descLen >= sizeof(USB_INTERFACE_DESCRIPTOR)) {
             //         PUSB_INTERFACE_DESCRIPTOR iface = (PUSB_INTERFACE_DESCRIPTOR)p;
-            //         printf("Interface #%d, Alternate %d: Class=0x%02X, SubClass=0x%02X, Protocol=0x%02X, Endpoints=%d\n",
+            //         HLOG_DEBUG("Interface #%d, Alternate %d: Class=0x%02X, SubClass=0x%02X, Protocol=0x%02X, Endpoints=%d\n",
             //             iface->bInterfaceNumber, iface->bAlternateSetting,
             //             iface->bInterfaceClass, iface->bInterfaceSubClass, iface->bInterfaceProtocol,
             //             iface->bNumEndpoints);
@@ -3184,11 +3265,11 @@ public:
         }
 
         virtual ULONG STDMETHODCALLTYPE AddRef() override {
-            printf("MyUsbTargetDevice::AddRef\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() override {
-            printf("MyUsbTargetDevice::Release\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::Release\r\n");
             return 0;
         }
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
@@ -3198,7 +3279,7 @@ public:
     if (IsEqualIID(riid, IID_IWDFUsbTargetDevice) ||
         IsEqualIID(riid, IID_UsbTargetAliasMaybe)) {
         *ppvObject = this;
-        printf("ppvObject=%p\r\n", *ppvObject);
+        HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
         return S_OK;
     }
 
@@ -3207,16 +3288,16 @@ public:
         }
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
-            printf("MyUsbTargetDevice::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::DeleteWdfObject\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock() override {
-            printf("MyUsbTargetDevice::AcquireLock\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock() override {
-            printf("MyUsbTargetDevice::ReleaseLock\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::ReleaseLock\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE AssignContext(
@@ -3224,27 +3305,27 @@ public:
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) override {
-            printf("MyUsbTargetDevice::AssignContext\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) override {
-            printf("MyUsbTargetDevice::RetrieveContext\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE GetTargetFile(
             /* [annotation][out] */
             _Out_  IWDFFile **ppWdfFile) override {
-            printf("MyUsbTargetDevice::GetTargetFile\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::GetTargetFile\r\n");
         };
 
         virtual void STDMETHODCALLTYPE CancelSentRequestsForFile(
             /* [annotation][in] */
             _In_  IWDFFile *pFile) override {
-            printf("MyUsbTargetDevice::CancelSentRequestsForFile\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::CancelSentRequestsForFile\r\n");
         };
 
         virtual HRESULT STDMETHODCALLTYPE FormatRequestForRead(
@@ -3258,7 +3339,7 @@ public:
             _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset,
             /* [annotation][unique][in] */
             _In_opt_  PLONGLONG DeviceOffset) override {
-            printf("MyUsbTargetDevice::FormatRequestForRead\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::FormatRequestForRead\r\n");
             return 0;
         };
 
@@ -3273,7 +3354,7 @@ public:
             _In_opt_  PWDFMEMORY_OFFSET pInputMemoryOffset,
             /* [annotation][unique][in] */
             _In_opt_  PLONGLONG DeviceOffset) override {
-            printf("MyUsbTargetDevice::FormatRequestForWrite\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::FormatRequestForWrite\r\n");
             return 0;
         };
 
@@ -3292,17 +3373,17 @@ public:
             _In_opt_  IWDFMemory *pOutputMemory,
             /* [annotation][unique][in] */
             _In_opt_  PWDFMEMORY_OFFSET pOutputMemoryOffset) override {
-            printf("MyUsbTargetDevice::FormatRequestForIoctl\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::FormatRequestForIoctl\r\n");
             return 0;
         };
 
         virtual WINUSB_INTERFACE_HANDLE STDMETHODCALLTYPE GetWinUsbHandle() override {
-            printf("MyUsbTargetDevice::GetWinUsbHandle\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::GetWinUsbHandle\r\n");
             return m_handle;
         }
 
         virtual UCHAR STDMETHODCALLTYPE GetNumInterfaces() override {
-            printf("MyUsbTargetDevice::GetNumInterfaces\r\n");
+            HLOG_DEBUG("MyUsbTargetDevice::GetNumInterfaces\r\n");
             return m_configDesc ? m_configDesc->bNumInterfaces : 0;
         }
 
@@ -3311,7 +3392,7 @@ public:
             _In_  UCHAR InterfaceIndex,
             /* [annotation][out] */
             _Out_  IWDFUsbInterface **ppUsbInterface) override {
-                printf("MyUsbTargetDevice::RetrieveUsbInterface %x\r\n", InterfaceIndex);
+                HLOG_DEBUG("MyUsbTargetDevice::RetrieveUsbInterface %x\r\n", InterfaceIndex);
                 *ppUsbInterface = new MyUsbInterface(InterfaceIndex, m_handle);
                 return 0;
         }
@@ -3325,22 +3406,24 @@ public:
             _In_opt_  IWDFMemory *pMemory,
             /* [annotation][unique][in] */
             _In_opt_  PWDFMEMORY_OFFSET TransferOffset) override {
-                printf("MyUsbTargetDevice::FormatRequestForControlTransfer: %p %p\r\n",
+                HLOG_DEBUG("MyUsbTargetDevice::FormatRequestForControlTransfer: %p %p\r\n",
                     pRequest, pMemory);
 
-                char buf[10] = {0};
-                snprintf(buf, sizeof(buf), "0x%x", SetupPacket->RequestType);
-                std::wcout
-                    << L"  =======================" << std::endl
-                    << L"  RequestType: " << buf << std::endl
-                    << L"  RequestType.Direction: " << (SetupPacket->Length ? (SetupPacket->RequestType & 0b10000000) >> 7 : -1) << std::endl
-                    << L"  RequestType.Type: " << ((SetupPacket->RequestType & 0b01100000) >> 5) << std::endl
-                    << L"  RequestType.Recipient: " << (SetupPacket->RequestType & 0b00011111) << std::endl
-                    << L"  Request: " << SetupPacket->Request << std::endl
-                    << L"  Value: " << SetupPacket->Value << std::endl
-                    << L"  Index: " << SetupPacket->Index << std::endl
-                    << L"  Length: " << SetupPacket->Length << std::endl
-                    << L"  =======================" << std::endl;
+                IFLOG(2) {
+                    char buf[10] = {0};
+                    snprintf(buf, sizeof(buf), "0x%x", SetupPacket->RequestType);
+                    std::wcout
+                        << L"  =======================" << std::endl
+                        << L"  RequestType: " << buf << std::endl
+                        << L"  RequestType.Direction: " << (SetupPacket->Length ? (SetupPacket->RequestType & 0b10000000) >> 7 : -1) << std::endl
+                        << L"  RequestType.Type: " << ((SetupPacket->RequestType & 0b01100000) >> 5) << std::endl
+                        << L"  RequestType.Recipient: " << (SetupPacket->RequestType & 0b00011111) << std::endl
+                        << L"  Request: " << SetupPacket->Request << std::endl
+                        << L"  Value: " << SetupPacket->Value << std::endl
+                        << L"  Index: " << SetupPacket->Index << std::endl
+                        << L"  Length: " << SetupPacket->Length << std::endl
+                        << L"  =======================" << std::endl;
+                }
 
                 if (pRequest == nullptr)
                     return E_ABORT;
@@ -3358,7 +3441,7 @@ public:
             _Inout_  ULONG *BufferLength,
             /* [annotation][out] */
             _Out_  PVOID Buffer) override {
-                printf("MyUsbTargetDevice::RetrieveDeviceInformation %lx\r\n",
+                HLOG_DEBUG("MyUsbTargetDevice::RetrieveDeviceInformation %lx\r\n",
                     InformationType);
                 // If InformationType is DEVICE_SPEED (0x01), on successful return,
                 //  Buffer indicates the operating speed of the device.
@@ -3380,7 +3463,7 @@ public:
             _Inout_  ULONG *BufferLength,
             /* [annotation][out] */
             _Out_  PVOID Buffer) override {
-                printf("MyUsbTargetDevice::RetrieveDescriptor\r\n");
+                HLOG_DEBUG("MyUsbTargetDevice::RetrieveDescriptor\r\n");
                 return 0;
         }
 
@@ -3391,7 +3474,7 @@ public:
             _Inout_  ULONG *ValueLength,
             /* [annotation][out] */
             _Out_  PVOID Value) override {
-                printf("MyUsbTargetDevice::RetrievePowerPolicy\r\n");
+                HLOG_DEBUG("MyUsbTargetDevice::RetrievePowerPolicy\r\n");
                 return 0;
         }
 
@@ -3402,7 +3485,7 @@ public:
             _In_  ULONG ValueLength,
             /* [annotation][in] */
             _In_  PVOID Value) override {
-                printf("MyUsbTargetDevice::SetPowerPolicy %d\r\n", PolicyType);
+                HLOG_DEBUG("MyUsbTargetDevice::SetPowerPolicy %d\r\n", PolicyType);
                 return 0;
         }
 
@@ -3414,11 +3497,11 @@ public:
 class MyUsbTargetFactory : public IWDFUsbTargetFactory {
 public:
         virtual ULONG STDMETHODCALLTYPE AddRef() override {
-            printf("MyUsbTargetFactory::AddRef\r\n");
+            HLOG_DEBUG("MyUsbTargetFactory::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() override {
-            printf("MyUsbTargetFactory::Release\r\n");
+            HLOG_DEBUG("MyUsbTargetFactory::Release\r\n");
             return 0;
         }
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
@@ -3426,13 +3509,13 @@ public:
             StringFromIID(riid, &str);
             std::wcout << L"MyUsbTargetFactory::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE CreateUsbTargetDevice(
             _Out_  IWDFUsbTargetDevice **ppDevice) override {
-            printf("MyUsbTargetFactory::CreateUsbTargetDevice\r\n");
+            HLOG_DEBUG("MyUsbTargetFactory::CreateUsbTargetDevice\r\n");
 #if 0
             // To be fair... Enumerate the devices and only get the ones we care about.
             static const char dPath[] =  "\\\\?\\usb#vid_047d&pid_00f2#de88bf659e72#{a5dcbf10-6530-11d2-901f-00c04fb951ed}";
@@ -3447,14 +3530,14 @@ public:
                                              FILE_FLAG_OVERLAPPED, NULL);
 
             if (deviceHandle == INVALID_HANDLE_VALUE) {
-                printf("CreateFile failed: %d (%s)\n",
+                HLOG_USER("CreateFile failed: %d (%s)\n",
                     GetLastError(), hresult_to_sting(GetLastError()));
                 return E_FAIL;
             }
 
             WINUSB_INTERFACE_HANDLE winusbHandle = NULL;
             if (!WinUsb_Initialize(deviceHandle, &winusbHandle)) {
-                printf("WinUsb_Initialize failed: %d (%s)\n", GetLastError(),
+                HLOG_USER("WinUsb_Initialize failed: %d (%s)\n", GetLastError(),
                     hresult_to_sting(GetLastError()));
                 CloseHandle(deviceHandle);
                 return E_FAIL;
@@ -3477,7 +3560,7 @@ struct MyDevice : public IWDFDevice3 {
             pCallbackInterface->QueryInterface(IID_IPnpCallbackHardware, (LPVOID*)&pnphwcb);
             pCallbackInterface->QueryInterface(IID_IPnpCallbackHardware2, (LPVOID*)&pnphwcb2);
             pCallbackInterface->QueryInterface(IID_IPnpCallback, (LPVOID*)&pnpcb);
-            printf("NewDevice: pnphwcb=%p, pnphwcb2=%p, pnpcb=%p\r\n", pnphwcb, pnphwcb2, pnpcb);
+            HLOG_USER("NewDevice: pnphwcb=%p, pnphwcb2=%p, pnpcb=%p\r\n", pnphwcb, pnphwcb2, pnpcb);
         }
 
         IPnpCallbackHardware *pnphwcb;
@@ -3491,30 +3574,30 @@ struct MyDevice : public IWDFDevice3 {
             std::wcout << L"MyDevice::QueryInterface " << str << std::endl;
 
             if(IsEqualIID(riid, IID_IWDFPropertyStoreFactory)) {
-                printf("is IID_IWDFPropertyStoreFactory\r\n");
+                HLOG_DEBUG("is IID_IWDFPropertyStoreFactory\r\n");
                 *ppvObject = new MyPropertyStoreFactory();
             } else if (IsEqualIID(riid, IID_IWDFDevice3)) {
-                printf("is IID_IWDFDevice3\r\n");
+                HLOG_DEBUG("is IID_IWDFDevice3\r\n");
                 *ppvObject = (IWDFDevice3*)this;
             } else if (IsEqualIID(riid, IID_IWDFUsbTargetFactory)) {
-                printf("is IID_IWDFUsbTargetFactory\r\n");
+                HLOG_DEBUG("is IID_IWDFUsbTargetFactory\r\n");
                 *ppvObject = new MyUsbTargetFactory();
             }
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("AddRef\r\n");
+            HLOG_DEBUG("AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyDevice::Release\r\n");
+            HLOG_DEBUG("MyDevice::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("MyDevice::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyDevice::DeleteWdfObject\r\n");
             return 0;
         }
 
@@ -3523,23 +3606,23 @@ struct MyDevice : public IWDFDevice3 {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) {
-            printf("MyDevice::AssignContext\r\n");
+            HLOG_DEBUG("MyDevice::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("MyDevice::RetrieveContext\r\n");
+            HLOG_DEBUG("MyDevice::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("MyDevice::AcquireLock\r\n");
+            HLOG_DEBUG("MyDevice::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("MyDevice::ReleaseLock\r\n");
+            HLOG_DEBUG("MyDevice::ReleaseLock\r\n");
         }
 
     public:
@@ -3552,7 +3635,7 @@ struct MyDevice : public IWDFDevice3 {
             _Out_  IWDFNamedPropertyStore **ppPropStore,
             /* [annotation][unique][out] */
             _Out_opt_  WDF_PROPERTY_STORE_DISPOSITION *pDisposition){
-            printf("MyDevice::RetrieveDevicePropertyStore\r\n");
+            HLOG_DEBUG("MyDevice::RetrieveDevicePropertyStore\r\n");
             *ppPropStore = new MyNamedPropertyStore();
             return 0;
         }
@@ -3561,7 +3644,7 @@ struct MyDevice : public IWDFDevice3 {
         virtual void STDMETHODCALLTYPE GetDriver(
             /* [annotation][out] */
             _Out_  IWDFDriver **ppWdfDriver){
-            printf("MyDevice::GetDriver\r\n");
+            HLOG_DEBUG("MyDevice::GetDriver\r\n");
             *ppWdfDriver = m_driver;
         }
 
@@ -3571,7 +3654,7 @@ struct MyDevice : public IWDFDevice3 {
             _Out_opt_  PWSTR Buffer,
             /* [annotation][out][in] */
             _Inout_  DWORD *pdwSizeInChars){
-            printf("MyDevice::RetrieveDeviceInstanceId\r\n");
+            HLOG_DEBUG("MyDevice::RetrieveDeviceInstanceId\r\n");
             return 0;
         }
 
@@ -3579,7 +3662,7 @@ struct MyDevice : public IWDFDevice3 {
         virtual void STDMETHODCALLTYPE GetDefaultIoTarget(
             /* [annotation][out] */
             _Out_  IWDFIoTarget **ppWdfIoTarget){
-            printf("MyDevice::GetDefaultIoTarget\r\n");
+            HLOG_DEBUG("MyDevice::GetDefaultIoTarget\r\n");
         }
 
 
@@ -3588,7 +3671,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_opt_  LPCWSTR pcwszFileName,
             /* [annotation][out] */
             _Out_  IWDFDriverCreatedFile **ppFile){
-            printf("MyDevice::CreateWdfFile\r\n");
+            HLOG_DEBUG("MyDevice::CreateWdfFile\r\n");
             return 0;
         }
 
@@ -3596,7 +3679,7 @@ struct MyDevice : public IWDFDevice3 {
         virtual void STDMETHODCALLTYPE GetDefaultIoQueue(
             /* [annotation][out] */
             _Out_  IWDFIoQueue **ppWdfIoQueue){
-            printf("MyDevice::GetDefaultIoQueue\r\n");
+            HLOG_DEBUG("MyDevice::GetDefaultIoQueue\r\n");
         }
 
 
@@ -3613,11 +3696,11 @@ struct MyDevice : public IWDFDevice3 {
             _In_  BOOL bAllowZeroLengthRequests,
             /* [annotation][out] */
             _Out_  IWDFIoQueue **ppIoQueue){
-            printf("MyDevice::CreateIoQueue (%p, %d, %d, %d, %d, %d)\r\n",
+            HLOG_DEBUG("MyDevice::CreateIoQueue (%p, %d, %d, %d, %d, %d)\r\n",
                 pCallbackInterface, bDefaultQueue, DispatchType, bPowerManaged,
                 bAllowZeroLengthRequests);
             *ppIoQueue = myQueue = new MyQueue(pCallbackInterface);
-            printf("new queue=%p\r\n", *ppIoQueue);
+            HLOG_USER("new queue=%p\r\n", *ppIoQueue);
             return 0;
         }
 
@@ -3630,9 +3713,7 @@ struct MyDevice : public IWDFDevice3 {
             // this ois of type GUID_DEVINTERFACE_BIOMETRIC_READER
             LPOLESTR str;
             StringFromIID(*pDeviceInterfaceGuid, &str);
-            std::wcout << L"MyDevice::CreateDeviceInterface "
-                        << str
-                        << std::endl;
+            HLOG_DEBUG("MyDevice::CreateDeviceInterface %ls\n", str);
             return 0;
         }
 
@@ -3644,14 +3725,10 @@ struct MyDevice : public IWDFDevice3 {
             _In_opt_  PCWSTR pReferenceString,
             /* [annotation][in] */
             _In_  BOOL Enable){
-            //printf("AssignDeviceInterfaceState\r\n");
+            //HLOG_DEBUG("AssignDeviceInterfaceState\r\n");
             LPOLESTR str;
             StringFromIID(*pDeviceInterfaceGuid, &str);
-            std::wcout << L"MyDevice::AssignDeviceInterfaceState "
-                        << str
-                        << L"="
-                        << Enable
-                        << std::endl;
+            HLOG_DEBUG("MyDevice::AssignDeviceInterfaceState %ls=%d\n", str, Enable);
             return 0;
         }
 
@@ -3660,7 +3737,7 @@ struct MyDevice : public IWDFDevice3 {
             _Out_writes_to_opt_(*pdwDeviceNameLength, *pdwDeviceNameLength)  PWSTR pDeviceName,
             /* [annotation][out][in] */
             _Inout_  DWORD *pdwDeviceNameLength){
-            printf("MyDevice::RetrieveDeviceName %p %lu\r\n", pDeviceName, *pdwDeviceNameLength);
+            HLOG_DEBUG("MyDevice::RetrieveDeviceName %p %lu\r\n", pDeviceName, *pdwDeviceNameLength);
             // FIXME: Get it enumerating the USB maybe?
             static const wchar_t name[] =  L"VeriMark DT Fingerprint Key";
             // static const wchar_t name[] =  L"c:\\usb.txt";
@@ -3685,7 +3762,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_reads_bytes_(cbDataSize)  BYTE *pbData,
             /* [annotation][in] */
             _In_  DWORD cbDataSize){
-            printf("MyDevice::PostEvent\r\n");
+            HLOG_DEBUG("MyDevice::PostEvent\r\n");
             return 0;
         }
 
@@ -3697,7 +3774,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_  WDF_REQUEST_TYPE RequestType,
             /* [annotation][in] */
             _In_  BOOL Forward){
-            printf("MyDevice::ConfigureRequestDispatching (%d, %d)\r\n",
+            HLOG_DEBUG("MyDevice::ConfigureRequestDispatching (%d, %d)\r\n",
                 RequestType, Forward);
             return 0;
         }
@@ -3708,20 +3785,20 @@ struct MyDevice : public IWDFDevice3 {
             _In_  WDF_PNP_STATE State,
             /* [annotation][in] */
             _In_  WDF_TRI_STATE Value){
-            printf("MyDevice::SetPnpState\r\n");
+            HLOG_DEBUG("MyDevice::SetPnpState\r\n");
         }
 
 
         virtual WDF_TRI_STATE STDMETHODCALLTYPE GetPnpState(
             /* [annotation][in] */
             _In_  WDF_PNP_STATE State){
-            printf("MyDevice::GetPnpState\r\n");
+            HLOG_DEBUG("MyDevice::GetPnpState\r\n");
             return WdfFalse;
         }
 
 
         virtual void STDMETHODCALLTYPE CommitPnpState( void){
-            printf("MyDevice::CommitPnpState\r\n");
+            HLOG_DEBUG("MyDevice::CommitPnpState\r\n");
         }
 
 
@@ -3732,9 +3809,9 @@ struct MyDevice : public IWDFDevice3 {
             _In_opt_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFIoRequest **ppRequest){
-            printf("MyDevice::CreateRequest");
+            HLOG_DEBUG("MyDevice::CreateRequest");
             *ppRequest = new MyRequest(WdfRequestUsb, 0, nullptr, nullptr);
-            printf(" = %p\r\n", *ppRequest);
+            HLOG_DEBUG(" = %p\r\n", *ppRequest);
             return 0;
         }
 
@@ -3742,7 +3819,7 @@ struct MyDevice : public IWDFDevice3 {
         virtual HRESULT STDMETHODCALLTYPE CreateSymbolicLink(
             /* [annotation][unique][string][in] */
             _In_  PCWSTR pSymbolicLink){
-            printf("MyDevice::CreateSymbolicLink\r\n");
+            HLOG_DEBUG("MyDevice::CreateSymbolicLink\r\n");
             return 0;
         }
 
@@ -3758,7 +3835,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_  WDF_POWER_POLICY_S0_IDLE_USER_CONTROL UserControlOfIdleSettings,
             /* [annotation][in] */
             _In_  WDF_TRI_STATE Enabled){
-            printf("MyDevice::AssignS0IdleSettings\r\n");
+            HLOG_DEBUG("MyDevice::AssignS0IdleSettings\r\n");
             return 0;
         }
 
@@ -3766,14 +3843,14 @@ struct MyDevice : public IWDFDevice3 {
         virtual HRESULT STDMETHODCALLTYPE StopIdle(
             /* [annotation][in] */
             _In_  BOOL WaitForD0){
-            printf("MyDevice::StopIdle\r\n");
+            HLOG_DEBUG("MyDevice::StopIdle\r\n");
             return 0;
         }
 
 
         virtual void STDMETHODCALLTYPE ResumeIdle( void){
             goIdle = 1;
-            printf("MyDevice::ResumeIdle\r\n");
+            HLOG_DEBUG("MyDevice::ResumeIdle\r\n");
         }
 
 
@@ -3782,7 +3859,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_  PCWSTR pSymbolicLink,
             /* [annotation][unique][string][in] */
             _In_opt_  PCWSTR pReferenceString){
-            printf("MyDevice::CreateSymbolicLinkWithReferenceString\r\n");
+            HLOG_DEBUG("MyDevice::CreateSymbolicLinkWithReferenceString\r\n");
             return 0;
         }
 
@@ -3792,7 +3869,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_  LPCGUID pDeviceInterfaceGuid,
             /* [annotation][in] */
             _In_  BOOL IncludeExistingInterfaces){
-            printf("MyDevice::RegisterRemoteInterfaceNotification\r\n");
+            HLOG_DEBUG("MyDevice::RegisterRemoteInterfaceNotification\r\n");
             return 0;
         }
 
@@ -3804,7 +3881,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_opt_  IUnknown *pCallbackInterface,
             /* [annotation][out] */
             _Out_  IWDFRemoteInterface **ppRemoteInterface){
-            printf("MyDevice::CreateRemoteInterface\r\n");
+            HLOG_DEBUG("MyDevice::CreateRemoteInterface\r\n");
             return 0;
         }
 
@@ -3816,7 +3893,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_opt_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFRemoteTarget **ppRemoteTarget){
-            printf("MyDevice::CreateRemoteTarget\r\n");
+            HLOG_DEBUG("MyDevice::CreateRemoteTarget\r\n");
             return 0;
         }
 
@@ -3826,7 +3903,7 @@ struct MyDevice : public IWDFDevice3 {
             _Out_  WDF_DEVICE_IO_TYPE *ReadWritePreference,
             /* [annotation][out] */
             _Out_  WDF_DEVICE_IO_TYPE *IoControlPreference){
-            printf("MyDevice::GetDeviceStackIoTypePreference\r\n");
+            HLOG_DEBUG("MyDevice::GetDeviceStackIoTypePreference\r\n");
         }
 
 
@@ -3837,13 +3914,13 @@ struct MyDevice : public IWDFDevice3 {
             _In_  WDF_POWER_POLICY_SX_WAKE_USER_CONTROL UserControlOfWakeSettings,
             /* [annotation][in] */
             _In_  WDF_TRI_STATE Enabled){
-            printf("MyDevice::AssignSxWakeSettings\r\n");
+            HLOG_DEBUG("MyDevice::AssignSxWakeSettings\r\n");
             return 0;
         }
 
 
         virtual POWER_ACTION STDMETHODCALLTYPE GetSystemPowerAction( void){
-            printf("MyDevice::GetSystemPowerAction\r\n");
+            HLOG_DEBUG("MyDevice::GetSystemPowerAction\r\n");
             return PowerActionNone;
         }
 
@@ -3858,7 +3935,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_  MEMORY_CACHING_TYPE CacheType,
             /* [annotation][out] */
             _Out_  void **pPseudoBaseAddress){
-            printf("MyDevice::MapIoSpace\r\n");
+            HLOG_DEBUG("MyDevice::MapIoSpace\r\n");
             return 0;
         }
 
@@ -3868,14 +3945,14 @@ struct MyDevice : public IWDFDevice3 {
             _In_  void *PseudoBaseAddress,
             /* [annotation][in] */
             _In_  SIZE_T NumberOfBytes){
-            printf("MyDevice::UnmapIoSpace\r\n");
+            HLOG_DEBUG("MyDevice::UnmapIoSpace\r\n");
         }
 
 
         virtual void *STDMETHODCALLTYPE GetHardwareRegisterMappedAddress(
             /* [annotation][in] */
             _In_  void *PseudoBaseAddress){
-            printf("MyDevice::GetHardwareRegisterMappedAddress\r\n");
+            HLOG_DEBUG("MyDevice::GetHardwareRegisterMappedAddress\r\n");
             return 0;
         }
 
@@ -3891,7 +3968,7 @@ struct MyDevice : public IWDFDevice3 {
             _Out_writes_all_opt_(Count)  void *Buffer,
             /* [annotation][in] */
             _In_opt_  ULONG Count){
-            printf("MyDevice::ReadFromHardware\r\n");
+            HLOG_DEBUG("MyDevice::ReadFromHardware\r\n");
             return 0;
         }
 
@@ -3909,7 +3986,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_reads_opt_(Count)  void *Buffer,
             /* [annotation][in] */
             _In_opt_  ULONG Count){
-            printf("MyDevice::WriteToHardware\r\n");
+            HLOG_DEBUG("MyDevice::WriteToHardware\r\n");
         }
 
 
@@ -3918,7 +3995,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_  PWUDF_INTERRUPT_CONFIG Configuration,
             /* [annotation][out] */
             _Out_  IWDFInterrupt **ppInterrupt){
-            printf("MyDevice::CreateInterrupt\r\n");
+            HLOG_DEBUG("MyDevice::CreateInterrupt\r\n");
             return 0;
         }
 
@@ -3929,7 +4006,7 @@ struct MyDevice : public IWDFDevice3 {
             _In_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFWorkItem **ppWorkItem){
-            printf("MyDevice::CreateWorkItem\r\n");
+            HLOG_DEBUG("MyDevice::CreateWorkItem\r\n");
             return 0;
         }
 
@@ -3937,7 +4014,7 @@ struct MyDevice : public IWDFDevice3 {
         virtual HRESULT STDMETHODCALLTYPE AssignS0IdleSettingsEx(
             /* [annotation][in] */
             _In_  PWUDF_DEVICE_POWER_POLICY_IDLE_SETTINGS IdleSettings){
-            printf("MyDevice::AssignS0IdleSettingsEx\r\n");
+            HLOG_DEBUG("MyDevice::AssignS0IdleSettingsEx\r\n");
             return 0;
         }
 };
@@ -3951,17 +4028,17 @@ struct MyDriver : public IWDFDriver {
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("MyDriver::AddRef\r\n");
+            HLOG_DEBUG("MyDriver::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyDriver::Release\r\n");
+            HLOG_DEBUG("MyDriver::Release\r\n");
             return 0;
         }
     public:
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject( void) {
-            printf("MyDriver::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyDriver::DeleteWdfObject\r\n");
             return 0;
         }
 
@@ -3970,23 +4047,23 @@ struct MyDriver : public IWDFDriver {
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) {
-            printf("MyDriver::AssignContext\r\n");
+            HLOG_DEBUG("MyDriver::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) {
-            printf("MyDriver::RetrieveContext\r\n");
+            HLOG_DEBUG("MyDriver::RetrieveContext\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock( void) {
-            printf("MyDriver::AcquireLock\r\n");
+            HLOG_DEBUG("MyDriver::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock( void) {
-            printf("MyDriver::ReleaseLock\r\n");
+            HLOG_DEBUG("MyDriver::ReleaseLock\r\n");
         }
 
     public:
@@ -3997,9 +4074,9 @@ struct MyDriver : public IWDFDriver {
             _In_opt_  IUnknown *pCallbackInterface,
             /* [annotation][out] */
             _Out_  IWDFDevice **ppDevice) {
-            printf("MyDriver::CreateDevice\r\n");
+            HLOG_DEBUG("MyDriver::CreateDevice\r\n");
             *ppDevice = myDevice = new MyDevice(this, pCallbackInterface);
-            printf("new device=%p\r\n", *ppDevice);
+            HLOG_USER("new device=%p\r\n", *ppDevice);
             return 0;
         }
 
@@ -4010,7 +4087,7 @@ struct MyDriver : public IWDFDriver {
             _In_opt_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFObject **ppWdfObject) {
-            printf("MyDriver::CreateWdfObject\r\n");
+            HLOG_DEBUG("MyDriver::CreateWdfObject\r\n");
             return 0;
         }
 
@@ -4025,10 +4102,10 @@ struct MyDriver : public IWDFDriver {
             _In_opt_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory) {
-            printf("MyDriver::CreatePreallocatedWdfMemory %p (%lu) = ",
+            HLOG_DEBUG("MyDriver::CreatePreallocatedWdfMemory %p (%lu) = ",
                 pBuff, BufferSize);
             *ppWdfMemory = new MyMem(pBuff, BufferSize);
-            printf(" %p\r\n", *ppWdfMemory);
+            HLOG_DEBUG(" %p\r\n", *ppWdfMemory);
             return 0;
         }
 
@@ -4041,19 +4118,19 @@ struct MyDriver : public IWDFDriver {
             _In_opt_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory) {
-            printf("MyDriver::CreateWdfMemory %p (%lu) = ", BufferSize);
+            HLOG_DEBUG("MyDriver::CreateWdfMemory %p (%lu) = ", BufferSize);
             // FIXME: Free this
             void *mem = malloc(BufferSize);
             memset(mem, 0, BufferSize);
             *ppWdfMemory = new MyMem(mem, BufferSize);
-            printf(" %p\r\n", *ppWdfMemory);
+            HLOG_DEBUG(" %p\r\n", *ppWdfMemory);
             return 0;
         }
 
         virtual BOOL STDMETHODCALLTYPE IsVersionAvailable(
             /* [annotation][in] */
             _In_  UMDF_VERSION_DATA *pMinimumVersion) {
-            printf("MyDriver::IsVersionAvailable\r\n");
+            HLOG_DEBUG("MyDriver::IsVersionAvailable\r\n");
             return true;
         }
 
@@ -4062,7 +4139,7 @@ struct MyDriver : public IWDFDriver {
             _Out_writes_to_opt_(*pdwVersionLength, *pdwVersionLength)  PWSTR pVersion,
             /* [annotation][out][in] */
             _Inout_  DWORD *pdwVersionLength) {
-            printf("MyDriver::RetrieveVersionString\r\n");
+            HLOG_DEBUG("MyDriver::RetrieveVersionString\r\n");
             return 0;
         }
 };
@@ -4070,27 +4147,27 @@ struct MyDriver : public IWDFDriver {
 class MyDevInit : public IWDFDeviceInitialize {
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
-            printf("MyDevInit::QueryInterface\r\n");
+            HLOG_DEBUG("MyDevInit::QueryInterface\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE AddRef() {
-            printf("MyDevInit::AddRef\r\n");
+            HLOG_DEBUG("MyDevInit::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() {
-            printf("MyDevInit::Release\r\n");
+            HLOG_DEBUG("MyDevInit::Release\r\n");
             return 0;
         }
 
     public:
         virtual void STDMETHODCALLTYPE SetFilter( void) {
-            printf("MyDevInit::SetFilter\r\n");
+            HLOG_DEBUG("MyDevInit::SetFilter\r\n");
         }
 
         virtual void STDMETHODCALLTYPE SetLockingConstraint(
             /* [annotation][in] */
             _In_  WDF_CALLBACK_CONSTRAINT LockType) {
-            printf("MyDevInit::SetLockingConstraint\r\n");
+            HLOG_DEBUG("MyDevInit::SetLockingConstraint\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveDevicePropertyStore(
@@ -4102,7 +4179,7 @@ class MyDevInit : public IWDFDeviceInitialize {
             _Out_  IWDFNamedPropertyStore **ppPropStore,
             /* [annotation][unique][out] */
             _Out_opt_  WDF_PROPERTY_STORE_DISPOSITION *pDisposition) {
-            printf("MyDevInit::RetrieveDevicePropertyStore\r\n");
+            HLOG_DEBUG("MyDevInit::RetrieveDevicePropertyStore\r\n");
             *ppPropStore = new MyNamedPropertyStore();
             return 0;
         }
@@ -4110,13 +4187,13 @@ class MyDevInit : public IWDFDeviceInitialize {
         virtual void STDMETHODCALLTYPE SetPowerPolicyOwnership(
             /* [annotation][in] */
             _In_  BOOL fTrue) {
-            printf("MyDevInit::SetPowerPolicyOwnership %d\r\n", fTrue);
+            HLOG_DEBUG("MyDevInit::SetPowerPolicyOwnership %d\r\n", fTrue);
         }
 
         virtual void STDMETHODCALLTYPE AutoForwardCreateCleanupClose(
             /* [annotation][in] */
             _In_  WDF_TRI_STATE State) {
-            printf("MyDevInit::AutoForwardCreateCleanupClose\r\n");
+            HLOG_DEBUG("MyDevInit::AutoForwardCreateCleanupClose\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveDeviceInstanceId(
@@ -4124,7 +4201,7 @@ class MyDevInit : public IWDFDeviceInitialize {
             _Out_opt_  PWSTR Buffer,
             /* [annotation][out][in] */
             _Inout_  DWORD *pdwSizeInChars) {
-            printf("MyDevInit::RetrieveDeviceInstanceId\r\n");
+            HLOG_DEBUG("MyDevInit::RetrieveDeviceInstanceId\r\n");
             return 0;
         }
 
@@ -4133,13 +4210,13 @@ class MyDevInit : public IWDFDeviceInitialize {
             _In_  WDF_PNP_CAPABILITY Capability,
             /* [annotation][in] */
             _In_  WDF_TRI_STATE Value) {
-            printf("MyDevInit::SetPnpCapability\r\n");
+            HLOG_DEBUG("MyDevInit::SetPnpCapability\r\n");
         }
 
         virtual WDF_TRI_STATE STDMETHODCALLTYPE GetPnpCapability(
             /* [annotation][in] */
             _In_  WDF_PNP_CAPABILITY Capability) {
-            printf("MyDevInit::GetPnpCapability\r\n");
+            HLOG_DEBUG("MyDevInit::GetPnpCapability\r\n");
             return WdfFalse;
         }
 };
@@ -4147,17 +4224,17 @@ class MyDevInit : public IWDFDeviceInitialize {
 class MyResourceList : public IWDFCmResourceList {
 public:
         MyResourceList(const char *type) {
-            printf("MyResourceList(%s)\r\n", type);
+            HLOG_DEBUG("MyResourceList(%s)\r\n", type);
             m_type = type;
         }
 
         // IUnknown methods (simplified)
         virtual ULONG STDMETHODCALLTYPE AddRef() override {
-            printf("MyResourceList::AddRef\r\n");
+            HLOG_DEBUG("MyResourceList::AddRef\r\n");
             return 0;
         }
         virtual ULONG STDMETHODCALLTYPE Release() override {
-            printf("MyResourceList::Release\r\n");
+            HLOG_DEBUG("MyResourceList::Release\r\n");
             return 0;
         }
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) override {
@@ -4165,31 +4242,31 @@ public:
             StringFromIID(riid, &str);
             std::wcout << L"MyResourceList::QueryInterface " << str << std::endl;
             *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
+            HLOG_DEBUG("ppvObject=%p\r\n", *ppvObject);
             return 0;
         }
 
         virtual ULONG STDMETHODCALLTYPE GetCount() override {
-            printf("MyResourceList::GetCount %s\r\n", m_type);
+            HLOG_DEBUG("MyResourceList::GetCount %s\r\n", m_type);
             return m_count;
         }
 
         virtual PCM_PARTIAL_RESOURCE_DESCRIPTOR STDMETHODCALLTYPE GetDescriptor(ULONG index) override {
-            printf("MyResourceList::GetDescriptor %s %lu\r\n", m_type, index);
+            HLOG_DEBUG("MyResourceList::GetDescriptor %s %lu\r\n", m_type, index);
             return (index < m_count) ? &m_descriptors[index] : nullptr;
         }
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
-            printf("MyResourceList::DeleteWdfObject\r\n");
+            HLOG_DEBUG("MyResourceList::DeleteWdfObject\r\n");
             return 0;
         }
 
         virtual void STDMETHODCALLTYPE AcquireLock() override {
-            printf("MyResourceList::AcquireLock\r\n");
+            HLOG_DEBUG("MyResourceList::AcquireLock\r\n");
         }
 
         virtual void STDMETHODCALLTYPE ReleaseLock() override {
-            printf("MyResourceList::ReleaseLock\r\n");
+            HLOG_DEBUG("MyResourceList::ReleaseLock\r\n");
         }
 
         virtual HRESULT STDMETHODCALLTYPE AssignContext(
@@ -4197,14 +4274,14 @@ public:
             _In_opt_ __drv_aliasesMem  IObjectCleanup *pCleanupCallback,
             /* [annotation][unique][in] */
             _In_opt_ __drv_aliasesMem  void *pContext) override {
-            printf("MyResourceList::AssignContext\r\n");
+            HLOG_DEBUG("MyResourceList::AssignContext\r\n");
             return 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveContext(
             /* [annotation][out] */
             _Out_  void **ppvContext) override {
-            printf("MyResourceList::RetrieveContext\r\n");
+            HLOG_DEBUG("MyResourceList::RetrieveContext\r\n");
             return 0;
         }
 
@@ -4249,44 +4326,50 @@ identifyFeatureSet()
     MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
     MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
+    HLOG_INFO("SET_TEMPLATE_LIST (zero-list)\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
     while(!stl_req.complete)
         Sleep(200);
 
-    printf("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\r\n",
+    HLOG_INFO("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\n",
         (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
         (long long)stl_req.informationSize);
 
     const DWORD ia_obuf_size = 4096;
     UCHAR *ia_obuf = (UCHAR *)calloc(1, ia_obuf_size);
     if(!ia_obuf) {
-        printf("identifyFeatureSet: failed to allocate identify buffer\n");
+        HLOG_USER("identifyFeatureSet: failed to allocate identify buffer\n");
         return;
     }
     MyMem ia_in(NULL, 0), ia_out(ia_obuf, ia_obuf_size);
     MyRequest ia_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &ia_out, &ia_in);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
+    HLOG_INFO("GET_IDENTIFY_ALL\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &ia_req, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, 0, 0);
-    printf("returned from IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL dispatch, complete=%d\n", ia_req.complete ? 1 : 0);
+    HLOG_DEBUG("returned from IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL dispatch, complete=%d\n", ia_req.complete ? 1 : 0);
     while(!ia_req.complete)
         Sleep(200);
 
-    printf("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\r\n",
+    HLOG_INFO("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\n",
         (unsigned long)ia_req.completionStatus, hresult_to_sting(ia_req.completionStatus),
         (long long)ia_req.informationSize);
 
-    if(ia_req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
+    if(!FAILED(ia_req.completionStatus) && ia_req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
         WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)ia_obuf;
-        printf("IDENTIFY_ALL engine result @0x50: 0x%lx (%s)\n",
-            (unsigned long)identifyOut->EngineHresult, hresult_to_sting(identifyOut->EngineHresult));
+        HLOG_USER("=== Match Result ===\n");
+        HLOG_USER("EngineHresult=0x%lx (%s)\n",
+            (unsigned long)identifyOut->EngineHresult,
+            hresult_to_sting(identifyOut->EngineHresult));
+        HLOG_USER("SubFactor=%u (%s)\n",
+            (unsigned)identifyOut->SubFactor,
+            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)identifyOut->SubFactor));
+        display_identity(&identifyOut->Identity, "");
     }
 
-    printf("IDENTIFY_ALL raw (first 96 bytes): ");
-    for(LONG_PTR i=0;i<96 && i<ia_req.informationSize;i++)
-        printf("%02x", ia_obuf[i]);
-    printf("\n");
+    HLOG_DEBUG("IDENTIFY_ALL raw (%lld bytes): ", (long long)ia_req.informationSize);
+    for(LONG_PTR i=0;i<ia_req.informationSize && i<96;i++)
+        HLOG_DEBUG("%02x", ia_obuf[i]);
+    HLOG_DEBUG("\n");
 
     free(ia_obuf);
 }
@@ -4301,7 +4384,7 @@ identify()
         MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
         MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
-        printf("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
         int waitedMs = 0;
         while(!cal_req.complete && waitedMs < 5000) {
@@ -4310,13 +4393,13 @@ identify()
         }
 
         if(!cal_req.complete) {
-            printf("CALIBRATE still pending after %d ms; continuing to CAPTURE_DATA\n", waitedMs);
+            HLOG_USER("CALIBRATE still pending after %d ms; continuing to CAPTURE_DATA\n", waitedMs);
         }
         else {
-            printf("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
+            HLOG_INFO("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
                 hresult_to_sting(cal_req.completionStatus));
             if(FAILED(cal_req.completionStatus))
-                printf("CALIBRATE failed; continuing to CAPTURE_DATA anyway\n");
+                HLOG_USER("CALIBRATE failed; continuing to CAPTURE_DATA anyway\n");
         }
     }
 
@@ -4325,7 +4408,7 @@ identify()
     char obuf[1024*100];
     WINBIO_CAPTURE_DATA *data = (WINBIO_CAPTURE_DATA *)obuf;
 
-    printf("sizeof(*params)=%lld\n", sizeof(*params));
+    HLOG_USER("sizeof(*params)=%lld\n", sizeof(*params));
 
     /*
 0:002> d 41c49a6830
@@ -4346,19 +4429,19 @@ identify()
     MyMem in(ibuf, sizeof(*params)), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CAPTURE_DATA, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_CAPTURE_DATA, 0, 0);
     int waitedMs = 0;
-    printf("Waiting for capture to complete (touch sensor)...\n");
+    HLOG_USER("Waiting for capture to complete (touch sensor)...\n");
     while(!req.complete && waitedMs < 60000) {
         Sleep(200);
         waitedMs += 200;
         if((waitedMs % 2000) == 0)
-            printf("  ...still waiting (%d ms)\n", waitedMs);
+            HLOG_TRACE("  ...still waiting (%d ms)\n", waitedMs);
     }
 
     if(!req.complete) {
-        printf("CAPTURE_DATA still pending after %d ms; cancelling request\n", waitedMs);
+        HLOG_DEBUG("CAPTURE_DATA still pending after %d ms; cancelling request\n", waitedMs);
         if(req.cancelCallback) {
             req.cancelCallback->OnCancel(&req);
             for(int i=0;i<25 && !req.complete;i++)
@@ -4367,68 +4450,57 @@ identify()
     }
 
     if(!req.complete) {
-        printf("CAPTURE_DATA did not complete; capture thread is still waiting for sensor event\n");
+        HLOG_USER("CAPTURE_DATA did not complete; capture thread is still waiting for sensor event\n");
         setIndicator(WINBIO_INDICATOR_OFF);
         return;
     }
 
-    //printf("wakey wakey\r\n");
+    //HLOG_DEBUG("wakey wakey\r\n");
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
-    /*
-0:007> d 86c8bbe4a0
-00000086`c8bbe4a0  70 00 00 00 00 00 00 00-01 00 00 00 00 00 00 00  p...............
-00000086`c8bbe4b0  58 00 00 00 30 00 00 00-20 00 00 00 00 00 00 00  X...0... .......
-00000086`c8bbe4c0  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
-00000086`c8bbe4d0  00 00 00 00 00 14 00 00-00 00 00 00 00 00 00 00  ................
-00000086`c8bbe4e0  00 02 fe 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
-00000086`c8bbe4f0  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
-00000086`c8bbe500  00 00 00 00 00 00 00 00-00 00 00 00 00 00 00 00  ................
-    */
-    std::wcout
-        << L"=======================" << std::endl
-        << L"PayloadSize " << data->PayloadSize << std::endl
-        << L"WinBioHresult 0x" << std::hex << data->WinBioHresult << L" (" << hresult_to_sting(data->WinBioHresult) << L")" << std::endl
-        << L"SensorStatus " << std::dec << data->SensorStatus << std::endl
-        << L"RejectDetail 0x" << std::hex << data->RejectDetail << L" (" << reject_detail_to_string(data->RejectDetail) << L")" << std::dec << std::endl
-        << L"CaptureData.Size " << data->CaptureData.Size << std::endl
-        << L"=======================" << std::endl
-        ;
-
-    setIndicator(WINBIO_INDICATOR_OFF);
-
     if(FAILED(req.completionStatus) || FAILED(data->WinBioHresult) || data->CaptureData.Size == 0) {
-        printf("Capture did not produce a usable sample; skipping identify stage\n");
+        HLOG_USER("Capture did not produce a usable sample; skipping identify stage\n");
+        setIndicator(WINBIO_INDICATOR_OFF);
         return;
     }
+
+    HLOG_USER("=== Capture Result ===\n");
+    HLOG_USER("PayloadSize=%lu WinBioHresult=0x%lx (%s)\n",
+        data->PayloadSize,
+        (unsigned long)data->WinBioHresult,
+        hresult_to_sting(data->WinBioHresult));
+    HLOG_USER("SensorStatus=%lu RejectDetail=0x%lx (%s)\n",
+        (unsigned long)data->SensorStatus,
+        (unsigned long)data->RejectDetail,
+        reject_detail_to_string(data->RejectDetail));
+    HLOG_USER("CaptureData.Size=%lu\n", data->CaptureData.Size);
+
     if(data->CaptureData.Size > 0) {
         WINBIO_BIR *bir = (WINBIO_BIR *)data->CaptureData.Data;
-        printf("bir->HeaderBlock = %ld, %ld\n", bir->HeaderBlock.Size, bir->HeaderBlock.Offset);
-        printf("bir->StandardDataBlock = %ld, %ld\n", bir->StandardDataBlock.Size, bir->StandardDataBlock.Offset);
-        printf("bir->VendorDataBlock = %ld, %ld\n", bir->VendorDataBlock.Size, bir->VendorDataBlock.Offset);
-        printf("bir->SignatureBlock = %ld, %ld\n", bir->SignatureBlock.Size, bir->SignatureBlock.Offset);
+        HLOG_USER("BIR: HeaderBlock={Size=%ld,Offset=%ld} "
+            "StandardDataBlock={Size=%ld,Offset=%ld} "
+            "VendorDataBlock={Size=%ld,Offset=%ld} "
+            "SignatureBlock={Size=%ld,Offset=%ld}\n",
+            bir->HeaderBlock.Size, bir->HeaderBlock.Offset,
+            bir->StandardDataBlock.Size, bir->StandardDataBlock.Offset,
+            bir->VendorDataBlock.Size, bir->VendorDataBlock.Offset,
+            bir->SignatureBlock.Size, bir->SignatureBlock.Offset);
 
         if(bir->HeaderBlock.Size > 0) {
-            WINBIO_BIR_HEADER *hdr = (WINBIO_BIR_HEADER *)(data->CaptureData.Data+bir->HeaderBlock.Offset);
-
-            std::wcout
-                << L"ValidFields = " << std::hex << hdr->ValidFields << std::endl
-                << L"HeaderVersion = " << hdr->HeaderVersion << std::endl
-                << L"PatronHeaderVersion = " << hdr->PatronHeaderVersion << std::endl
-                << L"DataFlags = " << std::hex << hdr->DataFlags << std::endl
-                << L"Type = " << hdr->Type << std::endl
-                << L"Subtype = " << hdr->Subtype << std::endl
-                << L"Purpose = " << hdr->Purpose << std::endl
-                << L"DataQuality = " << (int)hdr->DataQuality << std::endl
-                << L"CreationDate = " << hdr->CreationDate << std::endl
-                << L"ValidityPeriod.BeginDate = " << hdr->ValidityPeriod.BeginDate << std::endl
-                << L"ValidityPeriod.EndDate = " << hdr->ValidityPeriod.EndDate << std::endl
-                << L"BiometricDataFormat = " << hdr->BiometricDataFormat << std::endl
-                << L"ProductId = " << hdr->ProductId << std::endl
-                ;
-            printf("sz=%lld\n", (PUCHAR)(hdr+1) - data->CaptureData.Data);
+            WINBIO_BIR_HEADER *hdr = (WINBIO_BIR_HEADER *)(data->CaptureData.Data + bir->HeaderBlock.Offset);
+            HLOG_USER("BIR Header:\n");
+            HLOG_USER("  ValidFields=0x%04x HeaderVersion=%u PatronHeaderVersion=%u\n",
+                hdr->ValidFields, hdr->HeaderVersion, hdr->PatronHeaderVersion);
+            HLOG_USER("  DataFlags=0x%04x Type=0x%04x Subtype=0x%04x Purpose=%d\n",
+                hdr->DataFlags, hdr->Type, hdr->Subtype, hdr->Purpose);
+            HLOG_USER("  DataQuality=%d CreationDate=%lld\n",
+                (int)hdr->DataQuality, (long long)hdr->CreationDate.QuadPart);
+            HLOG_USER("  Format={Owner=0x%04x,Type=0x%04x} ProductId={Owner=0x%04x,Type=0x%04x}\n",
+                hdr->BiometricDataFormat.Owner, hdr->BiometricDataFormat.Type,
+                hdr->ProductId.Owner, hdr->ProductId.Type);
         }
     }
-    identifyFeatureSet();
+
+    setIndicator(WINBIO_INDICATOR_OFF);
 }
 
 void
@@ -4445,15 +4517,15 @@ commitEnrollment()
     // MyMem in(arecord, sizeof(arecord)), out(obuf, sizeof(obuf));
     // MyRequest req(WdfRequestOther, 0x442018, &out, &in);
 
-    // printf("about to Commit Enrollment\r\n");
+    // HLOG_DEBUG("about to Commit Enrollment\r\n");
     // myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x442018, 0, 0);
     // while(!req.complete)
     //     Sleep(200);
 
-    // printf("Got back 0x%llx bytes: ", req.informationSize);
+    // HLOG_INFO("Got back 0x%llx bytes: ", req.informationSize);
     // for(LONG_PTR i=0;i<req.informationSize;i++)
-    //     printf("%02x", obuf[i]);
-    // printf("\n");
+    //     HLOG_DEBUG("%02x", obuf[i]);
+    // HLOG_DEBUG("\n");
     // return;
 
 
@@ -4483,7 +4555,7 @@ commitEnrollment()
             input.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
         }
         input.SubFactor = (ULONG)WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
-        printf("COMMIT_ENROLLMENT using new identity (Type=%lu, SubFactor=%u)\n",
+        HLOG_USER("COMMIT_ENROLLMENT using new identity (Type=%lu, SubFactor=%u)\n",
             (unsigned long)input.Identity.Type,
             (unsigned)input.SubFactor);
 
@@ -4493,20 +4565,20 @@ commitEnrollment()
         MyMem in((UCHAR *)&input, sizeof(input)), out(obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
 
-        printf("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (typed input, inSize=%zu)\r\n", sizeof(input));
+        HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (typed input, inSize=%zu)\r\n", sizeof(input));
         myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, 0, 0);
         while(!req.complete)
             Sleep(200);
 
-        printf("COMMIT_ENROLLMENT structured: hresult=0x%lx (%s), infoSize=%lld, raw: ",
+        HLOG_INFO("COMMIT_ENROLLMENT structured: hresult=0x%lx (%s), infoSize=%lld, raw: ",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
         SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
         for(SIZE_T i=0;i<commitDumpSize;i++)
-            printf("%02x", obuf[i]);
+            HLOG_DEBUG("%02x", obuf[i]);
         if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
-            printf("...(truncated)");
-        printf("\n");
+            HLOG_INFO("...(truncated)");
+        HLOG_DEBUG("\n");
 
         commitStatus = req.completionStatus;
 
@@ -4521,77 +4593,31 @@ commitEnrollment()
         MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
 
-        printf("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (fallback inSize=8)\r\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT (fallback inSize=8)\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, 0, 0);
         while(!req.complete)
             Sleep(200);
 
-        printf("COMMIT_ENROLLMENT fallback: hresult=0x%lx (%s), infoSize=%lld, raw: ",
+        HLOG_INFO("COMMIT_ENROLLMENT fallback: hresult=0x%lx (%s), infoSize=%lld, raw: ",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
         SIZE_T commitDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
         for(SIZE_T i=0;i<commitDumpSize;i++)
-            printf("%02x", obuf[i]);
+            HLOG_DEBUG("%02x", obuf[i]);
         if(commitDumpSize < (SIZE_T)(req.informationSize > 0 ? req.informationSize : 0))
-            printf("...(truncated)");
-        printf("\n");
+            HLOG_INFO("...(truncated)");
+        HLOG_DEBUG("\n");
 
         commitStatus = req.completionStatus;
     }
 
     if(commitStatus == 1) {
-        printf("COMMIT_ENROLLMENT error: EnrollmentCommit returned 1 (VFM write failed), treating as failure\n");
+        HLOG_USER("COMMIT_ENROLLMENT error: EnrollmentCommit returned 1 (VFM write failed), treating as failure\n");
         commitStatus = E_FAIL;
     }
 
     if(SUCCEEDED(commitStatus)) {
-        if(!refreshTemplateCacheFromGetTemplate()) {
-            printf("GET_TEMPLATE direct path failed, trying STORAGE_QUERY fallback\n");
-
-            UCHAR ibuf_rc[8] = {0};
-            SIZE_T recordCount = 0;
-            MyMem in_rc(ibuf_rc, sizeof(ibuf_rc)), out_rc((UCHAR *)&recordCount, sizeof(recordCount));
-            MyRequest req_rc(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out_rc, &in_rc);
-
-            myQueue->ioctl->OnDeviceIoControl(myQueue, &req_rc, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, 0);
-            while(!req_rc.complete)
-                Sleep(200);
-
-            printf("fallback: GET_RECORD_COUNT hresult=0x%lx (%s), count=%zu\n",
-                (unsigned long)req_rc.completionStatus,
-                hresult_to_sting(req_rc.completionStatus),
-                recordCount);
-
-            if(SUCCEEDED(req_rc.completionStatus) && recordCount > 0) {
-                DWORD queryBufSize = sizeof(SYNA_STORAGE_QUERY_INPUT) - sizeof(ULONG) + 0x78;
-                UCHAR *sbuf = (UCHAR *)calloc(1, queryBufSize);
-                SYNA_STORAGE_QUERY_INPUT *query = (SYNA_STORAGE_QUERY_INPUT *)sbuf;
-                query->QueryType = STORAGE_QUERY_TYPE_ALL;
-
-                DWORD resultBufSize = (DWORD)(sizeof(SYNA_STORAGE_QUERY_RESULT) + (recordCount - 1) * sizeof(SYNA_STORAGE_RECORD));
-                UCHAR *rbuf = (UCHAR *)calloc(1, resultBufSize);
-
-                MyMem in_s(sbuf, queryBufSize), out_s(rbuf, resultBufSize);
-                MyRequest req_s(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, &out_s, &in_s);
-
-                myQueue->ioctl->OnDeviceIoControl(myQueue, &req_s, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, 0, 0);
-                while(!req_s.complete)
-                    Sleep(200);
-
-                printf("fallback: STORAGE_QUERY hresult=0x%lx (%s), infoSize=%lld\n",
-                    (unsigned long)req_s.completionStatus,
-                    hresult_to_sting(req_s.completionStatus),
-                    (long long)req_s.informationSize);
-
-                if(SUCCEEDED(req_s.completionStatus)) {
-                    SYNA_STORAGE_QUERY_RESULT *result = (SYNA_STORAGE_QUERY_RESULT *)rbuf;
-                    printf("fallback: STORAGE_QUERY records=%llu\n", (unsigned long long)result->RecordCount);
-                }
-
-                free(sbuf);
-                free(rbuf);
-            }
-        }
+        HLOG_INFO("Enrollment commit successful\n");
     }
 
 }
@@ -4603,7 +4629,7 @@ reset()
     MyMem in(NULL, 0), out(buf, sizeof(buf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_RESET, &out, &in);
 
-    printf("about to Reset\r\n");
+    HLOG_USER("about to Reset\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_RESET, 0, 0);
 
     while(!req.complete)
@@ -4613,7 +4639,7 @@ reset()
 
 
     if(FAILED(req.completionStatus)) {
-        printf("RESET failed: hresult=0x%lx (%s)\n",
+        HLOG_INFO("RESET failed: hresult=0x%lx (%s)\n",
             (unsigned long)req.completionStatus,
             hresult_to_sting(req.completionStatus));
         return;
@@ -4621,16 +4647,16 @@ reset()
 
     if(req.informationSize >= (LONG_PTR)sizeof(WINBIO_BLANK_PAYLOAD)) {
         WINBIO_BLANK_PAYLOAD *payload = (WINBIO_BLANK_PAYLOAD *)buf;
-        printf("RESET complete: WinBioHresult=0x%lx (%s)\r\n",
+        HLOG_INFO("RESET complete: WinBioHresult=0x%lx (%s)\r\n",
             (unsigned long)payload->WinBioHresult,
             hresult_to_sting(payload->WinBioHresult));
     }
     else {
-        printf("RESET complete (short payload, infoSize=%lld): ", (long long)req.informationSize);
+        HLOG_INFO("RESET complete (short payload, infoSize=%lld): ", (long long)req.informationSize);
         SIZE_T dump = clampInfoSize(req.informationSize, sizeof(buf));
         for(SIZE_T i=0;i<dump;i++)
-            printf("%02x", buf[i]);
-        printf("\r\n");
+            HLOG_DEBUG("%02x", buf[i]);
+        HLOG_DEBUG("\r\n");
     }
 }
 
@@ -4643,13 +4669,13 @@ enroll()
     MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
     MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
-    printf("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
     while(!cal_req.complete)
         Sleep(200);
 
     if(FAILED(cal_req.completionStatus)) {
-        printf("CALIBRATE failed in enroll: hresult=0x%lx (%s)\n",
+        HLOG_USER("CALIBRATE failed in enroll: hresult=0x%lx (%s)\n",
             (unsigned long)cal_req.completionStatus,
             hresult_to_sting(cal_req.completionStatus));
         return;
@@ -4667,15 +4693,15 @@ enroll()
         MyMem in(ce_ibuf, sizeof(ce_ibuf)), out(ce_obuf, sizeof(ce_obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, &out, &in);
 
-        printf("about to IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT\r\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, 0, 0);
         while(!req.complete)
             Sleep(200);
 
-        printf("CREATE_ENROLLMENT: hresult=0x%lx (%s)\r\n", (unsigned long)req.completionStatus,
+        HLOG_INFO("CREATE_ENROLLMENT: hresult=0x%lx (%s)\r\n", (unsigned long)req.completionStatus,
             hresult_to_sting(req.completionStatus));
         if(FAILED(req.completionStatus)) {
-            printf("CREATE_ENROLLMENT failed, aborting enroll\r\n");
+            HLOG_USER("CREATE_ENROLLMENT failed, aborting enroll\r\n");
             return;
         }
     }
@@ -4702,28 +4728,29 @@ enroll()
         MyMem in(ibuf, sizeof(*params)), out(obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CAPTURE_DATA, &out, &in);
 
-        printf("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_CAPTURE_DATA, 0, 0);
         while(!req.complete)
             Sleep(200);
 
         if(FAILED(req.completionStatus)) {
-            printf("CAPTURE_DATA request failed: hresult=0x%lx (%s)\n",
+            HLOG_INFO("CAPTURE_DATA request failed: hresult=0x%lx (%s)\n",
                 (unsigned long)req.completionStatus,
                 hresult_to_sting(req.completionStatus));
             Sleep(100);
             continue;
         }
 
-        std::wcout
-            << L"=======================" << std::endl
-            << L"PayloadSize " << data->PayloadSize << std::endl
-            << L"WinBioHresult 0x" << std::hex << data->WinBioHresult << L" (" << hresult_to_sting(data->WinBioHresult) << L")" << std::endl
-            << L"SensorStatus " << std::dec << data->SensorStatus << std::endl
-            << L"RejectDetail 0x" << std::hex << data->RejectDetail << L" (" << reject_detail_to_string(data->RejectDetail) << L")" << std::dec << std::endl
-            << L"CaptureData.Size " << data->CaptureData.Size << std::endl
-            << L"=======================" << std::endl
-            ;
+        IFLOG(1) {
+            std::wcout
+                << L"=======================" << std::endl
+                << L"PayloadSize " << data->PayloadSize << std::endl
+                << L"WinBioHresult 0x" << std::hex << data->WinBioHresult << L" (" << hresult_to_sting(data->WinBioHresult) << L")" << std::endl
+                << L"SensorStatus " << std::dec << data->SensorStatus << std::endl
+                << L"RejectDetail 0x" << std::hex << data->RejectDetail << L" (" << reject_detail_to_string(data->RejectDetail) << L")" << std::dec << std::endl
+                << L"CaptureData.Size " << data->CaptureData.Size << std::endl
+                << L"=======================" << std::endl;
+        }
 
         // scan failed?
         if(data->SensorStatus == 2) {
@@ -4738,20 +4765,20 @@ enroll()
             MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
             MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, &out, &in);
 
-            printf("about to IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT\r\n");
+            HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT\r\n");
             myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, 0, 0);
             while(!req.complete)
                 Sleep(200);
 
-            printf("UPDATE_ENROLLMENT hresult=0x%lx (%s), data: ", (unsigned long)req.completionStatus,
+            HLOG_INFO("UPDATE_ENROLLMENT hresult=0x%lx (%s), data: ", (unsigned long)req.completionStatus,
                 hresult_to_sting(req.completionStatus));
             SIZE_T updateDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
             for(SIZE_T i=0;i<updateDumpSize;i++)
-                printf("%02x", obuf[i]);
-            printf("\n");
+                HLOG_DEBUG("%02x", obuf[i]);
+            HLOG_DEBUG("\n");
 
             if(FAILED(req.completionStatus) || req.informationSize < 0x30) {
-                printf("UPDATE_ENROLLMENT did not return expected payload (status=0x%lx, infoSize=%lld)\n",
+                HLOG_DEBUG("UPDATE_ENROLLMENT did not return expected payload (status=0x%lx, infoSize=%lld)\n",
                     (unsigned long)req.completionStatus,
                     (long long)req.informationSize);
                 break;
@@ -4763,7 +4790,7 @@ enroll()
             DWORD enrollStatus = *(DWORD*)obuf;
             DWORD enrollProgress = *(DWORD*)(obuf + 0x28);
             DWORD enrollReject = *(DWORD*)(obuf + 0x2c);
-            printf("Enrollment status=0x%lx (%s) progress=%lu%% reject=%s\n",
+            HLOG_USER("Enrollment status=0x%lx (%s) progress=%lu%% reject=%s\n",
                 (unsigned long)enrollStatus, hresult_to_sting(enrollStatus),
                 (unsigned long)enrollProgress, reject_detail_to_string(enrollReject));
             if(enrollStatus != WINBIO_I_MORE_DATA)
@@ -4778,16 +4805,16 @@ enroll()
         MyMem in(NULL, 0), out(obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE, &out, &in);
 
-        printf("about to IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE\r\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE, 0, 0);
         while(!req.complete)
             Sleep(200);
 
-        printf("Got back 0x%llx bytes: ", req.informationSize);
+        HLOG_INFO("Got back 0x%llx bytes: ", req.informationSize);
         SIZE_T dupDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
         for(SIZE_T i=0;i<dupDumpSize;i++)
-            printf("%02x", obuf[i]);
-        printf("\n");
+            HLOG_DEBUG("%02x", obuf[i]);
+        HLOG_DEBUG("\n");
     }
 
     Sleep(1000);
@@ -4803,15 +4830,15 @@ identifyAll()
         MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
         MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
-        printf("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
         while(!cal_req.complete)
             Sleep(200);
 
-        printf("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
+        HLOG_INFO("CALIBRATE: hresult=0x%lx (%s)\n", (unsigned long)cal_req.completionStatus,
             hresult_to_sting(cal_req.completionStatus));
         if(FAILED(cal_req.completionStatus)) {
-            printf("CALIBRATE failed, aborting identify-all\n");
+            HLOG_USER("CALIBRATE failed, aborting identify-all\n");
             return;
         }
     }
@@ -4822,17 +4849,17 @@ identifyAll()
         MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
         MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
 
-        printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
+        HLOG_INFO("SET_TEMPLATE_LIST (zero-list)\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
         while(!stl_req.complete)
             Sleep(200);
 
-        printf("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        HLOG_INFO("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\n",
             (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
             (long long)stl_req.informationSize);
 
         if(FAILED(stl_req.completionStatus)) {
-            printf("SET_TEMPLATE_LIST failed, aborting identify-all\n");
+            HLOG_USER("SET_TEMPLATE_LIST failed, aborting identify-all\n");
             return;
         }
     }
@@ -4840,56 +4867,39 @@ identifyAll()
     DWORD obufSize = 4096;
     UCHAR *obuf = (UCHAR *)calloc(1, obufSize);
     if(!obuf) {
-        printf("identifyAll: failed to allocate output buffer\n");
+        HLOG_USER("identifyAll: failed to allocate output buffer\n");
         return;
     }
     MyMem in(NULL, 0), out(obuf, obufSize);
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL (OnIdentifyAll)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL, 0, 0);
-    printf("returned from IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL dispatch, complete=%d\n", req.complete ? 1 : 0);
+    HLOG_INFO("returned from IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL dispatch, complete=%d\n", req.complete ? 1 : 0);
     while(!req.complete)
         Sleep(200);
 
-    printf("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\r\n",
+    HLOG_USER("IDENTIFY_ALL: hresult=0x%lx (%s), infoSize=%lld\n",
         (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
         (long long)req.informationSize);
 
-    printf("Output raw (first 84 bytes): ");
-    for(LONG_PTR i=0;i<84 && i<req.informationSize;i++)
-        printf("%02x", obuf[i]);
-    printf("\n");
-
-    if(req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
+    if(!FAILED(req.completionStatus) && req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_ALL_OUTPUT_WIRE)) {
         WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *identifyOut = (WINBIO_IDENTIFY_ALL_OUTPUT_WIRE *)obuf;
-        WINBIO_IDENTITY *identity = &identifyOut->Identity;
-        UCHAR subfactor = (UCHAR)identifyOut->SubFactor;
         HRESULT engineHr = identifyOut->EngineHresult;
 
-        printf("IDENTIFY_ALL parsed: IdentityType=%lu, SubFactor=%u, EngineHresult=0x%lx (%s)\n",
-            (unsigned long)identity->Type,
-            (unsigned)subfactor,
-            (unsigned long)engineHr,
-            hresult_to_sting(engineHr));
-
-        if(identity->Type == WINBIO_ID_TYPE_SID) {
-            printf("  SID[%lu]=", (unsigned long)identity->Value.AccountSid.Size);
-            for(ULONG j=0; j<identity->Value.AccountSid.Size && j<SECURITY_MAX_SID_SIZE; j++)
-                printf("%02x", identity->Value.AccountSid.Data[j]);
-            printf("\n");
-        }
-        else if(identity->Type == WINBIO_ID_TYPE_GUID) {
-            printf("  GUID=%08lx-%04x-%04x-",
-                (unsigned long)identity->Value.TemplateGuid.Data1,
-                identity->Value.TemplateGuid.Data2,
-                identity->Value.TemplateGuid.Data3);
-            for(int j=0;j<2;j++) printf("%02x", identity->Value.TemplateGuid.Data4[j]);
-            printf("-");
-            for(int j=2;j<8;j++) printf("%02x", identity->Value.TemplateGuid.Data4[j]);
-            printf("\n");
-        }
+        HLOG_USER("=== Match Result ===\n");
+        HLOG_USER("EngineHresult=0x%lx (%s)\n",
+            (unsigned long)engineHr, hresult_to_sting(engineHr));
+        HLOG_USER("SubFactor=%u (%s)\n",
+            (unsigned)identifyOut->SubFactor,
+            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)identifyOut->SubFactor));
+        display_identity(&identifyOut->Identity, "");
     }
+
+    HLOG_DEBUG("IDENTIFY_ALL raw (%lld bytes): ", (long long)req.informationSize);
+    for(LONG_PTR i=0;i<req.informationSize && i<96;i++)
+        HLOG_DEBUG("%02x", obuf[i]);
+    HLOG_DEBUG("\n");
 
     free(obuf);
 }
@@ -4902,13 +4912,13 @@ setLed(WINBIO_INDICATOR_STATUS state)
     MyMem in((UCHAR*)&ibuf, sizeof(ibuf)), out((UCHAR*)&obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE (OnSetLedState, state=%s)\r\n",
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE (OnSetLedState, state=%s)\r\n",
         state == WINBIO_INDICATOR_ON ? "WINBIO_INDICATOR_ON" : "WINBIO_INDICATOR_OFF");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, 0, 0);
     while(!req.complete)
         Sleep(200);
 
-    printf("SET_LED_STATE: hresult=0x%lx (%s)\r\n",
+    HLOG_INFO("SET_LED_STATE: hresult=0x%lx (%s)\r\n",
         (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
 }
 
@@ -4920,23 +4930,23 @@ listDatabase()
     MyMem in_rc(ibuf_rc, sizeof(ibuf_rc)), out_rc((UCHAR*)&recordCount, sizeof(recordCount));
     MyRequest req_rc(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out_rc, &in_rc);
 
-    printf("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT (WbioStorageGetRecordCount)\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT (WbioStorageGetRecordCount)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req_rc, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, 0);
     while(!req_rc.complete)
         Sleep(200);
 
-    printf("GET_RECORD_COUNT: hresult=0x%lx (%s)\r\n",
+    HLOG_INFO("GET_RECORD_COUNT: hresult=0x%lx (%s)\r\n",
         (unsigned long)req_rc.completionStatus, hresult_to_sting(req_rc.completionStatus));
 
     if(FAILED(req_rc.completionStatus)) {
-        printf("GET_RECORD_COUNT failed\r\n");
+        HLOG_USER("GET_RECORD_COUNT failed\r\n");
         return;
     }
 
-    printf("Record count: %zu\r\n", recordCount);
+    HLOG_USER("Record count: %zu\r\n", recordCount);
 
     if(recordCount == 0) {
-        printf("Database is empty\r\n");
+        HLOG_USER("Database is empty\r\n");
         return;
     }
 
@@ -4945,11 +4955,11 @@ listDatabase()
         UCHAR gcd_obuf[256] = {0};
         MyMem gcd_in(gcd_ibuf, sizeof(gcd_ibuf)), gcd_out(gcd_obuf, sizeof(gcd_obuf));
         MyRequest gcd_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, &gcd_out, &gcd_in);
-        printf("about to IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA (OnGetCommonData)\r\n");
+        HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA (OnGetCommonData)\r\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &gcd_req, IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA, 0, 0);
         while(!gcd_req.complete)
             Sleep(200);
-        printf("GET_COMMON_DATA: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        HLOG_INFO("GET_COMMON_DATA: hresult=0x%lx (%s), infoSize=%lld\r\n",
             (unsigned long)gcd_req.completionStatus, hresult_to_sting(gcd_req.completionStatus),
             (long long)gcd_req.informationSize);
     }
@@ -4959,11 +4969,11 @@ listDatabase()
         UCHAR stl_obuf[4] = {0};
         MyMem stl_in((UCHAR *)&stl_zero, sizeof(stl_zero)), stl_out(stl_obuf, sizeof(stl_obuf));
         MyRequest stl_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, &stl_out, &stl_in);
-        printf("about to IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST (OnSetTemplateList)\r\n");
+        HLOG_INFO("SET_TEMPLATE_LIST (zero-list)\n");
         myQueue->ioctl->OnDeviceIoControl(myQueue, &stl_req, IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST, 0, 0);
         while(!stl_req.complete)
             Sleep(200);
-        printf("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\r\n",
+        HLOG_INFO("SET_TEMPLATE_LIST: hresult=0x%lx (%s), infoSize=%lld\n",
             (unsigned long)stl_req.completionStatus, hresult_to_sting(stl_req.completionStatus),
             (long long)stl_req.informationSize);
     }
@@ -4972,7 +4982,7 @@ listDatabase()
 
     {
         UCHAR *eis_ptr = *(UCHAR **)(((UCHAR *)myDevice) + 0x428);
-        printf("EIS object at %p, flag 0xf8=%u, vec begin=%p, vec end=%p\n",
+        HLOG_USER("EIS object at %p, flag 0xf8=%u, vec begin=%p, vec end=%p\n",
             eis_ptr,
             eis_ptr ? (unsigned)eis_ptr[0xf8] : 0,
             eis_ptr ? *(void **)(eis_ptr + 0x120) : NULL,
@@ -4990,101 +5000,70 @@ listDatabase()
     MyMem in_s(sbuf, queryBufSize), out_s(rbuf, resultBufSize);
     MyRequest req_s(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, &out_s, &in_s);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY (OnStorageQuery, STORAGE_QUERY_TYPE_ALL)\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY (OnStorageQuery, STORAGE_QUERY_TYPE_ALL)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req_s, IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY, 0, 0);
     while(!req_s.complete)
         Sleep(200);
 
-    printf("STORAGE_QUERY: hresult=0x%lx (%s), infoSize=%lld\r\n",
+    HLOG_INFO("STORAGE_QUERY: hresult=0x%lx (%s), infoSize=%lld\r\n",
         (unsigned long)req_s.completionStatus, hresult_to_sting(req_s.completionStatus),
         (long long)req_s.informationSize);
 
-    printf("Output buffer raw (first 64 bytes): ");
+    HLOG_DEBUG("Output buffer raw (first 64 bytes): ");
     for(int i=0;i<64 && i<(int)resultBufSize;i++)
-        printf("%02x", rbuf[i]);
-    printf("\n");
+        HLOG_DEBUG("%02x", rbuf[i]);
+    HLOG_DEBUG("\n");
 
-    printf("Input buffer raw (first 64 bytes): ");
+    HLOG_DEBUG("Input buffer raw (first 64 bytes): ");
     for(int i=0;i<64 && i<(int)queryBufSize;i++)
-        printf("%02x", sbuf[i]);
-    printf("\n");
+        HLOG_DEBUG("%02x", sbuf[i]);
+    HLOG_DEBUG("\n");
 
     SYNA_STORAGE_QUERY_RESULT *result = (SYNA_STORAGE_QUERY_RESULT *)rbuf;
 
     if(FAILED(req_s.completionStatus)) {
-        printf("STORAGE_QUERY failed\r\n");
+        HLOG_USER("STORAGE_QUERY failed\r\n");
         free(sbuf);
         free(rbuf);
         return;
     }
 
-    printf("Returned records: %llu\r\n", (unsigned long long)result->RecordCount);
+    HLOG_USER("Returned records: %llu\r\n", (unsigned long long)result->RecordCount);
 
     for(DWORD i=0; i<result->RecordCount && i<maxRecords; i++) {
         SYNA_STORAGE_RECORD *rec = &result->Records[i];
-        printf("  [%lu] Type=%lu Subfactor=%u ",
+        HLOG_USER("[%lu] IdentityType=%lu Subfactor=%u\n",
             (unsigned long)i,
             (unsigned long)rec->Identity.Type,
             (unsigned)rec->SubFactor);
         if(rec->Identity.Type == WINBIO_ID_TYPE_SID) {
-            printf("SID size=%lu ",
+            HLOG_USER("    SID size=%lu Data=",
                 (unsigned long)rec->Identity.Value.AccountSid.Size);
             for(ULONG j=0; j<rec->Identity.Value.AccountSid.Size && j<SECURITY_MAX_SID_SIZE; j++)
-                printf("%02x", rec->Identity.Value.AccountSid.Data[j]);
+                HLOG_USER("%02x", rec->Identity.Value.AccountSid.Data[j]);
+            HLOG_USER("\n");
         } else if(rec->Identity.Type == WINBIO_ID_TYPE_GUID) {
-            printf("GUID=%08lx-%04x-%04x-",
+            HLOG_USER("    GUID=%08lx-%04x-%04x-",
                 (unsigned long)rec->Identity.Value.TemplateGuid.Data1,
                 rec->Identity.Value.TemplateGuid.Data2,
                 rec->Identity.Value.TemplateGuid.Data3);
-            for(int j=0;j<8;j++) printf("%02x", rec->Identity.Value.TemplateGuid.Data4[j]);
+            for(int j=0;j<8;j++) HLOG_USER("%02x", rec->Identity.Value.TemplateGuid.Data4[j]);
+            HLOG_USER("\n");
         } else {
-            printf("Value=%lu", (unsigned long)rec->Identity.Value.Wildcard);
+            HLOG_USER("    IdentityValue=%lu\n", (unsigned long)rec->Identity.Value.Wildcard);
         }
-        printf("\n");
-        printf("    TemplateBlobSize=%llu\n", (unsigned long long)rec->TemplateBlobSize);
+        HLOG_USER("    TemplateBlobSize=%llu\n", (unsigned long long)rec->TemplateBlobSize);
         if(rec->TemplateBlobSize > 0) {
             SIZE_T showSize = rec->TemplateBlobSize < sizeof(rec->TemplateBlob) ? rec->TemplateBlobSize : sizeof(rec->TemplateBlob);
-            printf("    TemplateBlob[%zu]=", showSize);
+            HLOG_USER("    TemplateBlob[%zu]=", showSize);
             for(SIZE_T j=0;j<showSize;j++)
-                printf("%02x", rec->TemplateBlob[j]);
-            printf("\n");
+                HLOG_USER("%02x", rec->TemplateBlob[j]);
+            HLOG_USER("\n");
         }
     }
 
     free(sbuf);
     free(rbuf);
-}
-
-static bool
-refreshTemplateCacheFromGetTemplate()
-{
-    UCHAR inbuf[0x54] = {0};
-    WINBIO_IDENTITY *id = (WINBIO_IDENTITY *)inbuf;
-    WINBIO_BIOMETRIC_SUBTYPE *sub = (WINBIO_BIOMETRIC_SUBTYPE *)(inbuf + sizeof(WINBIO_IDENTITY));
-    UCHAR outbuf[0x54] = {0};
-
-    id->Type = WINBIO_ID_TYPE_WILDCARD;
-    id->Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
-    *sub = WINBIO_SUBTYPE_ANY;
-
-    MyMem in(inbuf, sizeof(inbuf)), out(outbuf, sizeof(outbuf));
-    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, &out, &in);
-
-    printf("cache-refresh: GET_TEMPLATE inputSize=%zu outputSize=%zu\n", sizeof(inbuf), sizeof(outbuf));
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE, 0, 0);
-    while(!req.complete)
-        Sleep(200);
-
-    printf("cache-refresh: GET_TEMPLATE hresult=0x%lx (%s), infoSize=%lld\n",
-        (unsigned long)req.completionStatus,
-        hresult_to_sting(req.completionStatus),
-        (long long)req.informationSize);
-
-    if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(outbuf))
-        return false;
-
-    printf("cache-refresh: GET_TEMPLATE succeeded, identity available from device\n");
-    return true;
 }
 
 void
@@ -5093,12 +5072,12 @@ clearDatabase()
     MyMem in(NULL, 0), out(NULL, 0);
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE (OnEraseDatabase)\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE (OnEraseDatabase)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE, 0, 0);
     while(!req.complete)
         Sleep(200);
 
-    printf("ERASE_DATABASE: hresult=0x%lx (%s)\r\n",
+    HLOG_INFO("ERASE_DATABASE: hresult=0x%lx (%s)\r\n",
         (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
 }
 
@@ -5111,24 +5090,25 @@ getSensorStatus()
     MyMem in(NULL, 0), out(buf, sizeof(buf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_GET_SENSOR_STATUS\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_GET_SENSOR_STATUS\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_SENSOR_STATUS, 0, 0);
     while(!req.complete)
         Sleep(200);
     //Sleep(4000);
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
     //Sleep(4000);
-    std::wcout
-        << L"=======================" << std::endl
-        << L"PayloadSize " << diag->PayloadSize << std::endl
-        << L"WinBioHresult " << diag->WinBioHresult << std::endl
-        << L"SensorStatus " << diag->SensorStatus << std::endl
-        << L"VendorDiagnostics.Size " << diag->VendorDiagnostics.Size << std::endl
-        << L"=======================" << std::endl
-        ;
+    IFLOG(1) {
+        std::wcout
+            << L"=======================" << std::endl
+            << L"PayloadSize " << diag->PayloadSize << std::endl
+            << L"WinBioHresult " << diag->WinBioHresult << std::endl
+            << L"SensorStatus " << diag->SensorStatus << std::endl
+            << L"VendorDiagnostics.Size " << diag->VendorDiagnostics.Size << std::endl
+            << L"=======================" << std::endl;
+    }
 
     if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(WINBIO_DIAGNOSTICS)) {
-        printf("GET_SENSOR_STATUS returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
+        HLOG_INFO("GET_SENSOR_STATUS returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
             (unsigned long)req.completionStatus,
             hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
@@ -5145,24 +5125,25 @@ resetIoctl()
     MyMem in(NULL, 0), out(buf, sizeof(buf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_RESET, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_RESET\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_RESET\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_RESET, 0, 0);
     while(!req.complete)
         Sleep(200);
 
     if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)sizeof(WINBIO_BLANK_PAYLOAD)) {
-        printf("RESET returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
+        HLOG_DEBUG("RESET returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
             (unsigned long)req.completionStatus,
             hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
         return;
     }
 
-    std::wcout
-        << L"=======================" << std::endl
-        << L"WinBioHresult " << diag->WinBioHresult << std::endl
-        << L"=======================" << std::endl
-        ;
+    IFLOG(1) {
+        std::wcout
+            << L"=======================" << std::endl
+            << L"WinBioHresult " << diag->WinBioHresult << std::endl
+            << L"=======================" << std::endl;
+    }
 }
 
 void
@@ -5173,7 +5154,7 @@ getAttributes()
     MyMem in(NULL, 0), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_ATTRIBUTES, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_GET_ATTRIBUTES\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_GET_ATTRIBUTES\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_ATTRIBUTES, 0, 0);
     //Sleep(1000);
     //rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
@@ -5181,7 +5162,7 @@ getAttributes()
         Sleep(200);
 
     if(FAILED(req.completionStatus) || req.informationSize < (LONG_PTR)offsetof(WINBIO_SENSOR_ATTRIBUTES, SupportedFormat)) {
-        printf("GET_ATTRIBUTES returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
+        HLOG_INFO("GET_ATTRIBUTES returned unexpected payload: status=0x%lx (%s), infoSize=%lld\n",
             (unsigned long)req.completionStatus,
             hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
@@ -5197,29 +5178,30 @@ getAttributes()
     if(attrsFormatsToPrint > attrsFormatsCapacity)
         attrsFormatsToPrint = (ULONG)attrsFormatsCapacity;
 
-    printf("WinBioHresult = %lx\r\n", attrs->WinBioHresult);
-    std::wcout
-        << L"=======================" << std::endl
-        << L"  PayloadSize: " << attrs->PayloadSize << std::endl
-        << L"  ManufacturerName: " << attrs->ManufacturerName  << std::endl
-        << L"  ModelName: " << attrs->ModelName  << std::endl
-        << L"  SensorType: " << attrs->SensorType << std::endl
-        << L"  SensorSubType: " << attrs->SensorSubType << std::endl
-        << L"  Capabilities: " << attrs->Capabilities << std::endl
-        << L"  SerialNumber: " << attrs->SerialNumber << std::endl
-        << L"  FirmwareVersion: " << attrs->FirmwareVersion.MajorVersion << "." << attrs->FirmwareVersion.MinorVersion << std::endl
-        << L"  SupportedFormatEntries: " << attrs->SupportedFormatEntries << std::endl;
-        for(ULONG i=0;i<attrsFormatsToPrint;i++) {
-            printf("    Owner=%04x, Type=%04x\n",
-                attrs->SupportedFormat[i].Owner,
-                attrs->SupportedFormat[i].Type);
+    HLOG_INFO("WinBioHresult = %lx\r\n", attrs->WinBioHresult);
+    IFLOG(1) {
+        std::wcout
+            << L"=======================" << std::endl
+            << L"  PayloadSize: " << attrs->PayloadSize << std::endl
+            << L"  ManufacturerName: " << attrs->ManufacturerName  << std::endl
+            << L"  ModelName: " << attrs->ModelName  << std::endl
+            << L"  SensorType: " << attrs->SensorType << std::endl
+            << L"  SensorSubType: " << attrs->SensorSubType << std::endl
+            << L"  Capabilities: " << attrs->Capabilities << std::endl
+            << L"  SerialNumber: " << attrs->SerialNumber << std::endl
+            << L"  FirmwareVersion: " << attrs->FirmwareVersion.MajorVersion << "." << attrs->FirmwareVersion.MinorVersion << std::endl
+            << L"  SupportedFormatEntries: " << attrs->SupportedFormatEntries << std::endl;
+            for(ULONG i=0;i<attrsFormatsToPrint;i++) {
+                HLOG_DEBUG("    Owner=%04x, Type=%04x\n",
+                    attrs->SupportedFormat[i].Owner,
+                    attrs->SupportedFormat[i].Type);
+            }
+        if(attrsFormatsToPrint != attrs->SupportedFormatEntries) {
+            HLOG_INFO("  NOTE: truncated SupportedFormatEntries to %lu based on infoSize\n",
+                (unsigned long)attrsFormatsToPrint);
         }
-    if(attrsFormatsToPrint != attrs->SupportedFormatEntries) {
-        printf("  NOTE: truncated SupportedFormatEntries to %lu based on infoSize\n",
-            (unsigned long)attrsFormatsToPrint);
+        std::wcout << L"=======================" << std::endl;
     }
-    std::wcout
-        << L"=======================" << std::endl;
 }
 
 void
@@ -5231,11 +5213,11 @@ setMode(unsigned short mode)
     // 0x44204C has no handler in driver dispatch - falls to OnControlUnit (E_NOTIMPL)
     MyRequest req(WdfRequestOther, 0x44204C, &out, &in);
 
-    printf("about to setMode (0x44204C - no handler)\r\n");
+    HLOG_USER("about to setMode (0x44204C - no handler)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44204C, 0, 0);
     while(!req.complete)
         Sleep(200);
-    printf("setMode complete: hresult=0x%lx (%s), infoSize=%lld\n",
+    HLOG_INFO("setMode complete: hresult=0x%lx (%s), infoSize=%lld\n",
         (unsigned long)req.completionStatus,
         hresult_to_sting(req.completionStatus),
         (long long)req.informationSize);
@@ -5254,19 +5236,19 @@ deleteRecord(DWORD subfactor)
     MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD (OnDeleteFinger, subfactor=%lu)\r\n",
+    HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD (OnDeleteFinger, subfactor=%lu)\r\n",
         (unsigned long)subfactor);
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, 0, 0);
     while(!req.complete)
         Sleep(200);
 
-    printf("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
+    HLOG_INFO("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
         (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
-    printf("Raw output: ");
+    HLOG_INFO("Raw output: ");
     SIZE_T deleteDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
     for(SIZE_T i=0;i<deleteDumpSize;i++)
-        printf("%02x", obuf[i]);
-    printf("\n");
+        HLOG_DEBUG("%02x", obuf[i]);
+    HLOG_DEBUG("\n");
 }
 
 void
@@ -5275,12 +5257,12 @@ discardEnrollment()
     MyMem in(NULL, 0), out(NULL, 0);
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT, 0, 0);
     while(!req.complete)
         Sleep(200);
 
-    printf("DISCARD_ENROLLMENT: hresult=0x%lx (%s), infoSize=%lld\n",
+    HLOG_INFO("DISCARD_ENROLLMENT: hresult=0x%lx (%s), infoSize=%lld\n",
         (unsigned long)req.completionStatus,
         hresult_to_sting(req.completionStatus),
         (long long)req.informationSize);
@@ -5296,19 +5278,19 @@ setIndicator(WINBIO_INDICATOR_STATUS status)
     MyMem in((UCHAR*)&setInd, sizeof(setInd)), out((UCHAR*)&getInd, sizeof(getInd));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_SET_INDICATOR, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_SET_INDICATOR (SensorAdapterSetIndicatorStatus, status=%s)\r\n",
+    HLOG_USER("about to IOCTL_BIOMETRIC_SET_INDICATOR (SensorAdapterSetIndicatorStatus, status=%s)\r\n",
         status == WINBIO_INDICATOR_ON ? "WINBIO_INDICATOR_ON" : "WINBIO_INDICATOR_OFF");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_SET_INDICATOR, 0, 0);
     while(!req.complete)
         Sleep(200);
 
     if(req.informationSize >= (LONG_PTR)sizeof(getInd)) {
-        printf("SET_INDICATOR: hresult=0x%lx (%s), getInd.WinBioHresult=0x%lx, getInd.IndicatorStatus=%lu\r\n",
+        HLOG_INFO("SET_INDICATOR: hresult=0x%lx (%s), getInd.WinBioHresult=0x%lx, getInd.IndicatorStatus=%lu\r\n",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
             (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
     }
     else {
-        printf("SET_INDICATOR: hresult=0x%lx (%s), short output infoSize=%lld\r\n",
+        HLOG_INFO("SET_INDICATOR: hresult=0x%lx (%s), short output infoSize=%lld\r\n",
             (unsigned long)req.completionStatus,
             hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
@@ -5322,18 +5304,18 @@ getIndicator()
     MyMem in(NULL, 0), out((UCHAR*)&getInd, sizeof(getInd));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_GET_INDICATOR, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_GET_INDICATOR (SensorAdapterGetIndicatorStatus)\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_GET_INDICATOR (SensorAdapterGetIndicatorStatus)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_GET_INDICATOR, 0, 0);
     while(!req.complete)
         Sleep(200);
 
     if(req.informationSize >= (LONG_PTR)sizeof(getInd)) {
-        printf("GET_INDICATOR: hresult=0x%lx (%s), WinBioHresult=0x%lx, IndicatorStatus=%lu\r\n",
+        HLOG_INFO("GET_INDICATOR: hresult=0x%lx (%s), WinBioHresult=0x%lx, IndicatorStatus=%lu\r\n",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus),
             (unsigned long)getInd.WinBioHresult, (unsigned long)getInd.IndicatorStatus);
     }
     else {
-        printf("GET_INDICATOR: hresult=0x%lx (%s), short output infoSize=%lld\r\n",
+        HLOG_INFO("GET_INDICATOR: hresult=0x%lx (%s), short output infoSize=%lld\r\n",
             (unsigned long)req.completionStatus,
             hresult_to_sting(req.completionStatus),
             (long long)req.informationSize);
@@ -5348,12 +5330,12 @@ getDatabaseSize()
     MyMem in(ibuf, sizeof(ibuf)), out((UCHAR *)&recordCount, sizeof(recordCount));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out, &in);
 
-    printf("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT\r\n");
+    HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, 0);
     while(!req.complete)
         Sleep(200);
 
-    printf("GET_RECORD_COUNT: hresult=0x%lx (%s), infoSize=%lld, count=%zu\n",
+    HLOG_INFO("GET_RECORD_COUNT: hresult=0x%lx (%s), infoSize=%lld, count=%zu\n",
         (unsigned long)req.completionStatus,
         hresult_to_sting(req.completionStatus),
         (long long)req.informationSize,
@@ -5369,7 +5351,7 @@ blah()
 void
 handle_blah(_EXCEPTION_POINTERS *ExceptionInfo)
 {
-    printf("Yay! Breakpoints work\n");
+    HLOG_USER("Yay! Breakpoints work\n");
 }
 
 void
@@ -5377,22 +5359,22 @@ handle_trace(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
 
-    printf("Trace: %s:%lld\n", ctx->Rcx, ctx->Rdx);
+    HLOG_TRACE("Trace: %s:%lld\n", ctx->Rcx, ctx->Rdx);
 }
 
 void
 handle_reset_calib_data_and_calibrate(_EXCEPTION_POINTERS *ExceptionInfo)
 {
-    printf("reset_calib_data_and_calibrate:\n");
+    HLOG_TRACE("reset_calib_data_and_calibrate:\n");
     print_regs(ExceptionInfo);
 }
 
 void
 handle_calibrate_iteration(_EXCEPTION_POINTERS *ExceptionInfo)
 {
-    printf("==========================================================================================\n");
-    printf("                          PHASE %d\n", ExceptionInfo->ContextRecord->Rdx);
-    printf("==========================================================================================\n");
+    HLOG_DEBUG("==========================================================================================\n");
+    HLOG_TRACE("                          PHASE %d\n", ExceptionInfo->ContextRecord->Rdx);
+    HLOG_DEBUG("==========================================================================================\n");
 }
 
 const uint8_t target[] = {
@@ -5411,16 +5393,16 @@ handle_malloc(_EXCEPTION_POINTERS *ExceptionInfo)
     uint32_t len = (uint32_t)rsp[5+1];
     size_t i;
 
-    printf("malloc %ld: %p\n", len, rax);
+    HLOG_TRACE("malloc %ld: %p\n", len, rax);
     if(len == 13440) {
 
         for(i=0;i<40;i++) {
-            printf("    %016llx\n", rsp[i]);
+            HLOG_DEBUG("    %016llx\n", rsp[i]);
         }
     }
 
     if(len == 728) {
-        printf("Allocating BiometricDevice!\n");
+        HLOG_USER("Allocating BiometricDevice!\n");
     }
 }
 
@@ -5437,14 +5419,14 @@ handle_memmove(_EXCEPTION_POINTERS *ExceptionInfo)
     //size_t len = ctx->R8;
     size_t i;
 
-    printf("memmove %p -> %p (%lld): ", src, dst, len);
+    HLOG_TRACE("memmove %p -> %p (%lld): ", src, dst, len);
     for(i=0;i<len;i++)
-        printf("%02x", src[i]);
+        HLOG_DEBUG("%02x", src[i]);
     puts("");
 
     if(len >= sizeof(target) && memcmp(src, target, sizeof(target)) == 0) {
         for(i=0;i<40;i++) {
-            printf("    %016llx\n", rsp[i]);
+            HLOG_DEBUG("    %016llx\n", rsp[i]);
         }
     }
 }
@@ -5457,9 +5439,9 @@ handle_x(_EXCEPTION_POINTERS *ExceptionInfo)
     uint8_t *src = (uint8_t*)ctx->Rcx;
     int i;
 
-    printf("set sensor type before: ");
+    HLOG_TRACE("set sensor type before: ");
     for(i=0;i<0x40;i++)
-        printf("%02x", src[i]);
+        HLOG_DEBUG("%02x", src[i]);
     puts("");
 }
 
@@ -5473,15 +5455,15 @@ handle_x_end(_EXCEPTION_POINTERS *ExceptionInfo)
 
     //print_regs(ExceptionInfo);
     rsp += 0x78/8;
-    printf("arg_0=%016llx\n", rsp[0x8/8]);
-    printf("arg_8=%016llx\n", rsp[0x10/8]);
-    printf("arg_10=%016llx\n", rsp[0x18/8]);
-    printf("arg_18=%016llxd\n", rsp[0x20/8]);
+    HLOG_TRACE("arg_0=%016llx\n", rsp[0x8/8]);
+    HLOG_TRACE("arg_8=%016llx\n", rsp[0x10/8]);
+    HLOG_TRACE("arg_10=%016llx\n", rsp[0x18/8]);
+    HLOG_TRACE("arg_18=%016llxd\n", rsp[0x20/8]);
 
     src = (uint8_t *)rsp[0x8/8];
-    printf("set sensor type after: ");
+    HLOG_TRACE("set sensor type after: ");
     for(i=0;i<0x40;i++)
-        printf("%02x", src[i]);
+        HLOG_DEBUG("%02x", src[i]);
     puts("");
 }
 
@@ -5490,48 +5472,48 @@ print_biometric_device(uint64_t *rcx)
 {
     size_t i, j;
 
-    printf("Biometric device: %p\n", rcx);
+    HLOG_TRACE("Biometric device: %p\n", rcx);
     for(i=0;i<140;i++) {
-        printf("    %04llx: 0x%016llx\n", i*8, rcx[i]);
+        HLOG_TRACE("    %04llx: 0x%016llx\n", i*8, rcx[i]);
         if(i*8 == 0x28) { // device/fw info (as returned by cmd_01)
             uint64_t *f28 = (uint64_t *)rcx[i];
             for(j=0;j<10;j++) {
-                printf("        %04llx: 0x%016llx\n", j*8, f28[j]);
+                HLOG_TRACE("        %04llx: 0x%016llx\n", j*8, f28[j]);
             }
         }
 
         if(i*8 == 0x288) { // calibration info
             uint64_t *f28 = (uint64_t *)rcx[i];
             for(j=0;j<40;j++) {
-                printf("        %04llx: 0x%016llx\n", j*8, f28[j]);
+                HLOG_TRACE("        %04llx: 0x%016llx\n", j*8, f28[j]);
                 if(j*8 == 0x80 && f28[j]) {
                     uint8_t *cal_blob = (uint8_t *)f28[j];
                     int k;
-                    printf("            Calibration blob: ");
+                    HLOG_TRACE("            Calibration blob: ");
                     for(k=0;k<0x80;k++) {
-                        printf("%02x", cal_blob[k]);
+                        HLOG_DEBUG("%02x", cal_blob[k]);
                     }
-                    printf("...\n");
+                    HLOG_TRACE("...\n");
                 }
 
                 if(j*8 == 0x68 && f28[j]) {
                     uint8_t *cal_blob = (uint8_t *)f28[j];
                     int k;
-                    printf("            field_68: ");
+                    HLOG_TRACE("            field_68: ");
                     for(k=0;k<0x80;k++) {
-                        printf("%02x", cal_blob[k]);
+                        HLOG_DEBUG("%02x", cal_blob[k]);
                     }
-                    printf("...\n");
+                    HLOG_TRACE("...\n");
                 }
 
                 if(j*8 == 0x98 && f28[j]) {
                     uint8_t *cal_blob = (uint8_t *)f28[j];
                     int k;
-                    printf("            Calibration blob2: ");
+                    HLOG_TRACE("            Calibration blob2: ");
                     for(k=0;k<0x80;k++) {
-                        printf("%02x", cal_blob[k]);
+                        HLOG_DEBUG("%02x", cal_blob[k]);
                     }
-                    printf("...\n");
+                    HLOG_TRACE("...\n");
             }
         }
     }
@@ -5553,7 +5535,7 @@ handle_line_update(_EXCEPTION_POINTERS *ExceptionInfo)
 void
 pp(uint64_t *tmp)
 {
-    printf(" %016llx %016llx\n", tmp[0], tmp[1]);
+    HLOG_DEBUG(" %016llx %016llx\n", tmp[0], tmp[1]);
 }
 
 void
@@ -5572,7 +5554,7 @@ handle_create_line_transform_segment(_EXCEPTION_POINTERS *ExceptionInfo)
 
     print_regs(ExceptionInfo);
     for(i=0;i<40;i++) {
-        printf("    %016llx\n", rsp[i]);
+        HLOG_DEBUG("    %016llx\n", rsp[i]);
     }
 }
 
@@ -5584,9 +5566,9 @@ handle_z(_EXCEPTION_POINTERS *ExceptionInfo)
     int i;
 
     print_regs(ExceptionInfo);
-    printf("z: ");
+    HLOG_TRACE("z: ");
     for(i=0;i<0x20;i++)
-        printf("%02x", src[i]);
+        HLOG_DEBUG("%02x", src[i]);
     puts("");
 }
 
@@ -5602,13 +5584,13 @@ handle_avg(_EXCEPTION_POINTERS *ExceptionInfo)
     int i;
 
     print_regs(ExceptionInfo);
-    printf("In: ");
+    HLOG_TRACE("In: ");
     for(i=0;i<0x200;i++)
-        printf("%02x", src[i]);
+        HLOG_DEBUG("%02x", src[i]);
     puts("");
-    printf("Out: ");
+    HLOG_TRACE("Out: ");
     for(i=0;i<0x200;i++)
-        printf("%02x", dst[i]);
+        HLOG_DEBUG("%02x", dst[i]);
     puts("");
 }
 
@@ -5625,9 +5607,9 @@ handle_scale_calibration_buffer_start(_EXCEPTION_POINTERS *ExceptionInfo)
     calib_results= biometricDevice + 0xd8/8;
     src = (uint8_t *)calib_results[0x10/8];
     if(src) {
-        printf("In: ");
+        HLOG_TRACE("In: ");
         for(i=0;i<0x200;i++)
-            printf("%02x", src[i]);
+            HLOG_DEBUG("%02x", src[i]);
         puts("");
     }
 }
@@ -5643,9 +5625,9 @@ handle_scale_calibration_buffer_end(_EXCEPTION_POINTERS *ExceptionInfo)
     int i;
 
     rsp += 0xc8/8;
-    printf("arg_28=%d\n", (uint16_t)rsp[0x30/8]);
-    printf("arg_8=%d\n", (uint16_t)rsp[0x10/8]);
-    printf("arg_10=%d\n", (uint16_t)rsp[0x18/8]);
+    HLOG_TRACE("arg_28=%d\n", (uint16_t)rsp[0x30/8]);
+    HLOG_TRACE("arg_8=%d\n", (uint16_t)rsp[0x10/8]);
+    HLOG_TRACE("arg_10=%d\n", (uint16_t)rsp[0x18/8]);
 
     biometricDevice = (uint64_t *)rsp[8/8];
     if(biometricDevice) {
@@ -5653,17 +5635,17 @@ handle_scale_calibration_buffer_end(_EXCEPTION_POINTERS *ExceptionInfo)
         calib_results= biometricDevice + 0xd8/8;
         src = (uint8_t *)calib_results[0x10/8];
         if(src) {
-            printf("In: ");
+            HLOG_TRACE("In: ");
             for(i=0;i<0x200;i++)
-                printf("%02x", src[i]);
+                HLOG_DEBUG("%02x", src[i]);
             puts("");
         }
 
         calib_info = (uint64_t *)biometricDevice[0x288/8];
         dst = (uint8_t *)calib_info[0x80/8];
-        printf("Out: ");
+        HLOG_TRACE("Out: ");
         for(i=0;i<0x200;i++)
-            printf("%02x", dst[i]);
+            HLOG_DEBUG("%02x", dst[i]);
         puts("");
     }
 }
@@ -5680,10 +5662,10 @@ handle_sub_180067360(_EXCEPTION_POINTERS *ExceptionInfo)
 
     print_regs(ExceptionInfo);
     rsp += 0x58/8;
-    printf("arg_0=%016llx\n", rsp[0x8/8]);
-    printf("arg_8=%016llx\n", rsp[0x10/8]);
-    printf("arg_10=%016llx\n", rsp[0x18/8]);
-    printf("arg_18=%016llxd\n", rsp[0x20/8]);
+    HLOG_TRACE("arg_0=%016llx\n", rsp[0x8/8]);
+    HLOG_TRACE("arg_8=%016llx\n", rsp[0x10/8]);
+    HLOG_TRACE("arg_10=%016llx\n", rsp[0x18/8]);
+    HLOG_TRACE("arg_18=%016llxd\n", rsp[0x20/8]);
 
     biometricDevice = (uint64_t *)rsp[8/8];
     if(biometricDevice) {
@@ -5693,9 +5675,9 @@ handle_sub_180067360(_EXCEPTION_POINTERS *ExceptionInfo)
         calib_results= biometricDevice + 0xd8/8;
         src = (uint8_t *)calib_results[0x10/8];
         if(src) {
-            printf("Avg: ");
+            HLOG_TRACE("Avg: ");
             for(i=0;i<0x200;i++)
-                printf("%02x", src[i]);
+                HLOG_DEBUG("%02x", src[i]);
             puts("");
         }
 
@@ -5703,9 +5685,9 @@ handle_sub_180067360(_EXCEPTION_POINTERS *ExceptionInfo)
         if(calib_info) {
             dst = (uint8_t *)calib_info[0x80/8];
             if(dst) {
-                printf("Line Update Info > calibration blob: ");
+                HLOG_DEBUG("Line Update Info > calibration blob: ");
                 for(i=0;i<0x200;i++)
-                    printf("%02x", dst[i]);
+                    HLOG_DEBUG("%02x", dst[i]);
                 puts("");
             }
         }
@@ -5728,9 +5710,9 @@ print_axbuf(_EXCEPTION_POINTERS *ExceptionInfo)
     uint8_t *rax= (uint8_t *)ctx->Rax;
     int i;
 
-    printf("rax: ");
+    HLOG_TRACE("rax: ");
     for(i=0;i<0x20;i++)
-        printf("%02x", rax[i]);
+        HLOG_DEBUG("%02x", rax[i]);
     puts("");
 }
 
@@ -5742,9 +5724,9 @@ print_cxbuf(_EXCEPTION_POINTERS *ExceptionInfo)
     int i;
 
     print_regs(ExceptionInfo);
-    printf("rcx: ");
+    HLOG_TRACE("rcx: ");
     for(i=0;i<0x400;i++)
-        printf("%02x", rcx[i]);
+        HLOG_DEBUG("%02x", rcx[i]);
     puts("");
 }
 
@@ -5773,9 +5755,9 @@ handle_export_out(_EXCEPTION_POINTERS *ExceptionInfo)
         return;
 
     print_regs(ExceptionInfo);
-    printf("tout: ");
+    HLOG_TRACE("tout: ");
     for(i=0;i<*tsize;i++)
-        printf("%02x", tout[i]);
+        HLOG_DEBUG("%02x", tout[i]);
     puts("");
 }
 
@@ -5788,7 +5770,7 @@ handle_new_biodev(_EXCEPTION_POINTERS *ExceptionInfo)
     print_regs(ExceptionInfo);
     ctx->Dr0 = ctx->Rax+0x128; // bytes per line
     ctx->Dr7 = (1 << 0) | (1 << 16) | (3 << 18);
-    printf("hw breakpoint set to %016llx\n", ctx->Dr0);
+    HLOG_TRACE("hw breakpoint set to %016llx\n", ctx->Dr0);
 }
 
 void
@@ -5801,7 +5783,7 @@ handle_lookup_capture_blob(_EXCEPTION_POINTERS *ExceptionInfo)
     print_regs(ExceptionInfo);
     rsp += 0x98/8;
     for(i=0;i<10;i++) {
-        printf("arg_%x=%016llx\n", i*8, rsp[i+1]);
+        HLOG_TRACE("arg_%x=%016llx\n", i*8, rsp[i+1]);
     }
 }
 
@@ -5963,20 +5945,20 @@ main(int argc, char *argv[])
 
     LPVOID dibr = 0;
     // pres = proc(GUID_DEVINTERFACE_BIOMETRIC_READER, IID_IUnknown, (LPVOID *)&dibr);
-    // printf("res 0x%x %s GUID_DEVINTERFACE_BIOMETRIC_READER=%p\n", pres, hresult_to_sting(pres), dibr);
+    // HLOG_DEBUG("res 0x%x %s GUID_DEVINTERFACE_BIOMETRIC_READER=%p\n", pres, hresult_to_sting(pres), dibr);
     //Sleep(5000);
     //DllGetClassObject(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
-    printf(">>>>>>>>>>>>>>>>>>>>>>>> about to create factory\r\n");
+    HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>>> about to create factory\r\n");
     // long long iid[2];
     // *iid = 1;
     // iid[1] = 0x46000000000000c0;
-    // // printf("Using IID 0x%lx\n", iid);
+    // // HLOG_DEBUG("Using IID 0x%lx\n", iid);
     // long long *iidptr = iid;
-    // printf("That would be 0x%lx | 0x%x, matches %d,%d\n", *iidptr, iidptr[1], *iidptr == 1, iidptr[1] == 0x46000000000000c0);
+    // HLOG_DEBUG("That would be 0x%lx | 0x%x, matches %d,%d\n", *iidptr, iidptr[1], *iidptr == 1, iidptr[1] == 0x46000000000000c0);
     // pres = proc(SYNA_CLSID, iidptr, (LPVOID *)&fact);
     pres = proc(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
     // pres = proc(SYNA_CLSID, IID_IUnknown, (LPVOID *)&fact);
-    printf("<<<<<<<<<<<<<<<<<<<<<<< Factory creation done (0x%lx, %s) = %p\r\n", pres, hresult_to_sting(pres), fact);
+    HLOG_USER("<<<<<<<<<<<<<<<<<<<<<<< Factory creation done (0x%lx, %s) = %p\r\n", pres, hresult_to_sting(pres), fact);
     IDriverEntry *inst;
     if(!fact) {
         puts("SYNA_CLSID not found in DLL");
@@ -5988,20 +5970,20 @@ main(int argc, char *argv[])
     unsigned char *trace_flags = (unsigned char *)0x0000000180233E20;
     trace_flags[1]=0x7f;
     trace_flags[4]=0x7f;
-    printf("*0000000180233E20: %p\n", *(PVOID*)0x0000000180233E20);
+    HLOG_DEBUG("*0000000180233E20: %p\n", *(PVOID*)0x0000000180233E20);
     //return 1;
     unsigned char *trace_flags = (unsigned char *)0x000000180240820;
     trace_flags[1]=0x7f;
     trace_flags[4]=0x7f;
-    printf("*0000000180240820: %p\n", *(PVOID*)0x0000000180240820);
+    HLOG_DEBUG("*0000000180240820: %p\n", *(PVOID*)0x0000000180240820);
 */
 
     HRESULT rc;
 
     MyDriver *aDriver = new MyDriver();
-    printf(">>>>>>>>>>>>>>>>>>>>>>> about to init %p\r\n", aDriver);
+    HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to init %p\r\n", aDriver);
     rc = inst->OnInitialize(aDriver);
-    printf("<<<<<<<<<<<<<<<<<<<<<<< OnInitialize rc = %lx (%s)\r\n",
+    HLOG_USER("<<<<<<<<<<<<<<<<<<<<<<< OnInitialize rc = %lx (%s)\r\n",
         rc, hresult_to_sting(rc));
     if(rc < 0) {
         return 0;
@@ -6018,9 +6000,9 @@ main(int argc, char *argv[])
     }
 
     MyDevInit *devinit = new MyDevInit();
-    printf(">>>>>>>>>>>>>>>>>>>>>>> about to add device %p\r\n", devinit);
+    HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to add device %p\r\n", devinit);
     rc = inst->OnDeviceAdd(aDriver, devinit);
-    printf("<<<<<<<<<<<<<<<<<<<<<<< OnDeviceAdd rc = %lx (%s)\r\n",
+    HLOG_USER("<<<<<<<<<<<<<<<<<<<<<<< OnDeviceAdd rc = %lx (%s)\r\n",
         rc, hresult_to_sting(rc));
     if(rc < 0) {
         return 0;
@@ -6029,7 +6011,7 @@ main(int argc, char *argv[])
     goIdle = 0;
 
     Sleep(100);
-    printf(">>>>>>>>>>>>>>>>>>>>>>> about to prepare hw\r\n");
+    HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to prepare hw\r\n");
     if (myDevice->pnphwcb)
         rc = myDevice->pnphwcb->OnPrepareHardware(myDevice);
     else if (myDevice->pnphwcb2) {
@@ -6040,7 +6022,7 @@ main(int argc, char *argv[])
     else
         assert(false);
 
-    printf("<<<<<<<<<<<<<<<<<<<<<<< OnPrepareHardware rc = %lx (%s)\r\n",
+    HLOG_USER("<<<<<<<<<<<<<<<<<<<<<<< OnPrepareHardware rc = %lx (%s)\r\n",
         rc, hresult_to_sting(rc));
 
     if(rc < 0) {
@@ -6048,9 +6030,9 @@ main(int argc, char *argv[])
     }
 
     Sleep(100);
-    printf(">>>>>>>>>>>>>>>>>>>>>>> about to enter D0 state\r\n");
+    HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to enter D0 state\r\n");
     rc = myDevice->pnpcb->OnD0Entry(myDevice, WdfPowerDeviceInvalid);
-    printf("<<<<<<<<<<<<<<<<<<<<<<< OnD0Entry rc = %lx (%s)\r\n", rc,
+    HLOG_USER("<<<<<<<<<<<<<<<<<<<<<<< OnD0Entry rc = %lx (%s)\r\n", rc,
         hresult_to_sting(rc));
 
     if(rc < 0) {
