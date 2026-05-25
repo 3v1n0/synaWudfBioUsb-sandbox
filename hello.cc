@@ -1,4 +1,5 @@
 
+#define NTDDI_VERSION NTDDI_WIN7
 #include <windows.h>
 #include <ksguid.h>
 #include <stdio.h>
@@ -23,7 +24,6 @@
 
 #include <cfgmgr32.h>
 
-#define NTDDI_VERSION NTDDI_WIN7
 #include "winbio_ioctl.h"
 
 /* Logging levels controlled by HELLO_DEBUG env var:
@@ -1672,7 +1672,7 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
                     HLOG_DEBUG("  VT_I1: %d\n", pv->cVal);
                     break;
                 case VT_UI4:
-                    HLOG_DEBUG("  VT_UI4: %u\n", pv->ulVal);
+                    HLOG_DEBUG("  VT_UI4: %lu\n", (unsigned long)pv->ulVal);
                     break;
                 case VT_UINT: {
                         std::string fname;
@@ -1725,8 +1725,8 @@ struct MyNamedPropertyStore : public IWDFNamedPropertyStore2 {
             _In_  DWORD iProp,
             /* [annotation][string][out] */
             _Out_  PWSTR *ppwszName){
-            HLOG_DEBUG("MyNamedPropertyStore::GetNameAt %d\n", iProp);
-            *ppwszName = L"";
+            HLOG_DEBUG("MyNamedPropertyStore::GetNameAt %lu\n", (unsigned long)iProp);
+            static WCHAR emptyStr[] = L""; *ppwszName = emptyStr;
             return 0;
         }
 
@@ -2180,8 +2180,9 @@ struct MyRequest : public IWDFIoRequest {
             if (pOutBufferSize)
                 *pOutBufferSize = outMem->size;
 
-            HLOG_DEBUG("=> %lu %lu\r\n", pInBufferSize ? *pInBufferSize : NULL,
-                    pOutBufferSize ? *pOutBufferSize : NULL);
+            HLOG_DEBUG("=> %zu %zu\r\n",
+                    (size_t)(pInBufferSize ? *pInBufferSize : 0),
+                    (size_t)(pOutBufferSize ? *pOutBufferSize : 0));
         }
 
 
@@ -2230,7 +2231,7 @@ struct MyRequest : public IWDFIoRequest {
         void SetControlData(PWINUSB_SETUP_PACKET SetupPacket,
                             IWDFMemory *pMemory,
                             PWDFMEMORY_OFFSET Offset) {
-            HLOG_DEBUG("MyRequest::SetControlData: %p %p %u\r\n",
+            HLOG_DEBUG("MyRequest::SetControlData: %p %p %p\r\n",
                 SetupPacket, pMemory, Offset);
             m_setupPacket = *SetupPacket;
             outMem = (MyMem *) pMemory;
@@ -2247,10 +2248,11 @@ struct MyRequest : public IWDFIoRequest {
             /* [annotation][in] */
             _In_  LONGLONG Timeout){
             assert(reqType == WdfRequestUsb);
-            HLOG_DEBUG("MyRequest::Send %p | %u | %ld\r\n", pIoTarget, Flags, Timeout);
+            HLOG_DEBUG("MyRequest::Send %p | %lu | %lld\r\n", pIoTarget,
+                    (unsigned long)Flags, (long long)Timeout);
 
             if (Flags != WDF_REQUEST_SEND_OPTION_SYNCHRONOUS) {
-                HLOG_INFO("Flags are not supported: %d\r\n", Flags);
+                HLOG_INFO("Flags are not supported: %lu\r\n", (unsigned long)Flags);
                 return E_NOTIMPL;
             }
 
@@ -2263,22 +2265,24 @@ struct MyRequest : public IWDFIoRequest {
 
             if (m_usbOp == UsbPipeRead) {
                 if (!WinUsb_ReadPipe(m_pipeHandle, m_pipeId, buffer, bufLen, &m_sent, 0)) {
-                    HLOG_DEBUG("Fail to read pipe: %d (%s)\n", GetLastError(),
+                    HLOG_DEBUG("Fail to read pipe: %lu (%s)\n", (unsigned long)GetLastError(),
                         hresult_to_sting(GetLastError()));
                     return GetLastError();
                 }
-                HLOG_DEBUG("Pipe read: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+                HLOG_DEBUG("Pipe read: %zu - Actual data transferred: %lu.\n",
+                    (size_t)bufLen, (unsigned long)m_sent);
                 HLOG_DEBUG("<- ");
                 for (SIZE_T i = 0; i < m_sent; ++i)
                     HLOG_DEBUG("%02x", buffer[i]);
                 HLOG_DEBUG("\r\n");
             } else if (m_usbOp == UsbPipeWrite) {
                 if (!WinUsb_WritePipe(m_pipeHandle, m_pipeId, buffer, bufLen, &m_sent, 0)) {
-                    HLOG_DEBUG("Fail to write pipe: %d (%s)\n", GetLastError(),
+                    HLOG_DEBUG("Fail to write pipe: %lu (%s)\n", (unsigned long)GetLastError(),
                         hresult_to_sting(GetLastError()));
                     return GetLastError();
                 }
-                HLOG_DEBUG("Pipe write: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+                HLOG_DEBUG("Pipe write: %zu - Actual data transferred: %lu.\n",
+                    (size_t)bufLen, (unsigned long)m_sent);
             } else {
                 auto usbDev = (IWDFUsbTargetDevice *) pIoTarget;
 
@@ -2291,12 +2295,12 @@ struct MyRequest : public IWDFIoRequest {
 
                 if (!WinUsb_ControlTransfer(usbDev->GetWinUsbHandle(), m_setupPacket,
                     buffer, bufLen, &m_sent, 0)) {
-                    HLOG_DEBUG("Fail to send data: %d (%s)\n", GetLastError(),
+                    HLOG_DEBUG("Fail to send data: %lu (%s)\n", (unsigned long)GetLastError(),
                         hresult_to_sting(GetLastError()));
                     return GetLastError();
                 }
-
-                HLOG_DEBUG("Data sent: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+                HLOG_DEBUG("Data sent: %zu - Actual data transferred: %lu.\n",
+                    (size_t)bufLen, (unsigned long)m_sent);
 
                 if (m_setupPacket.Length && (m_setupPacket.RequestType & 0b10000000)) {
                     HLOG_DEBUG("<- ");
@@ -3261,9 +3265,9 @@ public:
             ULONG len;
             if (!WinUsb_GetDescriptor(m_handle, USB_DEVICE_DESCRIPTOR_TYPE,
                                       0, 0, (PUCHAR)&devDesc, sizeof(devDesc), &len)) {
-                HLOG_USER("WinUsb_GetDescriptor (device) failed: %d (wine stub, continuing)\r\n", GetLastError());
+                HLOG_USER("WinUsb_GetDescriptor (device) failed: %lu (wine stub, continuing)\r\n", (unsigned long)GetLastError());
             } else {
-                HLOG_USER("Found USB %lu configurations\n", devDesc.bNumConfigurations);
+                HLOG_USER("Found USB %u configurations\n", devDesc.bNumConfigurations);
 
                 for (UCHAR i = 0; i < devDesc.bNumConfigurations; i++) {
                     USB_CONFIGURATION_DESCRIPTOR configHeader;
@@ -3560,7 +3564,7 @@ public:
             _In_  ULONG ValueLength,
             /* [annotation][in] */
             _In_  PVOID Value) override {
-                HLOG_DEBUG("MyUsbTargetDevice::SetPowerPolicy %d\r\n", PolicyType);
+                HLOG_DEBUG("MyUsbTargetDevice::SetPowerPolicy %lu\r\n", (unsigned long)PolicyType);
                 return 0;
         }
 
@@ -3605,14 +3609,14 @@ public:
                                              FILE_FLAG_OVERLAPPED, NULL);
 
             if (deviceHandle == INVALID_HANDLE_VALUE) {
-                HLOG_USER("CreateFile failed: %d (%s)\n",
-                    GetLastError(), hresult_to_sting(GetLastError()));
+                HLOG_USER("CreateFile failed: %lu (%s)\n",
+                    (unsigned long)GetLastError(), hresult_to_sting(GetLastError()));
                 return E_FAIL;
             }
 
             WINUSB_INTERFACE_HANDLE winusbHandle = NULL;
             if (!WinUsb_Initialize(deviceHandle, &winusbHandle)) {
-                HLOG_USER("WinUsb_Initialize failed: %d (%s)\n", GetLastError(),
+                HLOG_USER("WinUsb_Initialize failed: %lu (%s)\n", (unsigned long)GetLastError(),
                     hresult_to_sting(GetLastError()));
                 CloseHandle(deviceHandle);
                 return E_FAIL;
@@ -3771,9 +3775,9 @@ struct MyDevice : public IWDFDevice3 {
             _In_  BOOL bAllowZeroLengthRequests,
             /* [annotation][out] */
             _Out_  IWDFIoQueue **ppIoQueue){
-            HLOG_DEBUG("MyDevice::CreateIoQueue (%p, %d, %d, %d, %d, %d)\r\n",
-                pCallbackInterface, bDefaultQueue, DispatchType, bPowerManaged,
-                bAllowZeroLengthRequests);
+            HLOG_DEBUG("MyDevice::CreateIoQueue (%p, %d, %d, %d, %d)\r\n",
+                pCallbackInterface, (int)bDefaultQueue, (int)DispatchType, (int)bPowerManaged,
+                (int)bAllowZeroLengthRequests);
             *ppIoQueue = myQueue = new MyQueue(pCallbackInterface);
             HLOG_USER("new queue=%p\r\n", *ppIoQueue);
             return 0;
@@ -4177,8 +4181,8 @@ struct MyDriver : public IWDFDriver {
             _In_opt_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory) {
-            HLOG_DEBUG("MyDriver::CreatePreallocatedWdfMemory %p (%lu) = ",
-                pBuff, BufferSize);
+            HLOG_DEBUG("MyDriver::CreatePreallocatedWdfMemory %p (%zu) = ",
+                pBuff, (size_t)BufferSize);
             *ppWdfMemory = new MyMem(pBuff, BufferSize);
             HLOG_DEBUG(" %p\r\n", *ppWdfMemory);
             return 0;
@@ -4193,7 +4197,7 @@ struct MyDriver : public IWDFDriver {
             _In_opt_  IWDFObject *pParentObject,
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory) {
-            HLOG_DEBUG("MyDriver::CreateWdfMemory %p (%lu) = ", BufferSize);
+            HLOG_DEBUG("MyDriver::CreateWdfMemory %zu = ", (size_t)BufferSize);
             // FIXME: Free this
             void *mem = malloc(BufferSize);
             memset(mem, 0, BufferSize);
@@ -4616,9 +4620,6 @@ commitEnrollment()
     static_assert(sizeof(SYNA_COMMIT_ENROLLMENT_INPUT_WIRE) == 0x60, "Commit input wire size must be 0x60");
 
     HRESULT commitStatus = E_FAIL;
-    WINBIO_IDENTITY commitIdentity;
-    WINBIO_BIOMETRIC_SUBTYPE commitSubFactor = WINBIO_SUBTYPE_NO_INFORMATION;
-    bool haveCommitIdentity = false;
 
     {
         SYNA_COMMIT_ENROLLMENT_INPUT_WIRE input = {0};
@@ -4657,9 +4658,6 @@ commitEnrollment()
 
         commitStatus = req.completionStatus;
 
-        memcpy(&commitIdentity, &input.Identity, sizeof(WINBIO_IDENTITY));
-        commitSubFactor = input.SubFactor;
-        haveCommitIdentity = true;
     }
 
     if(FAILED(commitStatus)) {
@@ -5327,9 +5325,9 @@ getAttributes()
     HLOG_USER("  Capabilities:   0x%08lx (%s)\n",
         (unsigned long)attrs->Capabilities, capsStr);
     HLOG_USER("  SerialNumber:   %ls\n", (wchar_t*)attrs->SerialNumber);
-    HLOG_USER("  Firmware:       %u.%u\n",
-        attrs->FirmwareVersion.MajorVersion,
-        attrs->FirmwareVersion.MinorVersion);
+    HLOG_USER("  Firmware:       %lu.%lu\n",
+        (unsigned long)attrs->FirmwareVersion.MajorVersion,
+        (unsigned long)attrs->FirmwareVersion.MinorVersion);
     HLOG_USER("  FormatEntries:  %lu\n", (unsigned long)attrs->SupportedFormatEntries);
     for(ULONG i=0;i<attrsFormatsToPrint;i++) {
         HLOG_USER("    [%lu] Owner=0x%04x Type=0x%04x\n",
@@ -5515,7 +5513,7 @@ handle_trace(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
 
-    HLOG_TRACE("Trace: %s:%lld\n", ctx->Rcx, ctx->Rdx);
+    HLOG_TRACE("Trace: %llx:%llx\n", (unsigned long long)ctx->Rcx, (unsigned long long)ctx->Rdx);
 }
 
 void
@@ -5529,7 +5527,7 @@ void
 handle_calibrate_iteration(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     HLOG_DEBUG("==========================================================================================\n");
-    HLOG_TRACE("                          PHASE %d\n", ExceptionInfo->ContextRecord->Rdx);
+    HLOG_TRACE("                          PHASE %llu\n", (unsigned long long)ExceptionInfo->ContextRecord->Rdx);
     HLOG_DEBUG("==========================================================================================\n");
 }
 
@@ -5549,7 +5547,7 @@ handle_malloc(_EXCEPTION_POINTERS *ExceptionInfo)
     uint32_t len = (uint32_t)rsp[5+1];
     size_t i;
 
-    HLOG_TRACE("malloc %ld: %p\n", len, rax);
+    HLOG_TRACE("malloc %u: %p\n", len, rax);
     if(len == 13440) {
 
         for(i=0;i<40;i++) {
@@ -5591,7 +5589,6 @@ void
 handle_x(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
-    uint64_t *rsp = (uint64_t *)ctx->Rsp;
     uint8_t *src = (uint8_t*)ctx->Rcx;
     int i;
 
@@ -5606,7 +5603,7 @@ handle_x_end(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
     uint64_t *rsp = (uint64_t *)ctx->Rsp;
-    uint8_t *src, *dst;
+    uint8_t *src;
     int i;
 
     //print_regs(ExceptionInfo);
@@ -5681,7 +5678,7 @@ void
 handle_line_update(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
-    uint64_t *rsp = (uint64_t *)ctx->Rsp;
+    (void)ctx;
     uint64_t *rcx = (uint64_t *)ctx->Rcx;
 
     //print_regs(ExceptionInfo);
@@ -5699,7 +5696,7 @@ handle_create_line_transform_segment(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
     uint64_t *rsp = (uint64_t *)ctx->Rsp;
-    size_t i, j;
+    size_t i;
 
     pp((uint64_t *)ctx->Rcx);
     pp((uint64_t *)ctx->Rdx);
@@ -5755,7 +5752,6 @@ handle_scale_calibration_buffer_start(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
     uint64_t *biometricDevice = *(uint64_t **)ctx->Rcx;
-    uint64_t *rsp = (uint64_t *)ctx->Rsp;
     uint64_t *calib_results;
     uint8_t *src;
     int i;
@@ -5894,6 +5890,7 @@ void
 handle_export_in(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
+    (void)ctx;
     tout = (uint8_t *)ctx->R8;
     tsize = (uint32_t *)ctx->R9;
 
@@ -5905,7 +5902,8 @@ void
 handle_export_out(_EXCEPTION_POINTERS *ExceptionInfo)
 {
     PCONTEXT ctx = ExceptionInfo->ContextRecord;
-    int i;
+    (void)ctx;
+    uint32_t i;
 
     if(!tout || !tsize)
         return;
@@ -6099,7 +6097,7 @@ main(int argc, char *argv[])
     //     return 3;
     // }
 
-    LPVOID dibr = 0;
+    // LPVOID dibr = 0;
     // pres = proc(GUID_DEVINTERFACE_BIOMETRIC_READER, IID_IUnknown, (LPVOID *)&dibr);
     // HLOG_DEBUG("res 0x%x %s GUID_DEVINTERFACE_BIOMETRIC_READER=%p\n", pres, hresult_to_sting(pres), dibr);
     //Sleep(5000);
