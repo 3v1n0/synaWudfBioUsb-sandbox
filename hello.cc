@@ -6108,9 +6108,9 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
 }
 
 void
-usage()
+usage(const char *prog)
 {
-    puts("Usage: wine a.exe <nop|identify|enroll|set-led [on|off]|list-db|clear-db|delete-record|identify>");
+    printf("Usage: %s <nop|identify|enroll|set-led [on|off]|list-db|clear-db|delete-record|identify>\n", prog);
 }
 
 
@@ -6123,7 +6123,7 @@ main(int argc, char *argv[])
     IClassFactory *fact = 0;
 
     if(argc < 2) {
-        usage();
+        usage(argv[0]);
         return 3;
     }
 
@@ -6135,7 +6135,7 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "set-led") == 0) {
         if(argc < 3 || (strcasecmp(argv[2], "on") != 0 && strcasecmp(argv[2], "off") != 0)) {
-            puts("Usage: wine a.exe set-led <on|off>");
+            printf("Usage: %s set-led <on|off>\n", argv[0]);
             return 3;
         }
         ledState = (strcasecmp(argv[2], "on") == 0) ? WINBIO_INDICATOR_ON : WINBIO_INDICATOR_OFF;
@@ -6154,7 +6154,7 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "delete-record") == 0) {
         if(argc < 3) {
-            puts("Usage: wine a.exe delete-record <subfactor>");
+            printf("Usage: %s delete-record <subfactor>\n", argv[0]);
             return 3;
         }
     }
@@ -6164,7 +6164,7 @@ main(int argc, char *argv[])
     else if(strcasecmp(argv[1], "refresh-cache") == 0) {;
     }
     else {
-        usage();
+        usage(argv[0]);
         return 3;
     }
 
