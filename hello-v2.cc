@@ -203,12 +203,168 @@ hello_v2_main(int argc, char *argv[], HMODULE pDll,
         HLOG_USER("\n");
         return (s >= 0) ? 0 : 1;
     }
+    else if (strcasecmp(argv[1], "enroll") == 0) {
+        // Step 1: CREATE_ENROLLMENT
+        UCHAR ceInput[8] = {0};
+        UCHAR ceOutput[0x28] = {0};
+        NTSTATUS s = v2ioctl(IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT,
+                             ceInput, sizeof(ceInput), ceOutput, sizeof(ceOutput));
+        if (s < 0) {
+            HLOG_USER("CREATE_ENROLLMENT failed, aborting\n");
+            return 1;
+        }
+
+        // Step 2: CAPTURE_DATA + UPDATE_ENROLLMENT loop
+        typedef struct _V2_UE_WIRE {
+            HRESULT TemplateStatus;
+            UCHAR   Reserved1[0x24];
+            ULONG   PercentComplete;
+            WINBIO_REJECT_DETAIL RejectDetail;
+            struct { ULONG GeneralSamples, Center, TopEdge, BottomEdge, LeftEdge, RightEdge; } Fingerprint;
+        } V2_UE_WIRE;
+        static_assert(sizeof(V2_UE_WIRE) == 0x48, "UE wire must be 0x48");
+
+        bool enrollComplete = false;
+        for (int t = 0; t < 70 && !enrollComplete; t++) {
+            WINBIO_CAPTURE_PARAMETERS params = {0};
+            params.PayloadSize = sizeof(params);
+            params.Purpose    = WINBIO_PURPOSE_ENROLL_FOR_IDENTIFICATION;
+            ((uint64_t*)&params.VendorFormat)[0] = 0x46DCFA2072A4E245ULL;
+            ((uint64_t*)&params.VendorFormat)[1] = 0xA927C0D0BA850395ULL;
+            params.Flags      = WINBIO_DATA_FLAG_PROCESSED;
+
+            UCHAR capBuf[1024 * 100] = {0};
+            ULONG_PTR capInfo = 0;
+            HLOG_USER("Place finger on sensor (attempt %d)...\n", t + 1);
+            s = v2ioctl(IOCTL_BIOMETRIC_CAPTURE_DATA,
+                        &params, sizeof(params), capBuf, sizeof(capBuf), &capInfo);
+            if (s < 0) {
+                HLOG_USER("CAPTURE_DATA failed: 0x%lx (%s)\n",
+                          (unsigned long)s, hresult_to_sting(s));
+                Sleep(200);
+                continue;
+            }
+            auto *capData = (WINBIO_CAPTURE_DATA *)capBuf;
+            HLOG_USER("Capture: SensorStatus=%lu RejectDetail=0x%lx (%s)\n",
+                      (unsigned long)capData->SensorStatus,
+                      (unsigned long)capData->RejectDetail,
+                      reject_detail_to_string(capData->RejectDetail));
+            if (capData->SensorStatus == WINBIO_SENSOR_REJECT) {
+                Sleep(200);
+                continue;
+            }
+
+            V2_UE_WIRE ueWire = {0};
+            ULONG_PTR ueInfo = 0;
+            s = v2ioctl(IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT,
+                        &ueWire, sizeof(ueWire), &ueWire, sizeof(ueWire), &ueInfo);
+            if (s < 0 || ueInfo < 0x30) {
+                HLOG_USER("UPDATE_ENROLLMENT failed: 0x%lx (info=%zu)\n",
+                          (unsigned long)s, (size_t)ueInfo);
+                break;
+            }
+            HLOG_USER("UPDATE: TemplateStatus=0x%lx (%s) PercentComplete=%lu RejectDetail=0x%lx (%s)\n",
+                      (unsigned long)ueWire.TemplateStatus,
+                      hresult_to_sting(ueWire.TemplateStatus),
+                      (unsigned long)ueWire.PercentComplete,
+                      (unsigned long)ueWire.RejectDetail,
+                      reject_detail_to_string(ueWire.RejectDetail));
+            if (ueWire.TemplateStatus != WINBIO_I_MORE_DATA)
+                enrollComplete = true;
+        }
+
+        // Step 3: COMMIT_ENROLLMENT
+        typedef struct _V2_COMMIT_WIRE {
+            WINBIO_IDENTITY Identity;
+            WINBIO_BIOMETRIC_SUBTYPE SubFactor;
+            UCHAR Reserved[3];
+            ULONGLONG PayloadBlobSize;
+            UCHAR PayloadBlob[8];
+        } V2_COMMIT_WIRE;
+        static_assert(sizeof(V2_COMMIT_WIRE) == 0x60, "Commit wire must be 0x60");
+
+        V2_COMMIT_WIRE commitIn = {0};
+        commitIn.Identity.Type = WINBIO_ID_TYPE_GUID;
+        if (FAILED(CoCreateGuid(&commitIn.Identity.Value.TemplateGuid))) {
+            commitIn.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
+            commitIn.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
+        }
+        commitIn.SubFactor       = WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
+        commitIn.PayloadBlobSize = sizeof(commitIn.PayloadBlob);
+        memcpy(commitIn.PayloadBlob, "Unicorn\0", sizeof(commitIn.PayloadBlob));
+
+        WINBIO_BLANK_PAYLOAD commitOut = {0};
+        s = v2ioctl(IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT,
+                    &commitIn, sizeof(commitIn), &commitOut, sizeof(commitOut));
+        HLOG_USER("COMMIT_ENROLLMENT: 0x%lx (%s)\n",
+                  (unsigned long)s, hresult_to_sting(s));
+        return (s >= 0) ? 0 : 1;
+    }
     else if (strcasecmp(argv[1], "identify") == 0 ||
-             strcasecmp(argv[1], "enroll") == 0 ||
              strcasecmp(argv[1], "identify-all") == 0) {
-        HLOG_USER("v2: %s requires real USB scan -- not yet implemented\n",
-                  argv[1]);
-        return 1;
+        // Step 1: CAPTURE_DATA
+        WINBIO_CAPTURE_PARAMETERS params = {0};
+        params.PayloadSize = sizeof(params);
+        params.Purpose     = WINBIO_PURPOSE_IDENTIFY;
+        ((uint64_t*)&params.VendorFormat)[0] = 0x46DCFA2072A4E245ULL;
+        ((uint64_t*)&params.VendorFormat)[1] = 0xA927C0D0BA850395ULL;
+        params.Flags       = WINBIO_DATA_FLAG_PROCESSED;
+
+        UCHAR capBuf[1024 * 100] = {0};
+        ULONG_PTR capInfo = 0;
+        HLOG_USER("Place finger on sensor...\n");
+        NTSTATUS s = v2ioctl(IOCTL_BIOMETRIC_CAPTURE_DATA,
+                             &params, sizeof(params), capBuf, sizeof(capBuf), &capInfo);
+        if (s < 0) {
+            HLOG_USER("CAPTURE_DATA failed: 0x%lx (%s)\n",
+                      (unsigned long)s, hresult_to_sting(s));
+            return 1;
+        }
+        auto *capData = (WINBIO_CAPTURE_DATA *)capBuf;
+        HLOG_USER("Capture: SensorStatus=%lu RejectDetail=0x%lx (%s)\n",
+                  (unsigned long)capData->SensorStatus,
+                  (unsigned long)capData->RejectDetail,
+                  reject_detail_to_string(capData->RejectDetail));
+
+        // Step 2: SET_TEMPLATE_LIST (zero = match against all enrolled templates)
+        uint64_t stlIn = 0;
+        WINBIO_BLANK_PAYLOAD stlOut = {0};
+        s = v2ioctl(IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST,
+                    &stlIn, sizeof(stlIn), &stlOut, sizeof(stlOut));
+        HLOG_USER("SET_TEMPLATE_LIST: 0x%lx (%s)\n",
+                  (unsigned long)s, hresult_to_sting(s));
+        if (s < 0) return 1;
+
+        // Step 3: IDENTIFY_FEATURE_SET
+        // Output may be larger than the base struct — heap-allocate to be safe
+        const DWORD ifs_obuf_size = 4096;
+        UCHAR *ifs_obuf_raw = (UCHAR *)calloc(1, ifs_obuf_size);
+        if (!ifs_obuf_raw) { HLOG_USER("OOM\n"); return 1; }
+
+        ULONG_PTR idInfo = 0;
+        s = v2ioctl(IOCTL_BIOMETRIC_ENGINE_IDENTIFY_FEATURE_SET,
+                    nullptr, 0, ifs_obuf_raw, ifs_obuf_size, &idInfo);
+        HLOG_USER("IDENTIFY_FEATURE_SET: 0x%lx (%s)\n",
+                  (unsigned long)s, hresult_to_sting(s));
+
+        if (s >= 0 && idInfo >= sizeof(WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE)) {
+            auto *obuf = (WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE *)ifs_obuf_raw;
+            HLOG_USER("EngineHresult=0x%lx (%s) SubFactor=%u (%s)\n",
+                      (unsigned long)obuf->EngineHresult,
+                      hresult_to_sting(obuf->EngineHresult),
+                      (unsigned)obuf->SubFactor,
+                      subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)obuf->SubFactor));
+            if (obuf->Identity.Type == WINBIO_ID_TYPE_GUID) {
+                RPC_CSTR guidStr = NULL;
+                if (SUCCEEDED(UuidToStringA((UUID*)&obuf->Identity.Value.TemplateGuid, &guidStr))) {
+                    HLOG_USER("Matched GUID: %s\n", guidStr);
+                    RpcStringFreeA(&guidStr);
+                }
+            }
+        }
+        int ret = (s >= 0) ? 0 : 1;
+        free(ifs_obuf_raw);
+        return ret;
     }
 
     return 0;
