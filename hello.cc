@@ -6278,17 +6278,6 @@ main(int argc, char *argv[])
         return 1;
     }
 
-#if 0
-    printf(">>>>>>>>>>>>>>>>>>>>>>> about to release hw\r\n");
-    rc = myDevice->pnphwcb->OnReleaseHardware(myDevice);
-    printf("<<<<<<<<<<<<<<<<<<<<<<< OnReleaseHardware rc = %lx (%s)\r\n",
-        rc, hresult_to_sting(rc));
-
-    if(rc < 0) {
-        return 0;
-    }
-#endif
-
     puts("All done, sleeping a bit");
     while(!goIdle) {
       Sleep(200);
@@ -6307,6 +6296,21 @@ main(int argc, char *argv[])
     }
     else if(what) {
         what();
+    }
+
+    HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to release hw\r\n");
+    if (myDevice->pnphwcb)
+        rc = myDevice->pnphwcb->OnReleaseHardware(myDevice);
+    else if (myDevice->pnphwcb2) {
+        auto translated_resources = new MyResourceList("translated");
+        rc = myDevice->pnphwcb2->OnReleaseHardware(myDevice, translated_resources);
+    } else
+        assert(false);
+    HLOG_USER("<<<<<<<<<<<<<<<<<<<<<<< OnReleaseHardware rc = %lx (%s)\r\n",
+        rc, hresult_to_sting(rc));
+
+    if(rc < 0) {
+        return 1;
     }
 
     return 0;
