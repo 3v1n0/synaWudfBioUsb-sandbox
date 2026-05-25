@@ -4744,7 +4744,7 @@ commitEnrollment()
             input.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
             input.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
         }
-        input.SubFactor = (ULONG)WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
+        input.SubFactor = WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
         HLOG_USER("COMMIT_ENROLLMENT using new identity (Type=%lu, SubFactor=%u)\n",
             (unsigned long)input.Identity.Type,
             (unsigned)input.SubFactor);
@@ -4995,7 +4995,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
     // EIS->vtable[9] EnrollmentCheckForDuplicate(interface, buffer):
     //   WDF in/out both 0x50 bytes. Buffer layout (all OUTPUT from EIS):
     //   [0x00] WINBIO_IDENTITY Identity  (0x4c bytes)
-    //   [0x4c] UCHAR SubFactor
+    //   [0x4c] WINBIO_BIOMETRIC_SUBTYPE SubFactor
     //   [0x4d] UCHAR Duplicate (1 = duplicate found)
     //   [0x4e] UCHAR Reserved[2]
     {
@@ -5428,11 +5428,11 @@ setMode(WINBIO_SENSOR_MODE mode)
 }
 
 void
-deleteRecord(DWORD subfactor)
+deleteRecord(WINBIO_BIOMETRIC_SUBTYPE SubFactor)
 {
     // DELETE_RECORD: driver expects WDF in/out. Buffer layout:
     //   [0x00] WINBIO_IDENTITY (0x4c bytes): Type=2/3 identity for matching
-    //   [0x4c] UCHAR SubFactor
+    //   [0x4c] WINBIO_BIOMETRIC_SUBTYPE SubFactor
     //   [0x4d] UCHAR Reserved[3]
     //   wire total = 0x50 bytes
     // Type=3 with Wildcard=0 matches all records with given subfactor
@@ -5447,7 +5447,7 @@ deleteRecord(DWORD subfactor)
         WINBIO_HOST_DELETE_RECORD_WIRE wireBuf = {0};
         wireBuf.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
         wireBuf.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
-        wireBuf.SubFactor = (UCHAR)subfactor;
+        wireBuf.SubFactor = SubFactor;
 
         WINBIO_BLANK_PAYLOAD obuf = {0};
         MyMem in((UCHAR*)&wireBuf, sizeof(wireBuf)), out((UCHAR*)&obuf, sizeof(obuf));
@@ -6368,7 +6368,7 @@ main(int argc, char *argv[])
         setLed(ledState);
     }
     else if(strcasecmp(argv[1], "delete-record") == 0) {
-        deleteRecord((DWORD)atoi(argv[2]));
+        deleteRecord((WINBIO_BIOMETRIC_SUBTYPE) atoi(argv[2]));
         listDatabase();
     }
     else if(strcasecmp(argv[1], "list-db") == 0) {
