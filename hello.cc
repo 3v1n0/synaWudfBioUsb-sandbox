@@ -35,7 +35,9 @@
 static int hello_log_level = -1;
 static int hello_get_log_level() {
     if (hello_log_level < 0) {
-        const char *env = getenv("HELLO_DEBUG");
+        const char *env = getenv("HELLO_LOG");
+        if (!env)
+            env = getenv("HELLO_DEBUG");
         hello_log_level = env ? atoi(env) : 0;
     }
     return hello_log_level;
@@ -3309,17 +3311,21 @@ public:
             }
 
             IFLOG(2) {
-                std::wcout
-                    << L"  =======================" << std::endl
-                    << L"  bLength: " << m_configDesc->bLength << std::endl
-                    << L"  bDescriptorType: " << m_configDesc->bDescriptorType << std::endl
-                    << L"  wTotalLength: " << m_configDesc->wTotalLength << std::endl
-                    << L"  bNumInterfaces: " << m_configDesc->bNumInterfaces << std::endl
-                    << L"  bConfigurationValue: " << m_configDesc->bConfigurationValue << std::endl
-                    << L"  iConfiguration: " << m_configDesc->iConfiguration << std::endl
-                    << L"  bmAttributes: " << m_configDesc->bmAttributes << std::endl
-                    << L"  MaxPower: " << m_configDesc->MaxPower << std::endl
-                    << L"  =======================" << std::endl;
+                if (m_configDesc) {
+                    std::wcout
+                        << L"  =======================" << std::endl
+                        << L"  bLength: " << m_configDesc->bLength << std::endl
+                        << L"  bDescriptorType: " << m_configDesc->bDescriptorType << std::endl
+                        << L"  wTotalLength: " << m_configDesc->wTotalLength << std::endl
+                        << L"  bNumInterfaces: " << m_configDesc->bNumInterfaces << std::endl
+                        << L"  bConfigurationValue: " << m_configDesc->bConfigurationValue << std::endl
+                        << L"  iConfiguration: " << m_configDesc->iConfiguration << std::endl
+                        << L"  bmAttributes: " << m_configDesc->bmAttributes << std::endl
+                        << L"  MaxPower: " << m_configDesc->MaxPower << std::endl
+                        << L"  =======================" << std::endl;
+                } else {
+                    HLOG_DEBUG("No active USB configuration descriptor to dump\n");
+                }
             }
 
             // for (UCHAR i = 0; i < pConfigDesc->bNumInterfaces; i++) {
