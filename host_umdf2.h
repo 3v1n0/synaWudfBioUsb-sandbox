@@ -32,7 +32,7 @@
 // ---------------------------------------------------------------------------
 static int g_umdf2_loglevel = 0;
 #define WDF2_LOG(lvl, ...) \
-    do { if (g_umdf2_loglevel >= (lvl)) { fprintf(stderr, __VA_ARGS__); fflush(stderr); } } while(0)
+    do { if (g_umdf2_loglevel >= (lvl)) { printf(__VA_ARGS__); fflush(stdout); } } while(0)
 
 // -----------------------------------------------------------------------
 // WDFFUNC type (void function pointer, cast at call sites)
