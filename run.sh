@@ -1,10 +1,10 @@
 #!/bin/sh
-set -e
+set -ex
 
-DEVICE=$(lsusb | grep 'Validity' | awk -F '[^0-9]+' '{ print "/dev/bus/usb/" $2 "/" $3 }')
+DEVICE=$(lsusb | grep 'VeriMark' | awk -F '[^0-9]+' '{ print "/dev/bus/usb/" $2 "/" $3 }')
 PWD=$(pwd)
 BASENAME=$(basename "$PWD")
-XPFWEXT=$(ls ./*.xpfwext)
+#XPFWEXT=$(ls ./*.xpfwext)
 NOW=$(date +%s)
 
 SCRIPT="${NOW}-usb.txt"
@@ -34,5 +34,6 @@ docker run --rm -it \
     -e USB_PLAYBACK=$PLAYBACK \
     -v $PWD:/$BASENAME \
     -v $PWD/usb.txt:/root/.wine/drive_c/usb.txt \
-    -v $PWD/$XPFWEXT:/root/.wine/drive_c/windows/system32/$XPFWEXT \
-    wine:validity sh -c "wine64 a.exe $WHAT 2> ${NOW}-wine.log" | tee "${NOW}.log"
+    wine:validity sh -c "wine64 b.exe $WHAT 2> ${NOW}-wine.log" | tee "${NOW}.log"
+
+    #-v $PWD/$XPFWEXT:/root/.wine/drive_c/windows/system32/$XPFWEXT \
