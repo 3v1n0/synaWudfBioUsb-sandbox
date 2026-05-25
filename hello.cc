@@ -4723,7 +4723,8 @@ commitEnrollment()
 
     typedef struct _WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE {
         WINBIO_IDENTITY Identity;
-        ULONG SubFactor;
+        WINBIO_BIOMETRIC_SUBTYPE SubFactor;
+        UCHAR Reserved[3];
         ULONGLONG PayloadBlobSize;
         UCHAR PayloadBlob[8];
     } WINBIO_HOST_COMMIT_ENROLLMENT_INPUT_WIRE;
@@ -4977,7 +4978,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
             // TemplateStatus: WINBIO_I_MORE_DATA = need more samples, S_OK = complete
             DWORD templateStatus = ueWire.TemplateStatus;
             DWORD percentComplete = ueWire.PercentComplete;
-            DWORD rejectDetail = ueWire.RejectDetail;
+            WINBIO_REJECT_DETAIL rejectDetail = ueWire.RejectDetail;
             HLOG_USER("Enrollment TemplateStatus=0x%lx (%s) PercentComplete=%lu RejectDetail=0x%lx (%s)\n",
                 (unsigned long)templateStatus,
                 hresult_to_sting(templateStatus),
@@ -5000,7 +5001,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
     {
         typedef struct _WINBIO_HOST_CHECK_FOR_DUPLICATE_WIRE {
             WINBIO_IDENTITY Identity;
-            UCHAR SubFactor;
+            WINBIO_BIOMETRIC_SUBTYPE SubFactor;
             UCHAR Duplicate;
             UCHAR Reserved[2];
         } WINBIO_HOST_CHECK_FOR_DUPLICATE_WIRE;
@@ -5438,7 +5439,7 @@ deleteRecord(DWORD subfactor)
     {
         typedef struct _WINBIO_HOST_DELETE_RECORD_WIRE {
             WINBIO_IDENTITY Identity;
-            UCHAR SubFactor;
+            WINBIO_BIOMETRIC_SUBTYPE SubFactor;
             UCHAR Reserved[3];
         } WINBIO_HOST_DELETE_RECORD_WIRE;
         static_assert(sizeof(WINBIO_HOST_DELETE_RECORD_WIRE) == 0x50, "DeleteRecord wire must be 0x50");
