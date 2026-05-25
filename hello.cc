@@ -4801,8 +4801,9 @@ enroll()
 
     //------------------------------- check for dups --------------------------
     {
+        UCHAR ibuf[0x50] = {0};
         UCHAR obuf[0x50];
-        MyMem in(NULL, 0), out(obuf, sizeof(obuf));
+        MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE, &out, &in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE\r\n");
@@ -4810,6 +4811,8 @@ enroll()
         while(!req.complete)
             Sleep(200);
 
+        HLOG_USER("CHECK_FOR_DUPLICATE hresult=0x%lx (%s)\n",
+            (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
         HLOG_INFO("Got back 0x%llx bytes: ", req.informationSize);
         SIZE_T dupDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
         for(SIZE_T i=0;i<dupDumpSize;i++)
