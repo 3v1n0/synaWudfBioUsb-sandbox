@@ -4683,14 +4683,20 @@ enroll()
 
     Sleep(100);
 
-    // CREATE_ENROLLMENT: driver's FUN_180003d4c swaps in/out roles
-    // Validation checks: input_size == 8, output_size == 0x28
-    // Byte 0 = 0 (call vfmCreateEnrollment on device)
-    // Bytes 4-7 = 0 (just return S_OK)
+    // CREATE_ENROLLMENT: driver expects WDF input=8, WDF output=0x28
+    // EIS->vtable[1] EnrollmentCreate(interface, inputBuffer, outputBuffer):
+    //   (communication with sensor VFM to start enrollment session)
     {
-        UCHAR ce_ibuf[8] = {0};
-        UCHAR ce_obuf[0x28] = {0};
-        MyMem in(ce_ibuf, sizeof(ce_ibuf)), out(ce_obuf, sizeof(ce_obuf));
+        typedef struct _SYNA_CREATE_ENROLLMENT_WIRE_INPUT {
+            UCHAR Data[8];
+        } SYNA_CREATE_ENROLLMENT_WIRE_INPUT;
+        typedef struct _SYNA_CREATE_ENROLLMENT_WIRE_OUTPUT {
+            UCHAR Data[0x28];
+        } SYNA_CREATE_ENROLLMENT_WIRE_OUTPUT;
+
+        SYNA_CREATE_ENROLLMENT_WIRE_INPUT ceInput = {0};
+        SYNA_CREATE_ENROLLMENT_WIRE_OUTPUT ceOutput = {0};
+        MyMem in((UCHAR*)&ceInput, sizeof(ceInput)), out((UCHAR*)&ceOutput, sizeof(ceOutput));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, &out, &in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT\r\n");
@@ -4760,9 +4766,26 @@ enroll()
 
         Sleep(100);
         {
-            UCHAR ibuf[0x48] = {0};
-            UCHAR obuf[0x48];
-            MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+            // UPDATE_ENROLLMENT: driver expects WDF in/out both 0x48 bytes
+            // EIS->vtable[2] (offset 0x10): accepts 0x48-byte buffer
+            // Output layout:
+            //   [0x00] HRESULT EnrollmentStatus
+            //   [0x28] ULONG Progress
+            //   [0x2c] ULONG RejectDetail
+            typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT {
+                HRESULT EnrollmentStatus;
+                UCHAR Reserved1[0x24];
+                ULONG Progress;
+                ULONG RejectDetail;
+                UCHAR Reserved2[0x18];
+            } SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT;
+            typedef struct _SYNA_UPDATE_ENROLLMENT_WIRE_INPUT {
+                UCHAR Data[0x48];
+            } SYNA_UPDATE_ENROLLMENT_WIRE_INPUT;
+
+            SYNA_UPDATE_ENROLLMENT_WIRE_INPUT ueInput = {0};
+            SYNA_UPDATE_ENROLLMENT_WIRE_OUTPUT ueOutput = {0};
+            MyMem in((UCHAR*)&ueInput, sizeof(ueInput)), out((UCHAR*)&ueOutput, sizeof(ueOutput));
             MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, &out, &in);
 
             HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT\r\n");
@@ -4772,9 +4795,9 @@ enroll()
 
             HLOG_INFO("UPDATE_ENROLLMENT hresult=0x%lx (%s), data: ", (unsigned long)req.completionStatus,
                 hresult_to_sting(req.completionStatus));
-            SIZE_T updateDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+            SIZE_T updateDumpSize = clampInfoSize(req.informationSize, sizeof(ueOutput));
             for(SIZE_T i=0;i<updateDumpSize;i++)
-                HLOG_DEBUG("%02x", obuf[i]);
+                HLOG_DEBUG("%02x", ((UCHAR*)&ueOutput)[i]);
             HLOG_DEBUG("\n");
 
             if(FAILED(req.completionStatus) || req.informationSize < 0x30) {
@@ -4784,12 +4807,10 @@ enroll()
                 break;
             }
 
-            // Driver returns S_OK as HRESULT; enrollment status is in output[0]:
-            // WINBIO_I_MORE_DATA = need more samples
-            // S_OK = enrollment complete
-            DWORD enrollStatus = *(DWORD*)obuf;
-            DWORD enrollProgress = *(DWORD*)(obuf + 0x28);
-            DWORD enrollReject = *(DWORD*)(obuf + 0x2c);
+            // Enrollment status in output: WINBIO_I_MORE_DATA = need more samples, S_OK = complete
+            DWORD enrollStatus = ueOutput.EnrollmentStatus;
+            DWORD enrollProgress = ueOutput.Progress;
+            DWORD enrollReject = ueOutput.RejectDetail;
             HLOG_USER("Enrollment status=0x%lx (%s) progress=%lu%% reject=%s\n",
                 (unsigned long)enrollStatus, hresult_to_sting(enrollStatus),
                 (unsigned long)enrollProgress, reject_detail_to_string(enrollReject));
@@ -4800,10 +4821,23 @@ enroll()
     }
 
     //------------------------------- check for dups --------------------------
+    // EIS->vtable[9] EnrollmentCheckForDuplicate(interface, buffer):
+    //   WDF in/out both 0x50 bytes. Buffer layout (all OUTPUT from EIS):
+    //   [0x00] WINBIO_IDENTITY Identity  (0x4c bytes)
+    //   [0x4c] UCHAR SubFactor
+    //   [0x4d] UCHAR Duplicate (1 = duplicate found)
+    //   [0x4e] UCHAR Reserved[2]
     {
-        UCHAR ibuf[0x50] = {0};
-        UCHAR obuf[0x50];
-        MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+        typedef struct _SYNA_CHECK_FOR_DUPLICATE_WIRE {
+            WINBIO_IDENTITY Identity;
+            UCHAR SubFactor;
+            UCHAR Duplicate;
+            UCHAR Reserved[2];
+        } SYNA_CHECK_FOR_DUPLICATE_WIRE;
+        static_assert(sizeof(SYNA_CHECK_FOR_DUPLICATE_WIRE) == 0x50, "CheckForDuplicate wire size must be 0x50");
+
+        SYNA_CHECK_FOR_DUPLICATE_WIRE wireBuf = {0};
+        MyMem in((UCHAR*)&wireBuf, sizeof(wireBuf)), out((UCHAR*)&wireBuf, sizeof(wireBuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE, &out, &in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE\r\n");
@@ -4813,10 +4847,28 @@ enroll()
 
         HLOG_USER("CHECK_FOR_DUPLICATE hresult=0x%lx (%s)\n",
             (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+
+        if(SUCCEEDED(req.completionStatus)) {
+            HLOG_USER("  Duplicate=%u\n", (unsigned)wireBuf.Duplicate);
+            if(wireBuf.Duplicate) {
+                HLOG_USER("  Duplicate template found! Skipping commit.\n");
+                HLOG_USER("  Matched Identity Type=%lu\n", (unsigned long)wireBuf.Identity.Type);
+                if(wireBuf.Identity.Type == WINBIO_ID_TYPE_GUID) {
+                    RPC_CSTR guidStr = NULL;
+                    if(SUCCEEDED(UuidToStringA((UUID*)&wireBuf.Identity.Value.TemplateGuid, &guidStr))) {
+                        HLOG_USER("  Matched GUID: %s\n", guidStr);
+                        RpcStringFreeA(&guidStr);
+                    }
+                }
+                HLOG_USER("  Matched SubFactor=%u\n", (unsigned)wireBuf.SubFactor);
+                return;
+            }
+        }
+
         HLOG_INFO("Got back 0x%llx bytes: ", req.informationSize);
-        SIZE_T dupDumpSize = clampInfoSize(req.informationSize, sizeof(obuf));
+        SIZE_T dupDumpSize = clampInfoSize(req.informationSize, sizeof(wireBuf));
         for(SIZE_T i=0;i<dupDumpSize;i++)
-            HLOG_DEBUG("%02x", obuf[i]);
+            HLOG_DEBUG("%02x", ((UCHAR*)&wireBuf)[i]);
         HLOG_DEBUG("\n");
     }
 
