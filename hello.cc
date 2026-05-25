@@ -4936,7 +4936,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
                 HRESULT TemplateStatus;
                 UCHAR Reserved1[0x24];
                 ULONG PercentComplete;
-                ULONG RejectDetail;
+                WINBIO_REJECT_DETAIL RejectDetail;
                 struct {
                     ULONG GeneralSamples;
                     ULONG Center;
