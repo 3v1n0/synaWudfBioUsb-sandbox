@@ -1448,6 +1448,81 @@ subfactor_to_string(WINBIO_BIOMETRIC_SUBTYPE sub)
     }
 }
 
+static const char *
+biometric_type_to_string(WINBIO_BIOMETRIC_TYPE type)
+{
+    switch(type) {
+    case WINBIO_NO_TYPE_AVAILABLE:      return "WINBIO_NO_TYPE_AVAILABLE(0)";
+    case WINBIO_TYPE_MULTIPLE:           return "WINBIO_TYPE_MULTIPLE";
+    case WINBIO_TYPE_FACIAL_FEATURES:    return "WINBIO_TYPE_FACIAL_FEATURES";
+    case WINBIO_TYPE_VOICE:              return "WINBIO_TYPE_VOICE";
+    case WINBIO_TYPE_FINGERPRINT:        return "WINBIO_TYPE_FINGERPRINT";
+    case WINBIO_TYPE_IRIS:               return "WINBIO_TYPE_IRIS";
+    case WINBIO_TYPE_RETINA:             return "WINBIO_TYPE_RETINA";
+    case WINBIO_TYPE_HAND_GEOMETRY:      return "WINBIO_TYPE_HAND_GEOMETRY";
+    case WINBIO_TYPE_SIGNATURE_DYNAMICS: return "WINBIO_TYPE_SIGNATURE_DYNAMICS";
+    case WINBIO_TYPE_KEYSTROKE_DYNAMICS: return "WINBIO_TYPE_KEYSTROKE_DYNAMICS";
+    case WINBIO_TYPE_LIP_MOVEMENT:       return "WINBIO_TYPE_LIP_MOVEMENT";
+    case WINBIO_TYPE_THERMAL_FACE_IMAGE: return "WINBIO_TYPE_THERMAL_FACE_IMAGE";
+    case WINBIO_TYPE_THERMAL_HAND_IMAGE: return "WINBIO_TYPE_THERMAL_HAND_IMAGE";
+    case WINBIO_TYPE_GAIT:               return "WINBIO_TYPE_GAIT";
+    case WINBIO_TYPE_SCENT:              return "WINBIO_TYPE_SCENT";
+    case WINBIO_TYPE_DNA:                return "WINBIO_TYPE_DNA";
+    case WINBIO_TYPE_EAR_SHAPE:          return "WINBIO_TYPE_EAR_SHAPE";
+    case WINBIO_TYPE_FINGER_GEOMETRY:    return "WINBIO_TYPE_FINGER_GEOMETRY";
+    case WINBIO_TYPE_PALM_PRINT:         return "WINBIO_TYPE_PALM_PRINT";
+    case WINBIO_TYPE_VEIN_PATTERN:       return "WINBIO_TYPE_VEIN_PATTERN";
+    case WINBIO_TYPE_FOOT_PRINT:         return "WINBIO_TYPE_FOOT_PRINT";
+    case WINBIO_TYPE_OTHER:              return "WINBIO_TYPE_OTHER";
+    case WINBIO_TYPE_PASSWORD:           return "WINBIO_TYPE_PASSWORD";
+    default: {
+        static char buf[48];
+        snprintf(buf, sizeof(buf), "UNKNOWN(0x%08lx)", (unsigned long)type);
+        return buf;
+    }
+    }
+}
+
+static const char *
+sensor_subtype_to_string(WINBIO_BIOMETRIC_SENSOR_SUBTYPE sub)
+{
+    switch(sub) {
+    case WINBIO_SENSOR_SUBTYPE_UNKNOWN: return "WINBIO_SENSOR_SUBTYPE_UNKNOWN(0)";
+    case WINBIO_FP_SENSOR_SUBTYPE_SWIPE: return "WINBIO_FP_SENSOR_SUBTYPE_SWIPE";
+    case WINBIO_FP_SENSOR_SUBTYPE_TOUCH: return "WINBIO_FP_SENSOR_SUBTYPE_TOUCH";
+    default: {
+        static char buf[48];
+        snprintf(buf, sizeof(buf), "UNKNOWN(0x%08lx)", (unsigned long)sub);
+        return buf;
+    }
+    }
+}
+
+static void
+capabilities_to_string(WINBIO_CAPABILITIES caps, char *buf, size_t bufsize)
+{
+    buf[0] = '\0';
+    size_t pos = 0;
+    #define APPEND_FLAG(flag, name) do { \
+        if(caps & (flag)) { \
+            if(pos > 0 && pos < bufsize - 2) { buf[pos++] = '|'; } \
+            size_t n = strlen(name); \
+            if(pos + n < bufsize - 1) { memcpy(buf + pos, name, n); pos += n; } \
+        } \
+    } while(0)
+    APPEND_FLAG(WINBIO_CAPABILITY_SENSOR, "SENSOR");
+    APPEND_FLAG(WINBIO_CAPABILITY_MATCHING, "MATCHING");
+    APPEND_FLAG(WINBIO_CAPABILITY_DATABASE, "DATABASE");
+    APPEND_FLAG(WINBIO_CAPABILITY_PROCESSING, "PROCESSING");
+    APPEND_FLAG(WINBIO_CAPABILITY_ENCRYPTION, "ENCRYPTION");
+    APPEND_FLAG(WINBIO_CAPABILITY_NAVIGATION, "NAVIGATION");
+    APPEND_FLAG(WINBIO_CAPABILITY_INDICATOR, "INDICATOR");
+    #undef APPEND_FLAG
+    if(pos == 0) {
+        snprintf(buf, bufsize, "NONE(0x%08lx)", (unsigned long)caps);
+    }
+}
+
 static void
 display_identity(WINBIO_IDENTITY *identity, const char *prefix)
 {
@@ -5233,34 +5308,44 @@ getAttributes()
     if(attrsFormatsToPrint > attrsFormatsCapacity)
         attrsFormatsToPrint = (ULONG)attrsFormatsCapacity;
 
-    HLOG_INFO("WinBioHresult = %lx\r\n", attrs->WinBioHresult);
-    IFLOG(1) {
-        std::wcout
-            << L"=======================" << std::endl
-            << L"  PayloadSize: " << attrs->PayloadSize << std::endl
-            << L"  ManufacturerName: " << attrs->ManufacturerName  << std::endl
-            << L"  ModelName: " << attrs->ModelName  << std::endl
-            << L"  SensorType: " << attrs->SensorType << std::endl
-            << L"  SensorSubType: " << attrs->SensorSubType << std::endl
-            << L"  Capabilities: " << attrs->Capabilities << std::endl
-            << L"  SerialNumber: " << attrs->SerialNumber << std::endl
-            << L"  FirmwareVersion: " << attrs->FirmwareVersion.MajorVersion << "." << attrs->FirmwareVersion.MinorVersion << std::endl
-            << L"  SupportedFormatEntries: " << attrs->SupportedFormatEntries << std::endl;
-            for(ULONG i=0;i<attrsFormatsToPrint;i++) {
-                HLOG_DEBUG("    Owner=%04x, Type=%04x\n",
-                    attrs->SupportedFormat[i].Owner,
-                    attrs->SupportedFormat[i].Type);
-            }
-        if(attrsFormatsToPrint != attrs->SupportedFormatEntries) {
-            HLOG_INFO("  NOTE: truncated SupportedFormatEntries to %lu based on infoSize\n",
-                (unsigned long)attrsFormatsToPrint);
-        }
-        std::wcout << L"=======================" << std::endl;
+    char capsStr[256];
+    capabilities_to_string(attrs->Capabilities, capsStr, sizeof(capsStr));
+
+    HLOG_USER("=======================\n");
+    HLOG_USER("  WinBioHresult:  0x%08lx (%s)\n",
+        (unsigned long)attrs->WinBioHresult,
+        hresult_to_sting(attrs->WinBioHresult));
+    HLOG_USER("  PayloadSize:    %lu\n", (unsigned long)attrs->PayloadSize);
+    HLOG_USER("  Manufacturer:   %ls\n", (wchar_t*)attrs->ManufacturerName);
+    HLOG_USER("  Model:          %ls\n", (wchar_t*)attrs->ModelName);
+    HLOG_USER("  SensorType:     0x%08lx (%s)\n",
+        (unsigned long)attrs->SensorType,
+        biometric_type_to_string(attrs->SensorType));
+    HLOG_USER("  SensorSubType:  0x%08lx (%s)\n",
+        (unsigned long)attrs->SensorSubType,
+        sensor_subtype_to_string(attrs->SensorSubType));
+    HLOG_USER("  Capabilities:   0x%08lx (%s)\n",
+        (unsigned long)attrs->Capabilities, capsStr);
+    HLOG_USER("  SerialNumber:   %ls\n", (wchar_t*)attrs->SerialNumber);
+    HLOG_USER("  Firmware:       %u.%u\n",
+        attrs->FirmwareVersion.MajorVersion,
+        attrs->FirmwareVersion.MinorVersion);
+    HLOG_USER("  FormatEntries:  %lu\n", (unsigned long)attrs->SupportedFormatEntries);
+    for(ULONG i=0;i<attrsFormatsToPrint;i++) {
+        HLOG_USER("    [%lu] Owner=0x%04x Type=0x%04x\n",
+            (unsigned long)i,
+            attrs->SupportedFormat[i].Owner,
+            attrs->SupportedFormat[i].Type);
     }
+    if(attrsFormatsToPrint != attrs->SupportedFormatEntries) {
+        HLOG_USER("  NOTE: truncated SupportedFormatEntries to %lu based on infoSize\n",
+            (unsigned long)attrsFormatsToPrint);
+    }
+    HLOG_USER("=======================\n");
 }
 
 void
-setMode(unsigned short mode)
+setMode(WINBIO_SENSOR_MODE mode)
 {
     uint32_t ibuf[2] = { mode, 2 };
 
