@@ -4488,30 +4488,23 @@ identify()
         }
     }
 
-    char ibuf[1024*10];
-    WINBIO_CAPTURE_PARAMETERS *params = (WINBIO_CAPTURE_PARAMETERS *)ibuf;
     char obuf[1024*100];
     WINBIO_CAPTURE_DATA *data = (WINBIO_CAPTURE_DATA *)obuf;
+    WINBIO_CAPTURE_PARAMETERS params = {0};
 
-    HLOG_USER("sizeof(*params)=%lld\n", sizeof(*params));
+    HLOG_USER("sizeof(params)=%lld\n", (long long)sizeof(params));
 
-    /*
-0:002> d 41c49a6830
-00000041`c49a6830  20 00 00 00 02 00 00 00-00 00 00 00 45 e2 a4 72   ...........E..r
-00000041`c49a6840  20 fa dc 46 95 03 85 ba-d0 c0 27 a9 80 00 00 00   ..F......'.....
-     */
-    memset(ibuf, 0, sizeof(ibuf));
-    params->PayloadSize = sizeof(*params);
-    params->Purpose = WINBIO_PURPOSE_IDENTIFY;
-    ((uint64_t*)&params->VendorFormat)[0] = 0x46DCFA2072A4E245L;
-    ((uint64_t*)&params->VendorFormat)[1] = 0xA927C0D0BA850395L;
-    params->Format.Owner = 0;//WINBIO_ANSI_381_FORMAT_OWNER;
-    params->Format.Type = 0;//WINBIO_ANSI_381_FORMAT_TYPE;
-    params->Flags = WINBIO_DATA_FLAG_PROCESSED;
+    params.PayloadSize = sizeof(params);
+    params.Purpose = WINBIO_PURPOSE_IDENTIFY;
+    ((uint64_t*)&params.VendorFormat)[0] = 0x46DCFA2072A4E245L;
+    ((uint64_t*)&params.VendorFormat)[1] = 0xA927C0D0BA850395L;
+    params.Format.Owner = 0;
+    params.Format.Type = 0;
+    params.Flags = WINBIO_DATA_FLAG_PROCESSED;
 
     setIndicator(WINBIO_INDICATOR_ON);
 
-    MyMem in(ibuf, sizeof(*params)), out(obuf, sizeof(obuf));
+    MyMem in((UCHAR*)&params, sizeof(params)), out(obuf, sizeof(obuf));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CAPTURE_DATA, &out, &in);
 
     HLOG_USER("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
@@ -4704,8 +4697,8 @@ commitEnrollment()
 void
 reset()
 {
-    uint8_t buf[8];
-    MyMem in(NULL, 0), out(buf, sizeof(buf));
+    WINBIO_BLANK_PAYLOAD payload = {0};
+    MyMem in(NULL, 0), out((UCHAR*)&payload, sizeof(payload));
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_RESET, &out, &in);
 
     HLOG_USER("about to Reset\r\n");
@@ -4716,7 +4709,6 @@ reset()
 
     Sleep(100);
 
-
     if(FAILED(req.completionStatus)) {
         HLOG_INFO("RESET failed: hresult=0x%lx (%s)\n",
             (unsigned long)req.completionStatus,
@@ -4724,17 +4716,16 @@ reset()
         return;
     }
 
-    if(req.informationSize >= (LONG_PTR)sizeof(WINBIO_BLANK_PAYLOAD)) {
-        WINBIO_BLANK_PAYLOAD *payload = (WINBIO_BLANK_PAYLOAD *)buf;
+    if(req.informationSize >= (LONG_PTR)sizeof(payload)) {
         HLOG_INFO("RESET complete: WinBioHresult=0x%lx (%s)\r\n",
-            (unsigned long)payload->WinBioHresult,
-            hresult_to_sting(payload->WinBioHresult));
+            (unsigned long)payload.WinBioHresult,
+            hresult_to_sting(payload.WinBioHresult));
     }
     else {
         HLOG_INFO("RESET complete (short payload, infoSize=%lld): ", (long long)req.informationSize);
-        SIZE_T dump = clampInfoSize(req.informationSize, sizeof(buf));
+        SIZE_T dump = clampInfoSize(req.informationSize, sizeof(payload));
         for(SIZE_T i=0;i<dump;i++)
-            HLOG_DEBUG("%02x", buf[i]);
+            HLOG_DEBUG("%02x", ((UCHAR*)&payload)[i]);
         HLOG_DEBUG("\r\n");
     }
 }
@@ -4795,22 +4786,19 @@ enroll()
 
     // keep going until template is complete
     for(int t=0;t<70;t++) {
-        char ibuf[1024*10];
-        WINBIO_CAPTURE_PARAMETERS *params = (WINBIO_CAPTURE_PARAMETERS *)ibuf;
         char obuf[1024*100];
         WINBIO_CAPTURE_DATA *data = (WINBIO_CAPTURE_DATA *)obuf;
+        WINBIO_CAPTURE_PARAMETERS params = {0};
 
-        memset(ibuf, 0, sizeof(ibuf));
-        params->PayloadSize = sizeof(*params);
-        //params->Purpose = WINBIO_PURPOSE_IDENTIFY;
-        params->Purpose = WINBIO_PURPOSE_ENROLL_FOR_IDENTIFICATION;
-        ((uint64_t*)&params->VendorFormat)[0] = 0x46DCFA2072A4E245L;
-        ((uint64_t*)&params->VendorFormat)[1] = 0xA927C0D0BA850395L;
-        params->Format.Owner = 0;
-        params->Format.Type = 0;
-        params->Flags = WINBIO_DATA_FLAG_PROCESSED;
+        params.PayloadSize = sizeof(params);
+        params.Purpose = WINBIO_PURPOSE_ENROLL_FOR_IDENTIFICATION;
+        ((uint64_t*)&params.VendorFormat)[0] = 0x46DCFA2072A4E245L;
+        ((uint64_t*)&params.VendorFormat)[1] = 0xA927C0D0BA850395L;
+        params.Format.Owner = 0;
+        params.Format.Type = 0;
+        params.Flags = WINBIO_DATA_FLAG_PROCESSED;
 
-        MyMem in(ibuf, sizeof(*params)), out(obuf, sizeof(obuf));
+        MyMem in((UCHAR*)&params, sizeof(params)), out(obuf, sizeof(obuf));
         MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CAPTURE_DATA, &out, &in);
 
         HLOG_USER("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
