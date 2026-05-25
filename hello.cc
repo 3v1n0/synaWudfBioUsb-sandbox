@@ -4536,11 +4536,15 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
 
     free(stlBuf);
 
-    // IDENTIFY_FEATURE_SET: engine writes Identity+SubFactor into output buffer,
-    // wrapper writes EngineHresult at +0x50.  Fixed 0x54-byte output struct.
-    WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE ia_obuf;
-    memset(&ia_obuf, 0, sizeof(ia_obuf));
-    MyMem ia_in(NULL, 0), ia_out((UCHAR *)&ia_obuf, sizeof(ia_obuf));
+    // Output buffer must be heap-allocated; driver writes beyond the 0x54-byte
+    // wire struct and will overwrite the stack if the buffer is on it.
+    const DWORD ia_obuf_size = 4096;
+    UCHAR *ia_obuf_raw = (UCHAR *)calloc(1, ia_obuf_size);
+    if(!ia_obuf_raw) {
+        HLOG_USER("identifyFeatureSet: failed to allocate output buffer\n");
+        return;
+    }
+    MyMem ia_in(NULL, 0), ia_out(ia_obuf_raw, ia_obuf_size);
     MyRequest ia_req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_IDENTIFY_FEATURE_SET, &ia_out, &ia_in);
 
     HLOG_USER("IDENTIFY_FEATURE_SET\n");
@@ -4554,20 +4558,22 @@ identifyFeatureSet(WINBIO_SENSOR_STATUS sensorStatus)
         (long long)ia_req.informationSize);
 
     if(!FAILED(ia_req.completionStatus) && ia_req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE)) {
+        WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE *ia_obuf = (WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE *)ia_obuf_raw;
         HLOG_USER("=== Match Result ===\n");
         HLOG_USER("EngineHresult=0x%lx (%s)\n",
-            (unsigned long)ia_obuf.EngineHresult,
-            hresult_to_sting(ia_obuf.EngineHresult));
+            (unsigned long)ia_obuf->EngineHresult,
+            hresult_to_sting(ia_obuf->EngineHresult));
         HLOG_USER("SubFactor=%u (%s)\n",
-            (unsigned)ia_obuf.SubFactor,
-            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)ia_obuf.SubFactor));
-        display_identity(&ia_obuf.Identity, "");
+            (unsigned)ia_obuf->SubFactor,
+            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)ia_obuf->SubFactor));
+        display_identity(&ia_obuf->Identity, "");
     }
 
     HLOG_DEBUG("IDENTIFY_FEATURE_SET raw (%lld bytes): ", (long long)ia_req.informationSize);
-    for(LONG_PTR i = 0; i < (LONG_PTR)sizeof(ia_obuf); i++)
-        HLOG_DEBUG("%02x", ((UCHAR *)&ia_obuf)[i]);
+    for(LONG_PTR i = 0; i < ia_req.informationSize && i < (LONG_PTR)ia_obuf_size; i++)
+        HLOG_DEBUG("%02x", ia_obuf_raw[i]);
     HLOG_DEBUG("\n");
+    free(ia_obuf_raw);
 }
 
 void setIndicator(WINBIO_INDICATOR_STATUS status);
@@ -5084,11 +5090,15 @@ identifyAll(WINBIO_SENSOR_STATUS sensorStatus)
         return;
     }
 
-    // IDENTIFY_FEATURE_SET: engine writes Identity+SubFactor into output buffer,
-    // wrapper writes EngineHresult at +0x50.  Fixed 0x54-byte output struct.
-    WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE obuf;
-    memset(&obuf, 0, sizeof(obuf));
-    MyMem in(NULL, 0), out((UCHAR *)&obuf, sizeof(obuf));
+    // Output buffer must be heap-allocated; driver writes beyond the 0x54-byte
+    // wire struct and will overwrite the stack if the buffer is on it.
+    const DWORD ifs_obuf_size = 4096;
+    UCHAR *ifs_obuf_raw = (UCHAR *)calloc(1, ifs_obuf_size);
+    if(!ifs_obuf_raw) {
+        HLOG_USER("identifyAll: failed to allocate output buffer\n");
+        return;
+    }
+    MyMem in(NULL, 0), out(ifs_obuf_raw, ifs_obuf_size);
     MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_IDENTIFY_FEATURE_SET, &out, &in);
 
     HLOG_USER("about to IOCTL_BIOMETRIC_ENGINE_IDENTIFY_FEATURE_SET\r\n");
@@ -5102,19 +5112,21 @@ identifyAll(WINBIO_SENSOR_STATUS sensorStatus)
         (long long)req.informationSize);
 
     if(!FAILED(req.completionStatus) && req.informationSize >= (LONG_PTR)sizeof(WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE)) {
+        WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE *obuf = (WINBIO_IDENTIFY_FEATURE_SET_OUTPUT_WIRE *)ifs_obuf_raw;
         HLOG_USER("=== Match Result ===\n");
         HLOG_USER("EngineHresult=0x%lx (%s)\n",
-            (unsigned long)obuf.EngineHresult, hresult_to_sting(obuf.EngineHresult));
+            (unsigned long)obuf->EngineHresult, hresult_to_sting(obuf->EngineHresult));
         HLOG_USER("SubFactor=%u (%s)\n",
-            (unsigned)obuf.SubFactor,
-            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)obuf.SubFactor));
-        display_identity(&obuf.Identity, "");
+            (unsigned)obuf->SubFactor,
+            subfactor_to_string((WINBIO_BIOMETRIC_SUBTYPE)obuf->SubFactor));
+        display_identity(&obuf->Identity, "");
     }
 
     HLOG_DEBUG("IDENTIFY_FEATURE_SET raw (%lld bytes): ", (long long)req.informationSize);
-    for(LONG_PTR i = 0; i < (LONG_PTR)sizeof(obuf); i++)
-        HLOG_DEBUG("%02x", ((UCHAR *)&obuf)[i]);
+    for(LONG_PTR i = 0; i < req.informationSize && i < (LONG_PTR)ifs_obuf_size; i++)
+        HLOG_DEBUG("%02x", ifs_obuf_raw[i]);
     HLOG_DEBUG("\n");
+    free(ifs_obuf_raw);
 }
 
 void
