@@ -204,6 +204,10 @@ hello_v2_main(int argc, char *argv[], HMODULE pDll,
         return (s >= 0) ? 0 : 1;
     }
     else if (strcasecmp(argv[1], "enroll") == 0) {
+        // Turn indicator on
+        { DWORD ibuf = WINBIO_INDICATOR_ON, obuf = 0;
+          v2ioctl(IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, &ibuf, sizeof(ibuf), &obuf, sizeof(obuf)); }
+
         // Step 1: CREATE_ENROLLMENT
         UCHAR ceInput[8] = {0};
         UCHAR ceOutput[0x28] = {0};
@@ -302,6 +306,10 @@ hello_v2_main(int argc, char *argv[], HMODULE pDll,
     }
     else if (strcasecmp(argv[1], "identify") == 0 ||
              strcasecmp(argv[1], "identify-all") == 0) {
+        // Turn indicator on
+        { DWORD ibuf = WINBIO_INDICATOR_ON, obuf = 0;
+          v2ioctl(IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE, &ibuf, sizeof(ibuf), &obuf, sizeof(obuf)); }
+
         // Step 1: CAPTURE_DATA
         WINBIO_CAPTURE_PARAMETERS params = {0};
         params.PayloadSize = sizeof(params);
