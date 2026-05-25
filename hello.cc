@@ -26,6 +26,299 @@
 #define NTDDI_VERSION NTDDI_WIN7
 #include "winbio_ioctl.h"
 
+#ifndef WINBIO_I_MORE_DATA
+#define WINBIO_I_MORE_DATA                       ((HRESULT)0x00090001L)
+#endif
+#ifndef WINBIO_I_EXTENDED_STATUS_INFORMATION
+#define WINBIO_I_EXTENDED_STATUS_INFORMATION    ((HRESULT)0x00090002L)
+#endif
+#ifndef WINBIO_E_UNSUPPORTED_FACTOR
+#define WINBIO_E_UNSUPPORTED_FACTOR             ((HRESULT)0x80098001L)
+#endif
+#ifndef WINBIO_E_INVALID_UNIT
+#define WINBIO_E_INVALID_UNIT                   ((HRESULT)0x80098002L)
+#endif
+#ifndef WINBIO_E_UNKNOWN_ID
+#define WINBIO_E_UNKNOWN_ID                     ((HRESULT)0x80098003L)
+#endif
+#ifndef WINBIO_E_CANCELED
+#define WINBIO_E_CANCELED                       ((HRESULT)0x80098004L)
+#endif
+#ifndef WINBIO_E_NO_MATCH
+#define WINBIO_E_NO_MATCH                       ((HRESULT)0x80098005L)
+#endif
+#ifndef WINBIO_E_CAPTURE_ABORTED
+#define WINBIO_E_CAPTURE_ABORTED                ((HRESULT)0x80098006L)
+#endif
+#ifndef WINBIO_E_ENROLLMENT_IN_PROGRESS
+#define WINBIO_E_ENROLLMENT_IN_PROGRESS         ((HRESULT)0x80098007L)
+#endif
+#ifndef WINBIO_E_BAD_CAPTURE
+#define WINBIO_E_BAD_CAPTURE                    ((HRESULT)0x80098008L)
+#endif
+#ifndef WINBIO_E_INVALID_CONTROL_CODE
+#define WINBIO_E_INVALID_CONTROL_CODE           ((HRESULT)0x80098009L)
+#endif
+#ifndef WINBIO_E_DATA_COLLECTION_IN_PROGRESS
+#define WINBIO_E_DATA_COLLECTION_IN_PROGRESS    ((HRESULT)0x8009800BL)
+#endif
+#ifndef WINBIO_E_UNSUPPORTED_DATA_FORMAT
+#define WINBIO_E_UNSUPPORTED_DATA_FORMAT        ((HRESULT)0x8009800CL)
+#endif
+#ifndef WINBIO_E_UNSUPPORTED_DATA_TYPE
+#define WINBIO_E_UNSUPPORTED_DATA_TYPE          ((HRESULT)0x8009800DL)
+#endif
+#ifndef WINBIO_E_UNSUPPORTED_PURPOSE
+#define WINBIO_E_UNSUPPORTED_PURPOSE            ((HRESULT)0x8009800EL)
+#endif
+#ifndef WINBIO_E_INVALID_DEVICE_STATE
+#define WINBIO_E_INVALID_DEVICE_STATE           ((HRESULT)0x8009800FL)
+#endif
+#ifndef WINBIO_E_DEVICE_BUSY
+#define WINBIO_E_DEVICE_BUSY                    ((HRESULT)0x80098010L)
+#endif
+#ifndef WINBIO_E_DATABASE_CANT_CREATE
+#define WINBIO_E_DATABASE_CANT_CREATE           ((HRESULT)0x80098011L)
+#endif
+#ifndef WINBIO_E_DATABASE_CANT_OPEN
+#define WINBIO_E_DATABASE_CANT_OPEN             ((HRESULT)0x80098012L)
+#endif
+#ifndef WINBIO_E_DATABASE_CANT_CLOSE
+#define WINBIO_E_DATABASE_CANT_CLOSE            ((HRESULT)0x80098013L)
+#endif
+#ifndef WINBIO_E_DATABASE_CANT_ERASE
+#define WINBIO_E_DATABASE_CANT_ERASE            ((HRESULT)0x80098014L)
+#endif
+#ifndef WINBIO_E_DATABASE_CANT_FIND
+#define WINBIO_E_DATABASE_CANT_FIND             ((HRESULT)0x80098015L)
+#endif
+#ifndef WINBIO_E_DATABASE_ALREADY_EXISTS
+#define WINBIO_E_DATABASE_ALREADY_EXISTS        ((HRESULT)0x80098016L)
+#endif
+#ifndef WINBIO_E_DATABASE_FULL
+#define WINBIO_E_DATABASE_FULL                  ((HRESULT)0x80098018L)
+#endif
+#ifndef WINBIO_E_DATABASE_LOCKED
+#define WINBIO_E_DATABASE_LOCKED                ((HRESULT)0x80098019L)
+#endif
+#ifndef WINBIO_E_DATABASE_CORRUPTED
+#define WINBIO_E_DATABASE_CORRUPTED             ((HRESULT)0x8009801AL)
+#endif
+#ifndef WINBIO_E_DATABASE_NO_SUCH_RECORD
+#define WINBIO_E_DATABASE_NO_SUCH_RECORD        ((HRESULT)0x8009801BL)
+#endif
+#ifndef WINBIO_E_DUPLICATE_ENROLLMENT
+#define WINBIO_E_DUPLICATE_ENROLLMENT           ((HRESULT)0x8009801CL)
+#endif
+#ifndef WINBIO_E_DATABASE_READ_ERROR
+#define WINBIO_E_DATABASE_READ_ERROR            ((HRESULT)0x8009801DL)
+#endif
+#ifndef WINBIO_E_DATABASE_WRITE_ERROR
+#define WINBIO_E_DATABASE_WRITE_ERROR           ((HRESULT)0x8009801EL)
+#endif
+#ifndef WINBIO_E_DATABASE_NO_RESULTS
+#define WINBIO_E_DATABASE_NO_RESULTS            ((HRESULT)0x8009801FL)
+#endif
+#ifndef WINBIO_E_DATABASE_NO_MORE_RECORDS
+#define WINBIO_E_DATABASE_NO_MORE_RECORDS       ((HRESULT)0x80098020L)
+#endif
+#ifndef WINBIO_E_DATABASE_EOF
+#define WINBIO_E_DATABASE_EOF                   ((HRESULT)0x80098021L)
+#endif
+#ifndef WINBIO_E_DATABASE_BAD_INDEX_VECTOR
+#define WINBIO_E_DATABASE_BAD_INDEX_VECTOR      ((HRESULT)0x80098022L)
+#endif
+#ifndef WINBIO_E_INCORRECT_BSP
+#define WINBIO_E_INCORRECT_BSP                  ((HRESULT)0x80098024L)
+#endif
+#ifndef WINBIO_E_INCORRECT_SENSOR_POOL
+#define WINBIO_E_INCORRECT_SENSOR_POOL          ((HRESULT)0x80098025L)
+#endif
+#ifndef WINBIO_E_NO_CAPTURE_DATA
+#define WINBIO_E_NO_CAPTURE_DATA               ((HRESULT)0x80098026L)
+#endif
+#ifndef WINBIO_E_INVALID_SENSOR_MODE
+#define WINBIO_E_INVALID_SENSOR_MODE            ((HRESULT)0x80098027L)
+#endif
+#ifndef WINBIO_E_LOCK_VIOLATION
+#define WINBIO_E_LOCK_VIOLATION                 ((HRESULT)0x8009802AL)
+#endif
+#ifndef WINBIO_E_DUPLICATE_TEMPLATE
+#define WINBIO_E_DUPLICATE_TEMPLATE             ((HRESULT)0x8009802BL)
+#endif
+#ifndef WINBIO_E_INVALID_OPERATION
+#define WINBIO_E_INVALID_OPERATION              ((HRESULT)0x8009802CL)
+#endif
+#ifndef WINBIO_E_SESSION_BUSY
+#define WINBIO_E_SESSION_BUSY                   ((HRESULT)0x8009802DL)
+#endif
+#ifndef WINBIO_E_CRED_PROV_DISABLED
+#define WINBIO_E_CRED_PROV_DISABLED             ((HRESULT)0x80098030L)
+#endif
+#ifndef WINBIO_E_CRED_PROV_NO_CREDENTIAL
+#define WINBIO_E_CRED_PROV_NO_CREDENTIAL        ((HRESULT)0x80098031L)
+#endif
+#ifndef WINBIO_E_DISABLED
+#define WINBIO_E_DISABLED                       ((HRESULT)0x80098032L)
+#endif
+#ifndef WINBIO_E_CONFIGURATION_FAILURE
+#define WINBIO_E_CONFIGURATION_FAILURE          ((HRESULT)0x80098033L)
+#endif
+#ifndef WINBIO_E_SENSOR_UNAVAILABLE
+#define WINBIO_E_SENSOR_UNAVAILABLE             ((HRESULT)0x80098034L)
+#endif
+#ifndef WINBIO_E_SAS_ENABLED
+#define WINBIO_E_SAS_ENABLED                    ((HRESULT)0x80098035L)
+#endif
+#ifndef WINBIO_E_DEVICE_FAILURE
+#define WINBIO_E_DEVICE_FAILURE                 ((HRESULT)0x80098036L)
+#endif
+#ifndef WINBIO_E_FAST_USER_SWITCH_DISABLED
+#define WINBIO_E_FAST_USER_SWITCH_DISABLED      ((HRESULT)0x80098037L)
+#endif
+#ifndef WINBIO_E_NOT_ACTIVE_CONSOLE
+#define WINBIO_E_NOT_ACTIVE_CONSOLE             ((HRESULT)0x80098038L)
+#endif
+#ifndef WINBIO_E_EVENT_MONITOR_ACTIVE
+#define WINBIO_E_EVENT_MONITOR_ACTIVE           ((HRESULT)0x80098039L)
+#endif
+#ifndef WINBIO_E_INVALID_PROPERTY_TYPE
+#define WINBIO_E_INVALID_PROPERTY_TYPE          ((HRESULT)0x8009803AL)
+#endif
+#ifndef WINBIO_E_INVALID_PROPERTY_ID
+#define WINBIO_E_INVALID_PROPERTY_ID            ((HRESULT)0x8009803BL)
+#endif
+#ifndef WINBIO_E_UNSUPPORTED_PROPERTY
+#define WINBIO_E_UNSUPPORTED_PROPERTY            ((HRESULT)0x8009803CL)
+#endif
+#ifndef WINBIO_E_ADAPTER_INTEGRITY_FAILURE
+#define WINBIO_E_ADAPTER_INTEGRITY_FAILURE      ((HRESULT)0x8009803DL)
+#endif
+#ifndef WINBIO_E_INCORRECT_SESSION_TYPE
+#define WINBIO_E_INCORRECT_SESSION_TYPE         ((HRESULT)0x8009803EL)
+#endif
+#ifndef WINBIO_E_SESSION_HANDLE_CLOSED
+#define WINBIO_E_SESSION_HANDLE_CLOSED          ((HRESULT)0x8009803FL)
+#endif
+#ifndef WINBIO_E_DEADLOCK_DETECTED
+#define WINBIO_E_DEADLOCK_DETECTED              ((HRESULT)0x80098040L)
+#endif
+#ifndef WINBIO_E_NO_PREBOOT_IDENTITY
+#define WINBIO_E_NO_PREBOOT_IDENTITY            ((HRESULT)0x80098041L)
+#endif
+#ifndef WINBIO_E_MAX_ERROR_COUNT_EXCEEDED
+#define WINBIO_E_MAX_ERROR_COUNT_EXCEEDED       ((HRESULT)0x80098042L)
+#endif
+#ifndef WINBIO_E_AUTO_LOGON_DISABLED
+#define WINBIO_E_AUTO_LOGON_DISABLED             ((HRESULT)0x80098043L)
+#endif
+#ifndef WINBIO_E_INVALID_TICKET
+#define WINBIO_E_INVALID_TICKET                 ((HRESULT)0x80098044L)
+#endif
+#ifndef WINBIO_E_TICKET_QUOTA_EXCEEDED
+#define WINBIO_E_TICKET_QUOTA_EXCEEDED          ((HRESULT)0x80098045L)
+#endif
+#ifndef WINBIO_E_DATA_PROTECTION_FAILURE
+#define WINBIO_E_DATA_PROTECTION_FAILURE        ((HRESULT)0x80098046L)
+#endif
+#ifndef WINBIO_E_CRED_PROV_SECURITY_LOCKOUT
+#define WINBIO_E_CRED_PROV_SECURITY_LOCKOUT     ((HRESULT)0x80098047L)
+#endif
+#ifndef WINBIO_E_UNSUPPORTED_POOL_TYPE
+#define WINBIO_E_UNSUPPORTED_POOL_TYPE          ((HRESULT)0x80098048L)
+#endif
+#ifndef WINBIO_E_SELECTION_REQUIRED
+#define WINBIO_E_SELECTION_REQUIRED             ((HRESULT)0x80098049L)
+#endif
+#ifndef WINBIO_E_PRESENCE_MONITOR_ACTIVE
+#define WINBIO_E_PRESENCE_MONITOR_ACTIVE        ((HRESULT)0x8009804AL)
+#endif
+#ifndef WINBIO_E_INVALID_SUBFACTOR
+#define WINBIO_E_INVALID_SUBFACTOR              ((HRESULT)0x8009804BL)
+#endif
+#ifndef WINBIO_E_INVALID_CALIBRATION_FORMAT_ARRAY
+#define WINBIO_E_INVALID_CALIBRATION_FORMAT_ARRAY ((HRESULT)0x8009804CL)
+#endif
+#ifndef WINBIO_E_NO_SUPPORTED_CALIBRATION_FORMAT
+#define WINBIO_E_NO_SUPPORTED_CALIBRATION_FORMAT ((HRESULT)0x8009804DL)
+#endif
+#ifndef WINBIO_E_UNSUPPORTED_SENSOR_CALIBRATION_FORMAT
+#define WINBIO_E_UNSUPPORTED_SENSOR_CALIBRATION_FORMAT ((HRESULT)0x8009804EL)
+#endif
+#ifndef WINBIO_E_CALIBRATION_BUFFER_TOO_SMALL
+#define WINBIO_E_CALIBRATION_BUFFER_TOO_SMALL   ((HRESULT)0x8009804FL)
+#endif
+#ifndef WINBIO_E_CALIBRATION_BUFFER_TOO_LARGE
+#define WINBIO_E_CALIBRATION_BUFFER_TOO_LARGE   ((HRESULT)0x80098050L)
+#endif
+#ifndef WINBIO_E_CALIBRATION_BUFFER_INVALID
+#define WINBIO_E_CALIBRATION_BUFFER_INVALID     ((HRESULT)0x80098051L)
+#endif
+
+#ifndef WINBIO_FP_TOO_HIGH
+#define WINBIO_FP_TOO_HIGH                      0x00000001L
+#endif
+#ifndef WINBIO_FP_TOO_LOW
+#define WINBIO_FP_TOO_LOW                       0x00000002L
+#endif
+#ifndef WINBIO_FP_TOO_LEFT
+#define WINBIO_FP_TOO_LEFT                      0x00000003L
+#endif
+#ifndef WINBIO_FP_TOO_RIGHT
+#define WINBIO_FP_TOO_RIGHT                     0x00000004L
+#endif
+#ifndef WINBIO_FP_TOO_FAST
+#define WINBIO_FP_TOO_FAST                      0x00000005L
+#endif
+#ifndef WINBIO_FP_TOO_SLOW
+#define WINBIO_FP_TOO_SLOW                      0x00000006L
+#endif
+#ifndef WINBIO_FP_POOR_QUALITY
+#define WINBIO_FP_POOR_QUALITY                  0x00000007L
+#endif
+#ifndef WINBIO_FP_TOO_SKEWED
+#define WINBIO_FP_TOO_SKEWED                    0x00000008L
+#endif
+#ifndef WINBIO_FP_TOO_SHORT
+#define WINBIO_FP_TOO_SHORT                     0x00000009L
+#endif
+#ifndef WINBIO_FP_MERGE_FAILURE
+#define WINBIO_FP_MERGE_FAILURE                 0x0000000AL
+#endif
+
+//
+// Vendor-range IOCTLs (function code = 0x800 + n)
+// These map to standard WinBio Engine/Storage adapter interface functions
+// but are exposed as vendor-range IOCTLs by the Synaptics WDF driver.
+//
+#define VENDOR_IOCTL(n)                CTL_CODE(FILE_DEVICE_BIOMETRIC, (0x800 + n), METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT             VENDOR_IOCTL(3)   // 0x44200C
+#define IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT             VENDOR_IOCTL(4)   // 0x442010
+#define IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE           VENDOR_IOCTL(5)   // 0x442014
+#define IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT             VENDOR_IOCTL(6)   // 0x442018
+#define IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT            VENDOR_IOCTL(7)   // 0x44201C
+#define IOCTL_BIOMETRIC_ENGINE_DISCARD_SMI_DATA              VENDOR_IOCTL(8)   // 0x442020
+#define IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE                VENDOR_IOCTL(10)  // 0x442028
+#define IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT             VENDOR_IOCTL(11)  // 0x44202C
+#define IOCTL_BIOMETRIC_ENGINE_STORAGE_QUERY                 VENDOR_IOCTL(12)  // 0x442030
+#define IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD                VENDOR_IOCTL(13)  // 0x442034
+#define IOCTL_BIOMETRIC_ENGINE_GET_COMMON_DATA               VENDOR_IOCTL(14)  // 0x442038
+#define IOCTL_BIOMETRIC_ENGINE_SET_COMMON_DATA               VENDOR_IOCTL(15)  // 0x44203C
+#define IOCTL_BIOMETRIC_ENGINE_RESET_OWNERSHIP               VENDOR_IOCTL(16)  // 0x442040
+#define IOCTL_BIOMETRIC_ENGINE_SET_LED_STATE                 VENDOR_IOCTL(17)  // 0x442044
+#define IOCTL_BIOMETRIC_ENGINE_SAP_REQUEST                   VENDOR_IOCTL(18)  // 0x442048
+#define IOCTL_BIOMETRIC_ENGINE_GET_TEMPLATE                  VENDOR_IOCTL(20)  // 0x442050
+#define IOCTL_BIOMETRIC_ENGINE_SET_TEMPLATE_LIST             VENDOR_IOCTL(21)  // 0x442054
+#define IOCTL_BIOMETRIC_ENGINE_GET_IDENTIFY_ALL              VENDOR_IOCTL(22)  // 0x442058
+#define IOCTL_BIOMETRIC_ENGINE_GET_IS_NON_ENROLL_COMMIT_PROC VENDOR_IOCTL(25)  // 0x442064
+#define IOCTL_BIOMETRIC_ENGINE_SET_BIOTEST_RUNNING_STATE     VENDOR_IOCTL(32)  // 0x442080
+
+// Undispatched vendor-range IOCTLs (fall through to OnControlUnit → E_NOTIMPL)
+// 0x442004 - no handler
+// 0x442024 - no handler
+// 0x44204C - no handler (used as "setMode" placeholder in test code)
+
 #include "breakpoints.h"
 
 extern "C" {
@@ -711,8 +1004,329 @@ static const char *hresult_to_sting(HRESULT res)
     case E_UNEXPECTED:
         return "E_UNEXPECTED";
 #endif
+#ifdef WINBIO_I_MORE_DATA
+    case WINBIO_I_MORE_DATA:
+        return "WINBIO_I_MORE_DATA";
+#endif
+#ifdef WINBIO_I_EXTENDED_STATUS_INFORMATION
+    case WINBIO_I_EXTENDED_STATUS_INFORMATION:
+        return "WINBIO_I_EXTENDED_STATUS_INFORMATION";
+#endif
+#ifdef WINBIO_E_UNSUPPORTED_FACTOR
+    case WINBIO_E_UNSUPPORTED_FACTOR:
+        return "WINBIO_E_UNSUPPORTED_FACTOR";
+#endif
+#ifdef WINBIO_E_INVALID_UNIT
+    case WINBIO_E_INVALID_UNIT:
+        return "WINBIO_E_INVALID_UNIT";
+#endif
+#ifdef WINBIO_E_UNKNOWN_ID
+    case WINBIO_E_UNKNOWN_ID:
+        return "WINBIO_E_UNKNOWN_ID";
+#endif
+#ifdef WINBIO_E_CANCELED
+    case WINBIO_E_CANCELED:
+        return "WINBIO_E_CANCELED";
+#endif
+#ifdef WINBIO_E_NO_MATCH
+    case WINBIO_E_NO_MATCH:
+        return "WINBIO_E_NO_MATCH";
+#endif
+#ifdef WINBIO_E_CAPTURE_ABORTED
+    case WINBIO_E_CAPTURE_ABORTED:
+        return "WINBIO_E_CAPTURE_ABORTED";
+#endif
+#ifdef WINBIO_E_ENROLLMENT_IN_PROGRESS
+    case WINBIO_E_ENROLLMENT_IN_PROGRESS:
+        return "WINBIO_E_ENROLLMENT_IN_PROGRESS";
+#endif
+#ifdef WINBIO_E_BAD_CAPTURE
+    case WINBIO_E_BAD_CAPTURE:
+        return "WINBIO_E_BAD_CAPTURE";
+#endif
+#ifdef WINBIO_E_INVALID_CONTROL_CODE
+    case WINBIO_E_INVALID_CONTROL_CODE:
+        return "WINBIO_E_INVALID_CONTROL_CODE";
+#endif
+#ifdef WINBIO_E_DATA_COLLECTION_IN_PROGRESS
+    case WINBIO_E_DATA_COLLECTION_IN_PROGRESS:
+        return "WINBIO_E_DATA_COLLECTION_IN_PROGRESS";
+#endif
+#ifdef WINBIO_E_UNSUPPORTED_DATA_FORMAT
+    case WINBIO_E_UNSUPPORTED_DATA_FORMAT:
+        return "WINBIO_E_UNSUPPORTED_DATA_FORMAT";
+#endif
+#ifdef WINBIO_E_UNSUPPORTED_DATA_TYPE
+    case WINBIO_E_UNSUPPORTED_DATA_TYPE:
+        return "WINBIO_E_UNSUPPORTED_DATA_TYPE";
+#endif
+#ifdef WINBIO_E_UNSUPPORTED_PURPOSE
+    case WINBIO_E_UNSUPPORTED_PURPOSE:
+        return "WINBIO_E_UNSUPPORTED_PURPOSE";
+#endif
+#ifdef WINBIO_E_INVALID_DEVICE_STATE
+    case WINBIO_E_INVALID_DEVICE_STATE:
+        return "WINBIO_E_INVALID_DEVICE_STATE";
+#endif
+#ifdef WINBIO_E_DEVICE_BUSY
+    case WINBIO_E_DEVICE_BUSY:
+        return "WINBIO_E_DEVICE_BUSY";
+#endif
+#ifdef WINBIO_E_DATABASE_CANT_CREATE
+    case WINBIO_E_DATABASE_CANT_CREATE:
+        return "WINBIO_E_DATABASE_CANT_CREATE";
+#endif
+#ifdef WINBIO_E_DATABASE_CANT_OPEN
+    case WINBIO_E_DATABASE_CANT_OPEN:
+        return "WINBIO_E_DATABASE_CANT_OPEN";
+#endif
+#ifdef WINBIO_E_DATABASE_CANT_CLOSE
+    case WINBIO_E_DATABASE_CANT_CLOSE:
+        return "WINBIO_E_DATABASE_CANT_CLOSE";
+#endif
+#ifdef WINBIO_E_DATABASE_CANT_ERASE
+    case WINBIO_E_DATABASE_CANT_ERASE:
+        return "WINBIO_E_DATABASE_CANT_ERASE";
+#endif
+#ifdef WINBIO_E_DATABASE_CANT_FIND
+    case WINBIO_E_DATABASE_CANT_FIND:
+        return "WINBIO_E_DATABASE_CANT_FIND";
+#endif
+#ifdef WINBIO_E_DATABASE_ALREADY_EXISTS
+    case WINBIO_E_DATABASE_ALREADY_EXISTS:
+        return "WINBIO_E_DATABASE_ALREADY_EXISTS";
+#endif
+#ifdef WINBIO_E_DATABASE_FULL
+    case WINBIO_E_DATABASE_FULL:
+        return "WINBIO_E_DATABASE_FULL";
+#endif
+#ifdef WINBIO_E_DATABASE_LOCKED
+    case WINBIO_E_DATABASE_LOCKED:
+        return "WINBIO_E_DATABASE_LOCKED";
+#endif
+#ifdef WINBIO_E_DATABASE_CORRUPTED
+    case WINBIO_E_DATABASE_CORRUPTED:
+        return "WINBIO_E_DATABASE_CORRUPTED";
+#endif
+#ifdef WINBIO_E_DATABASE_NO_SUCH_RECORD
+    case WINBIO_E_DATABASE_NO_SUCH_RECORD:
+        return "WINBIO_E_DATABASE_NO_SUCH_RECORD";
+#endif
+#ifdef WINBIO_E_DUPLICATE_ENROLLMENT
+    case WINBIO_E_DUPLICATE_ENROLLMENT:
+        return "WINBIO_E_DUPLICATE_ENROLLMENT";
+#endif
+#ifdef WINBIO_E_DATABASE_READ_ERROR
+    case WINBIO_E_DATABASE_READ_ERROR:
+        return "WINBIO_E_DATABASE_READ_ERROR";
+#endif
+#ifdef WINBIO_E_DATABASE_WRITE_ERROR
+    case WINBIO_E_DATABASE_WRITE_ERROR:
+        return "WINBIO_E_DATABASE_WRITE_ERROR";
+#endif
+#ifdef WINBIO_E_DATABASE_NO_RESULTS
+    case WINBIO_E_DATABASE_NO_RESULTS:
+        return "WINBIO_E_DATABASE_NO_RESULTS";
+#endif
+#ifdef WINBIO_E_DATABASE_NO_MORE_RECORDS
+    case WINBIO_E_DATABASE_NO_MORE_RECORDS:
+        return "WINBIO_E_DATABASE_NO_MORE_RECORDS";
+#endif
+#ifdef WINBIO_E_DATABASE_EOF
+    case WINBIO_E_DATABASE_EOF:
+        return "WINBIO_E_DATABASE_EOF";
+#endif
+#ifdef WINBIO_E_DATABASE_BAD_INDEX_VECTOR
+    case WINBIO_E_DATABASE_BAD_INDEX_VECTOR:
+        return "WINBIO_E_DATABASE_BAD_INDEX_VECTOR";
+#endif
+#ifdef WINBIO_E_INCORRECT_BSP
+    case WINBIO_E_INCORRECT_BSP:
+        return "WINBIO_E_INCORRECT_BSP";
+#endif
+#ifdef WINBIO_E_INCORRECT_SENSOR_POOL
+    case WINBIO_E_INCORRECT_SENSOR_POOL:
+        return "WINBIO_E_INCORRECT_SENSOR_POOL";
+#endif
+#ifdef WINBIO_E_NO_CAPTURE_DATA
+    case WINBIO_E_NO_CAPTURE_DATA:
+        return "WINBIO_E_NO_CAPTURE_DATA";
+#endif
+#ifdef WINBIO_E_INVALID_SENSOR_MODE
+    case WINBIO_E_INVALID_SENSOR_MODE:
+        return "WINBIO_E_INVALID_SENSOR_MODE";
+#endif
+#ifdef WINBIO_E_LOCK_VIOLATION
+    case WINBIO_E_LOCK_VIOLATION:
+        return "WINBIO_E_LOCK_VIOLATION";
+#endif
+#ifdef WINBIO_E_DUPLICATE_TEMPLATE
+    case WINBIO_E_DUPLICATE_TEMPLATE:
+        return "WINBIO_E_DUPLICATE_TEMPLATE";
+#endif
+#ifdef WINBIO_E_INVALID_OPERATION
+    case WINBIO_E_INVALID_OPERATION:
+        return "WINBIO_E_INVALID_OPERATION";
+#endif
+#ifdef WINBIO_E_SESSION_BUSY
+    case WINBIO_E_SESSION_BUSY:
+        return "WINBIO_E_SESSION_BUSY";
+#endif
+#ifdef WINBIO_E_CRED_PROV_DISABLED
+    case WINBIO_E_CRED_PROV_DISABLED:
+        return "WINBIO_E_CRED_PROV_DISABLED";
+#endif
+#ifdef WINBIO_E_CRED_PROV_NO_CREDENTIAL
+    case WINBIO_E_CRED_PROV_NO_CREDENTIAL:
+        return "WINBIO_E_CRED_PROV_NO_CREDENTIAL";
+#endif
+#ifdef WINBIO_E_DISABLED
+    case WINBIO_E_DISABLED:
+        return "WINBIO_E_DISABLED";
+#endif
+#ifdef WINBIO_E_CONFIGURATION_FAILURE
+    case WINBIO_E_CONFIGURATION_FAILURE:
+        return "WINBIO_E_CONFIGURATION_FAILURE";
+#endif
+#ifdef WINBIO_E_SENSOR_UNAVAILABLE
+    case WINBIO_E_SENSOR_UNAVAILABLE:
+        return "WINBIO_E_SENSOR_UNAVAILABLE";
+#endif
+#ifdef WINBIO_E_SAS_ENABLED
+    case WINBIO_E_SAS_ENABLED:
+        return "WINBIO_E_SAS_ENABLED";
+#endif
+#ifdef WINBIO_E_DEVICE_FAILURE
+    case WINBIO_E_DEVICE_FAILURE:
+        return "WINBIO_E_DEVICE_FAILURE";
+#endif
+#ifdef WINBIO_E_FAST_USER_SWITCH_DISABLED
+    case WINBIO_E_FAST_USER_SWITCH_DISABLED:
+        return "WINBIO_E_FAST_USER_SWITCH_DISABLED";
+#endif
+#ifdef WINBIO_E_NOT_ACTIVE_CONSOLE
+    case WINBIO_E_NOT_ACTIVE_CONSOLE:
+        return "WINBIO_E_NOT_ACTIVE_CONSOLE";
+#endif
+#ifdef WINBIO_E_EVENT_MONITOR_ACTIVE
+    case WINBIO_E_EVENT_MONITOR_ACTIVE:
+        return "WINBIO_E_EVENT_MONITOR_ACTIVE";
+#endif
+#ifdef WINBIO_E_INVALID_PROPERTY_TYPE
+    case WINBIO_E_INVALID_PROPERTY_TYPE:
+        return "WINBIO_E_INVALID_PROPERTY_TYPE";
+#endif
+#ifdef WINBIO_E_INVALID_PROPERTY_ID
+    case WINBIO_E_INVALID_PROPERTY_ID:
+        return "WINBIO_E_INVALID_PROPERTY_ID";
+#endif
+#ifdef WINBIO_E_UNSUPPORTED_PROPERTY
+    case WINBIO_E_UNSUPPORTED_PROPERTY:
+        return "WINBIO_E_UNSUPPORTED_PROPERTY";
+#endif
+#ifdef WINBIO_E_ADAPTER_INTEGRITY_FAILURE
+    case WINBIO_E_ADAPTER_INTEGRITY_FAILURE:
+        return "WINBIO_E_ADAPTER_INTEGRITY_FAILURE";
+#endif
+#ifdef WINBIO_E_INCORRECT_SESSION_TYPE
+    case WINBIO_E_INCORRECT_SESSION_TYPE:
+        return "WINBIO_E_INCORRECT_SESSION_TYPE";
+#endif
+#ifdef WINBIO_E_SESSION_HANDLE_CLOSED
+    case WINBIO_E_SESSION_HANDLE_CLOSED:
+        return "WINBIO_E_SESSION_HANDLE_CLOSED";
+#endif
+#ifdef WINBIO_E_DEADLOCK_DETECTED
+    case WINBIO_E_DEADLOCK_DETECTED:
+        return "WINBIO_E_DEADLOCK_DETECTED";
+#endif
+#ifdef WINBIO_E_NO_PREBOOT_IDENTITY
+    case WINBIO_E_NO_PREBOOT_IDENTITY:
+        return "WINBIO_E_NO_PREBOOT_IDENTITY";
+#endif
+#ifdef WINBIO_E_MAX_ERROR_COUNT_EXCEEDED
+    case WINBIO_E_MAX_ERROR_COUNT_EXCEEDED:
+        return "WINBIO_E_MAX_ERROR_COUNT_EXCEEDED";
+#endif
+#ifdef WINBIO_E_AUTO_LOGON_DISABLED
+    case WINBIO_E_AUTO_LOGON_DISABLED:
+        return "WINBIO_E_AUTO_LOGON_DISABLED";
+#endif
+#ifdef WINBIO_E_INVALID_TICKET
+    case WINBIO_E_INVALID_TICKET:
+        return "WINBIO_E_INVALID_TICKET";
+#endif
+#ifdef WINBIO_E_TICKET_QUOTA_EXCEEDED
+    case WINBIO_E_TICKET_QUOTA_EXCEEDED:
+        return "WINBIO_E_TICKET_QUOTA_EXCEEDED";
+#endif
+#ifdef WINBIO_E_DATA_PROTECTION_FAILURE
+    case WINBIO_E_DATA_PROTECTION_FAILURE:
+        return "WINBIO_E_DATA_PROTECTION_FAILURE";
+#endif
+#ifdef WINBIO_E_CRED_PROV_SECURITY_LOCKOUT
+    case WINBIO_E_CRED_PROV_SECURITY_LOCKOUT:
+        return "WINBIO_E_CRED_PROV_SECURITY_LOCKOUT";
+#endif
+#ifdef WINBIO_E_UNSUPPORTED_POOL_TYPE
+    case WINBIO_E_UNSUPPORTED_POOL_TYPE:
+        return "WINBIO_E_UNSUPPORTED_POOL_TYPE";
+#endif
+#ifdef WINBIO_E_SELECTION_REQUIRED
+    case WINBIO_E_SELECTION_REQUIRED:
+        return "WINBIO_E_SELECTION_REQUIRED";
+#endif
+#ifdef WINBIO_E_PRESENCE_MONITOR_ACTIVE
+    case WINBIO_E_PRESENCE_MONITOR_ACTIVE:
+        return "WINBIO_E_PRESENCE_MONITOR_ACTIVE";
+#endif
+#ifdef WINBIO_E_INVALID_SUBFACTOR
+    case WINBIO_E_INVALID_SUBFACTOR:
+        return "WINBIO_E_INVALID_SUBFACTOR";
+#endif
+#ifdef WINBIO_E_INVALID_CALIBRATION_FORMAT_ARRAY
+    case WINBIO_E_INVALID_CALIBRATION_FORMAT_ARRAY:
+        return "WINBIO_E_INVALID_CALIBRATION_FORMAT_ARRAY";
+#endif
+#ifdef WINBIO_E_NO_SUPPORTED_CALIBRATION_FORMAT
+    case WINBIO_E_NO_SUPPORTED_CALIBRATION_FORMAT:
+        return "WINBIO_E_NO_SUPPORTED_CALIBRATION_FORMAT";
+#endif
+#ifdef WINBIO_E_UNSUPPORTED_SENSOR_CALIBRATION_FORMAT
+    case WINBIO_E_UNSUPPORTED_SENSOR_CALIBRATION_FORMAT:
+        return "WINBIO_E_UNSUPPORTED_SENSOR_CALIBRATION_FORMAT";
+#endif
+#ifdef WINBIO_E_CALIBRATION_BUFFER_TOO_SMALL
+    case WINBIO_E_CALIBRATION_BUFFER_TOO_SMALL:
+        return "WINBIO_E_CALIBRATION_BUFFER_TOO_SMALL";
+#endif
+#ifdef WINBIO_E_CALIBRATION_BUFFER_TOO_LARGE
+    case WINBIO_E_CALIBRATION_BUFFER_TOO_LARGE:
+        return "WINBIO_E_CALIBRATION_BUFFER_TOO_LARGE";
+#endif
+#ifdef WINBIO_E_CALIBRATION_BUFFER_INVALID
+    case WINBIO_E_CALIBRATION_BUFFER_INVALID:
+        return "WINBIO_E_CALIBRATION_BUFFER_INVALID";
+#endif
     default:
         return "UNKNOWN";
+    }
+}
+
+static const char *reject_detail_to_string(DWORD detail)
+{
+    switch (detail) {
+    case WINBIO_FP_TOO_HIGH:    return "WINBIO_FP_TOO_HIGH";
+    case WINBIO_FP_TOO_LOW:     return "WINBIO_FP_TOO_LOW";
+    case WINBIO_FP_TOO_LEFT:    return "WINBIO_FP_TOO_LEFT";
+    case WINBIO_FP_TOO_RIGHT:   return "WINBIO_FP_TOO_RIGHT";
+    case WINBIO_FP_TOO_FAST:    return "WINBIO_FP_TOO_FAST";
+    case WINBIO_FP_TOO_SLOW:    return "WINBIO_FP_TOO_SLOW";
+    case WINBIO_FP_POOR_QUALITY:return "WINBIO_FP_POOR_QUALITY";
+    case WINBIO_FP_TOO_SKEWED:  return "WINBIO_FP_TOO_SKEWED";
+    case WINBIO_FP_TOO_SHORT:   return "WINBIO_FP_TOO_SHORT";
+    case WINBIO_FP_MERGE_FAILURE:return "WINBIO_FP_MERGE_FAILURE";
+    default:                    return "NONE";
     }
 }
 
@@ -1078,7 +1692,7 @@ struct MyMem : public IWDFMemory {
             if(BufferSize) {
                 *BufferSize = size;
             }
-            // Sleep(5000);
+            printf("MyMem::GetDataBuffer size=%llu\r\n", size);
             return buf;
         }
 
@@ -1194,6 +1808,7 @@ struct MyRequest : public IWDFIoRequest {
             inMem = in;
             complete = FALSE;
             informationSize = 0;
+            completionStatus = S_OK;
         }
 
         IRequestCallbackCancel *cancelCallback;
@@ -1201,8 +1816,13 @@ struct MyRequest : public IWDFIoRequest {
         ULONG ctl;
         BOOL complete;
         LONG_PTR informationSize;
+        HRESULT completionStatus;
         WINUSB_SETUP_PACKET m_setupPacket;
         ULONG m_sent = 0;
+
+        enum UsbOp { UsbControl, UsbPipeRead, UsbPipeWrite } m_usbOp = UsbControl;
+        WINUSB_INTERFACE_HANDLE m_pipeHandle = nullptr;
+        UCHAR m_pipeId = 0;
     public:
         virtual HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
             LPOLESTR str;
@@ -1256,7 +1876,10 @@ struct MyRequest : public IWDFIoRequest {
             _In_  HRESULT CompletionStatus,
             /* [annotation][in] */
             _In_  SIZE_T Information){
-            printf("MyRequest::CompleteWithInformation\r\n");
+            printf("MyRequest::CompleteWithInformation: %lx (%s)\r\n", (unsigned long)CompletionStatus,
+                hresult_to_sting(CompletionStatus));
+            completionStatus = CompletionStatus;
+            informationSize = Information;
             complete = TRUE;
         }
 
@@ -1272,6 +1895,7 @@ struct MyRequest : public IWDFIoRequest {
             _In_  HRESULT CompletionStatus){
             printf("MyRequest::Complete: %lx (%s)\r\n", (unsigned long)CompletionStatus,
                 hresult_to_sting(CompletionStatus));
+            completionStatus = CompletionStatus;
             complete = TRUE;
         }
 
@@ -1391,6 +2015,9 @@ struct MyRequest : public IWDFIoRequest {
                 SetupPacket, pMemory, Offset);
             m_setupPacket = *SetupPacket;
             outMem = (MyMem *) pMemory;
+            m_usbOp = UsbControl;
+            m_pipeHandle = nullptr;
+            m_pipeId = 0;
         }
 
         virtual HRESULT STDMETHODCALLTYPE Send(
@@ -1408,7 +2035,6 @@ struct MyRequest : public IWDFIoRequest {
                 return E_NOTIMPL;
             }
 
-            auto usbDev = (IWDFUsbTargetDevice *) pIoTarget;
             PUCHAR buffer = nullptr;
             SIZE_T bufLen = 0;
             m_sent = 0;
@@ -1416,31 +2042,54 @@ struct MyRequest : public IWDFIoRequest {
             if (outMem)
                 buffer = (PUCHAR) outMem->GetDataBuffer(&bufLen);
 
-            if (m_setupPacket.Length && !(m_setupPacket.RequestType & 0b10000000)) {
-                printf("-> ");
-                for (SIZE_T i = 0; i < bufLen; ++i) {
-                    printf("%02x", buffer[i]);
+            if (m_usbOp == UsbPipeRead) {
+                if (!WinUsb_ReadPipe(m_pipeHandle, m_pipeId, buffer, bufLen, &m_sent, 0)) {
+                    printf("Fail to read pipe: %d (%s)\n", GetLastError(),
+                        hresult_to_sting(GetLastError()));
+                    return GetLastError();
                 }
-                printf("\r\n");
-            }
-
-            if (!WinUsb_ControlTransfer(usbDev->GetWinUsbHandle(), m_setupPacket,
-                buffer, bufLen, &m_sent, 0)) {
-                printf("Fail to send data: %d (%s)\n", GetLastError(),
-                    hresult_to_sting(GetLastError()));
-                return GetLastError();
-            }
-
-            printf("Data sent: %d - Actual data transferred: %d.\n", bufLen, m_sent);
-
-            if (m_setupPacket.Length && (m_setupPacket.RequestType & 0b10000000)) {
+                printf("Pipe read: %d - Actual data transferred: %d.\n", bufLen, m_sent);
                 printf("<- ");
-                for (SIZE_T i = 0; i < m_sent; ++i) {
+                for (SIZE_T i = 0; i < m_sent; ++i)
                     printf("%02x", buffer[i]);
-                }
                 printf("\r\n");
+            } else if (m_usbOp == UsbPipeWrite) {
+                if (!WinUsb_WritePipe(m_pipeHandle, m_pipeId, buffer, bufLen, &m_sent, 0)) {
+                    printf("Fail to write pipe: %d (%s)\n", GetLastError(),
+                        hresult_to_sting(GetLastError()));
+                    return GetLastError();
+                }
+                printf("Pipe write: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+            } else {
+                auto usbDev = (IWDFUsbTargetDevice *) pIoTarget;
+
+                if (m_setupPacket.Length && !(m_setupPacket.RequestType & 0b10000000)) {
+                    printf("-> ");
+                    for (SIZE_T i = 0; i < bufLen; ++i)
+                        printf("%02x", buffer[i]);
+                    printf("\r\n");
+                }
+
+                if (!WinUsb_ControlTransfer(usbDev->GetWinUsbHandle(), m_setupPacket,
+                    buffer, bufLen, &m_sent, 0)) {
+                    printf("Fail to send data: %d (%s)\n", GetLastError(),
+                        hresult_to_sting(GetLastError()));
+                    return GetLastError();
+                }
+
+                printf("Data sent: %d - Actual data transferred: %d.\n", bufLen, m_sent);
+
+                if (m_setupPacket.Length && (m_setupPacket.RequestType & 0b10000000)) {
+                    printf("<- ");
+                    for (SIZE_T i = 0; i < m_sent; ++i)
+                        printf("%02x", buffer[i]);
+                    printf("\r\n");
+                }
             }
 
+            m_usbOp = UsbControl;
+            m_pipeHandle = nullptr;
+            m_pipeId = 0;
             outMem = nullptr;
             inMem = outMem;
 
@@ -2112,6 +2761,11 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             /* [annotation][unique][in] */
             _In_opt_  PLONGLONG DeviceOffset) override {
             printf("MyUsbTargetPipe::FormatRequestForRead\r\n");
+            auto req = (MyRequest *)pRequest;
+            req->m_usbOp = MyRequest::UsbPipeRead;
+            req->m_pipeHandle = m_WinUsbHandle;
+            req->m_pipeId = m_PipeId;
+            req->outMem = (MyMem *)pOutputMemory;
             return S_OK;
         }
 
@@ -2127,6 +2781,11 @@ class MyUsbTargetPipe : public IWDFUsbTargetPipe2 {
             /* [annotation][unique][in] */
             _In_opt_  PLONGLONG DeviceOffset) override {
             printf("MyUsbTargetPipe::FormatRequestForWrite\r\n");
+            auto req = (MyRequest *)pRequest;
+            req->m_usbOp = MyRequest::UsbPipeWrite;
+            req->m_pipeHandle = m_WinUsbHandle;
+            req->m_pipeId = m_PipeId;
+            req->inMem = (MyMem *)pInputMemory;
             return S_OK;
         }
 
@@ -2347,7 +3006,7 @@ class MyUsbInterface : public IWDFUsbInterface {
 
         virtual WINUSB_INTERFACE_HANDLE STDMETHODCALLTYPE GetWinUsbHandle() override {
             printf("MyUsbInterface::GetWinUsbHandle\r\n");
-            return 0;
+            return m_handle;
         }
 
         virtual HRESULT STDMETHODCALLTYPE RetrieveUsbPipeObject(
@@ -2378,47 +3037,45 @@ public:
         MyUsbTargetDevice(WINUSB_INTERFACE_HANDLE handle) : m_handle(handle) {
             printf("MyUsbTargetDevice::MyUsbTargetDevice: %p\r\n", this);
 
-            // Get device descriptor
+            // Get device descriptor (non-fatal -- wine winusb stubs this)
             USB_DEVICE_DESCRIPTOR devDesc;
             ULONG len;
             if (!WinUsb_GetDescriptor(m_handle, USB_DEVICE_DESCRIPTOR_TYPE,
                                       0, 0, (PUCHAR)&devDesc, sizeof(devDesc), &len)) {
-                printf("WinUsb_GetDescriptor (device) failed: %d\r\n", GetLastError());
-                return;
-            }
+                printf("WinUsb_GetDescriptor (device) failed: %d (wine stub, continuing)\r\n", GetLastError());
+            } else {
+                printf("Found USB %lu configurations\n", devDesc.bNumConfigurations);
 
-            printf("Found USB %lu configurations\n", devDesc.bNumConfigurations);
+                for (UCHAR i = 0; i < devDesc.bNumConfigurations; i++) {
+                    USB_CONFIGURATION_DESCRIPTOR configHeader;
 
-            for (UCHAR i = 0; i < devDesc.bNumConfigurations; i++) {
-                 USB_CONFIGURATION_DESCRIPTOR configHeader;
+                    if (!WinUsb_GetDescriptor(m_handle, USB_CONFIGURATION_DESCRIPTOR_TYPE,
+                                              i, 0, (PUCHAR)&configHeader,
+                                              sizeof(configHeader), &len)) {
+                        continue;
+                    }
 
-                if (!WinUsb_GetDescriptor(m_handle, USB_CONFIGURATION_DESCRIPTOR_TYPE,
-                                          i, 0, (PUCHAR)&configHeader,
-                                          sizeof(configHeader), &len)) {
-                    continue;
+                    m_configDesc = &configHeader;
+                    printf("Found USB Configuration descriptor %p (real size %lu)\n", m_configDesc, len);
+                    break;
                 }
 
-                m_configDesc = &configHeader;
-                printf("Found USB Configuration descriptor %p (real size %lu)\n", m_configDesc, len);
-                break;
+                if (!m_configDesc)
+                    printf("Active configuration not found\r\n");
             }
 
-            if (!m_configDesc) {
-                printf("Active configuration not found\r\n");
-                return;
-            }
-
-            std::wcout
-                << L"  =======================" << std::endl
-                << L"  bLength: " << m_configDesc->bLength << std::endl
-                << L"  bDescriptorType: " << m_configDesc->bDescriptorType << std::endl
-                << L"  wTotalLength: " << m_configDesc->wTotalLength << std::endl
-                << L"  bNumInterfaces: " << m_configDesc->bNumInterfaces << std::endl
-                << L"  bConfigurationValue: " << m_configDesc->bConfigurationValue << std::endl
-                << L"  iConfiguration: " << m_configDesc->iConfiguration << std::endl
-                << L"  bmAttributes: " << m_configDesc->bmAttributes << std::endl
-                << L"  MaxPower: " << m_configDesc->MaxPower << std::endl
-                << L"  =======================" << std::endl;
+            if (m_configDesc)
+                std::wcout
+                    << L"  =======================" << std::endl
+                    << L"  bLength: " << m_configDesc->bLength << std::endl
+                    << L"  bDescriptorType: " << m_configDesc->bDescriptorType << std::endl
+                    << L"  wTotalLength: " << m_configDesc->wTotalLength << std::endl
+                    << L"  bNumInterfaces: " << m_configDesc->bNumInterfaces << std::endl
+                    << L"  bConfigurationValue: " << m_configDesc->bConfigurationValue << std::endl
+                    << L"  iConfiguration: " << m_configDesc->iConfiguration << std::endl
+                    << L"  bmAttributes: " << m_configDesc->bmAttributes << std::endl
+                    << L"  MaxPower: " << m_configDesc->MaxPower << std::endl
+                    << L"  =======================" << std::endl;
 
             // for (UCHAR i = 0; i < pConfigDesc->bNumInterfaces; i++) {
             //      USB_INTERFACE_DESCRIPTOR iface_desc;
@@ -2474,16 +3131,15 @@ public:
             LPOLESTR str;
             StringFromIID(riid, &str);
             std::wcout << L"MyUsbTargetDevice::QueryInterface " << str << std::endl;
-            if (!IsEqualIID(riid, IID_IWDFUsbTargetDevice) &&
-                !IsEqualIID(riid, IID_UsbTargetAliasMaybe)) {
-                std::wcout << L" NOT FOUND!" << std::endl;
-                return 0;
-                // return E_NOINTERFACE;
-            }
+    if (IsEqualIID(riid, IID_IWDFUsbTargetDevice) ||
+        IsEqualIID(riid, IID_UsbTargetAliasMaybe)) {
+        *ppvObject = this;
+        printf("ppvObject=%p\r\n", *ppvObject);
+        return S_OK;
+    }
 
-            *ppvObject = this;
-            printf("ppvObject=%p\r\n", *ppvObject);
-            return 0;
+    std::wcout << L" NOT FOUND!" << std::endl;
+    return E_NOINTERFACE;
         }
 
         virtual HRESULT STDMETHODCALLTYPE DeleteWdfObject() override {
@@ -3524,20 +4180,20 @@ operator << (std::basic_ostream<wchar_t> &os, WINBIO_REGISTERED_FORMAT r)
 void
 identifyFeatureSet()
 {
-    //char ibuf[0x2000] = { 0 };
-    unsigned char obuf[0x888];
+    // CREATE_ENROLLMENT: driver's FUN_180003d4c swaps in/out roles
+    // Validation checks: input_size == 8, output_size == 0x28
+    UCHAR ce_ibuf[8] = {0};
+    UCHAR ce_obuf[0x28] = {0};
+    MyMem in(ce_ibuf, sizeof(ce_ibuf)), out(ce_obuf, sizeof(ce_obuf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, &out, &in);
 
-    //MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
-    MyMem in(NULL, 0), out(obuf, sizeof(obuf));
-    MyRequest req(WdfRequestOther, 0x442004, &out, &in);
-
-    printf("about to 0x442004 - identifyFeatureSet\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x442004, 0, 0);
+    printf("about to IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, 0, 0);
     while(!req.complete)
         Sleep(200);
     printf("Got back 0x%llx bytes: ", req.informationSize);
     for(LONG_PTR i=0;i<req.informationSize;i++)
-        printf("%02x", obuf[i]);
+        printf("%02x", ce_obuf[i]);
     printf("\n");
 }
 
@@ -3593,9 +4249,9 @@ identify()
     std::wcout
         << L"=======================" << std::endl
         << L"PayloadSize " << data->PayloadSize << std::endl
-        << L"WinBioHresult " << data->WinBioHresult << std::endl
-        << L"SensorStatus " << data->SensorStatus << std::endl
-        << L"RejectDetail " << data->RejectDetail << std::endl
+        << L"WinBioHresult 0x" << std::hex << data->WinBioHresult << L" (" << hresult_to_sting(data->WinBioHresult) << L")" << std::endl
+        << L"SensorStatus " << std::dec << data->SensorStatus << std::endl
+        << L"RejectDetail 0x" << std::hex << data->RejectDetail << L" (" << reject_detail_to_string(data->RejectDetail) << L")" << std::dec << std::endl
         << L"CaptureData.Size " << data->CaptureData.Size << std::endl
         << L"=======================" << std::endl
         ;
@@ -3633,20 +4289,14 @@ identify()
 void
 commitEnrollment()
 {
-    //------------------------------- commit the enrollment --------------------------
-    UCHAR arecord[] = {
-        /* 4c, identity  */ 0x03, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, 0x00, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x15, 0x00, 0x00, 0x00, 0xc5, 0x69, 0x85, 0x17, 0xbc, 0xff, 0x12, 0xe7, 0x24, 0x96, 0xb7, 0x63, 0xed, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        /* 04, subfactor */ 0xf6, 0x00, 0x00, 0x00,
-        /* 08, payload sz*/ 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        /* 08, payload   */ 'U', 'n', 'i', 'c', 'o', 'r', 'n', 0x00
-    };
+    // Driver expects exactly 8 bytes input buffer and >= 8 bytes output buffer
+    UCHAR ibuf[8] = {0};
+    UCHAR obuf[8];
+    MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, &out, &in);
 
-    UCHAR obuf[1];
-    MyMem in(arecord, sizeof(arecord)), out(obuf, sizeof(obuf));
-    MyRequest req(WdfRequestOther, 0x442018, &out, &in);
-
-    printf("about to Commit Enrollment\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x442018, 0, 0);
+    printf("about to IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_COMMIT_ENROLLMENT, 0, 0);
     while(!req.complete)
         Sleep(200);
 
@@ -3683,15 +4333,39 @@ enroll()
 {
     Sleep(500);
 
-    //UCHAR ibuf[] = { 1, 0, 0, 0 };
-    //MyMem in(ibuf, sizeof(ibuf)), out(NULL, 0);
-    MyMem in(NULL, 0), out(NULL, 0);
-    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &out, &in);
+    char calibrate_obuf[1024];
+    MyMem cal_in(NULL, 0), cal_out(calibrate_obuf, sizeof(calibrate_obuf));
+    MyRequest cal_req(WdfRequestOther, IOCTL_BIOMETRIC_CALIBRATE, &cal_out, &cal_in);
 
-    printf("about to Create Enrollment\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
-    while(!req.complete)
+    printf("about to IOCTL_BIOMETRIC_CALIBRATE\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &cal_req, IOCTL_BIOMETRIC_CALIBRATE, 0, 0);
+    while(!cal_req.complete)
         Sleep(200);
+
+    Sleep(100);
+
+    // CREATE_ENROLLMENT: driver's FUN_180003d4c swaps in/out roles
+    // Validation checks: input_size == 8, output_size == 0x28
+    // Byte 0 = 0 (call vfmCreateEnrollment on device)
+    // Bytes 4-7 = 0 (just return S_OK)
+    {
+        UCHAR ce_ibuf[8] = {0};
+        UCHAR ce_obuf[0x28] = {0};
+        MyMem in(ce_ibuf, sizeof(ce_ibuf)), out(ce_obuf, sizeof(ce_obuf));
+        MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, &out, &in);
+
+        printf("about to IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_CREATE_ENROLLMENT, 0, 0);
+        while(!req.complete)
+            Sleep(200);
+
+        printf("CREATE_ENROLLMENT: hresult=0x%lx (%s)\r\n", (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus));
+        if(FAILED(req.completionStatus)) {
+            printf("CREATE_ENROLLMENT failed, aborting enroll\r\n");
+            return;
+        }
+    }
 
     Sleep(100);
 
@@ -3723,9 +4397,9 @@ enroll()
         std::wcout
             << L"=======================" << std::endl
             << L"PayloadSize " << data->PayloadSize << std::endl
-            << L"WinBioHresult " << data->WinBioHresult << std::endl
-            << L"SensorStatus " << data->SensorStatus << std::endl
-            << L"RejectDetail " << data->RejectDetail << std::endl
+            << L"WinBioHresult 0x" << std::hex << data->WinBioHresult << L" (" << hresult_to_sting(data->WinBioHresult) << L")" << std::endl
+            << L"SensorStatus " << std::dec << data->SensorStatus << std::endl
+            << L"RejectDetail 0x" << std::hex << data->RejectDetail << L" (" << reject_detail_to_string(data->RejectDetail) << L")" << std::dec << std::endl
             << L"CaptureData.Size " << data->CaptureData.Size << std::endl
             << L"=======================" << std::endl
             ;
@@ -3738,24 +4412,32 @@ enroll()
 
         Sleep(100);
         {
-            UCHAR obuf[0x2c];
-            MyMem in(NULL, 0), out(obuf, sizeof(obuf));
-            MyRequest req(WdfRequestOther, 0x442010, &out, &in);
+            UCHAR ibuf[0x48] = {0};
+            UCHAR obuf[0x48];
+            MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
+            MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, &out, &in);
 
-            printf("about to Update Enrollment\r\n");
-            myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x442010, 0, 0);
+            printf("about to IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT\r\n");
+            myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_UPDATE_ENROLLMENT, 0, 0);
             while(!req.complete)
                 Sleep(200);
 
-            printf("Got back 0x%llx bytes: ", req.informationSize);
+            printf("UPDATE_ENROLLMENT hresult=0x%lx (%s), data: ", (unsigned long)req.completionStatus,
+                hresult_to_sting(req.completionStatus));
             for(LONG_PTR i=0;i<req.informationSize;i++)
                 printf("%02x", obuf[i]);
             printf("\n");
 
-            //printf("==============================================================================================\n");
-            //printf("                           %d %% complete\n", obuf[36]);
-            //printf("==============================================================================================\n");
-            if(obuf[0] == 0)
+            // Driver returns S_OK as HRESULT; enrollment status is in output[0]:
+            // WINBIO_I_MORE_DATA = need more samples
+            // S_OK = enrollment complete
+            DWORD enrollStatus = *(DWORD*)obuf;
+            DWORD enrollProgress = *(DWORD*)(obuf + 0x28);
+            DWORD enrollReject = *(DWORD*)(obuf + 0x2c);
+            printf("Enrollment status=0x%lx (%s) progress=%lu%% reject=%s\n",
+                (unsigned long)enrollStatus, hresult_to_sting(enrollStatus),
+                (unsigned long)enrollProgress, reject_detail_to_string(enrollReject));
+            if(enrollStatus != WINBIO_I_MORE_DATA)
                 break;
         }
         Sleep(100);
@@ -3765,10 +4447,10 @@ enroll()
     {
         UCHAR obuf[0x50];
         MyMem in(NULL, 0), out(obuf, sizeof(obuf));
-        MyRequest req(WdfRequestOther, 0x442014, &out, &in);
+        MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE, &out, &in);
 
-        printf("about to Check For Duplicate\r\n");
-        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x442014, 0, 0);
+        printf("about to IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE\r\n");
+        myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_CHECK_FOR_DUPLICATE, 0, 0);
         while(!req.complete)
             Sleep(200);
 
@@ -3910,9 +4592,10 @@ setMode(unsigned short mode)
     uint32_t ibuf[2] = { mode, 2 };
 
     MyMem in((unsigned char*)ibuf, sizeof(ibuf)), out(NULL, 0);
+    // 0x44204C has no handler in driver dispatch - falls to OnControlUnit (E_NOTIMPL)
     MyRequest req(WdfRequestOther, 0x44204C, &out, &in);
 
-    printf("about to setMode\r\n");
+    printf("about to setMode (0x44204C - no handler)\r\n");
     myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44204C, 0, 0);
     while(!req.complete)
         Sleep(200);
@@ -3930,10 +4613,10 @@ deleteRecord()
     unsigned char obuf[0x08] = { 0 };
 
     MyMem in(ibuf, sizeof(ibuf)), out(obuf, sizeof(obuf));
-    MyRequest req(WdfRequestOther, 0x442034, &out, &in);
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
 
-    printf("about to 442034\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x442034, 0, 0);
+    printf("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, 0, 0);
     while(!req.complete)
         Sleep(200);
     printf("Got back 0x%llx bytes: ", req.informationSize);
@@ -3946,10 +4629,10 @@ void
 discardEnrollment()
 {
     MyMem in(NULL, 0), out(NULL, 0);
-    MyRequest req(WdfRequestOther, 0x44201C, &out, &in);
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT, &out, &in);
 
-    printf("about to Discard Enrollment\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44201C, 0, 0);
+    printf("about to IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_ENGINE_DISCARD_ENROLLMENT, 0, 0);
     while(!req.complete)
         Sleep(200);
 }
@@ -3988,10 +4671,10 @@ getDatabaseSize()
 {
     unsigned char buf[8] = {0};
     MyMem in(NULL, 0), out(buf, sizeof(buf));
-    MyRequest req(WdfRequestOther, 0x44202C, &out, &in);
+    MyRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, &out, &in);
 
-    printf("about to ioctl StorageAdapterGetDatabaseSize\r\n");
-    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, 0x44202C, 0, sizeof(buf));
+    printf("about to IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT\r\n");
+    myQueue->ioctl->OnDeviceIoControl(myQueue, &req, IOCTL_BIOMETRIC_STORAGE_GET_RECORD_COUNT, 0, sizeof(buf));
     while(!req.complete)
         Sleep(200);
     /*
@@ -4713,12 +5396,13 @@ main(int argc, char *argv[])
 
     getAttributes();
     getSensorStatus();
+    getIndicator();
+    setIndicator();
     // getIndicator();
-    // setIndicator();
     // resetIoctl();
 
-    // //what();
-    // enroll();
+    // what();
+    enroll();
 
     // printf("======================================================\r\n");
     // printf("Sleeping 10 secons....\r\n");
