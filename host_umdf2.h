@@ -117,6 +117,73 @@ typedef struct _WDF2_DRIVER_GLOBALS {
 } WDF2_DRIVER_GLOBALS;
 
 // -----------------------------------------------------------------------
+// WDF handle types — opaque pointer typedefs matching kmdf/1.15/wdftypes.h.
+// Defined as typedef void* (not DECLARE_HANDLE) to avoid conflicts with
+// UMDF v1 COM headers and to keep stub bodies unchanged (casts still compile).
+// Guard: WDFDRIVER_DEFINED mirrors the pattern used by wdftypes.h.
+// -----------------------------------------------------------------------
+#ifndef WDFDRIVER_DEFINED
+#define WDFDRIVER_DEFINED
+typedef void *WDFDRIVER;
+typedef void *WDFDEVICE;
+typedef void *WDFQUEUE;
+typedef void *WDFREQUEST;
+typedef void *WDFMEMORY;
+typedef void *WDFIOTARGET;
+typedef void *WDFUSBDEVICE;
+typedef void *WDFUSBINTERFACE;
+typedef void *WDFUSBPIPE;
+typedef void *WDFKEY;
+typedef void *WDFCMRESLIST;
+typedef void *WDFOBJECT;
+typedef struct WDFDEVICE_INIT *PWDFDEVICE_INIT;
+#endif  // WDFDRIVER_DEFINED
+
+// WDF_DRIVER_GLOBALS — first argument to every WDF stub (DriverGlobals parameter).
+// We alias our internal WDF2_DRIVER_GLOBALS to this name.
+typedef WDF2_DRIVER_GLOBALS  WDF_DRIVER_GLOBALS;
+typedef WDF2_DRIVER_GLOBALS *PWDF_DRIVER_GLOBALS;
+
+// Forward-declared struct pointer types for WDF API parameters.
+// These match the struct names used in kmdf/1.15/ headers.
+typedef struct _DRIVER_OBJECT                           *PDRIVER_OBJECT;
+typedef struct _WDF_DRIVER_CONFIG                       *PWDF_DRIVER_CONFIG;
+typedef struct _WDF_OBJECT_ATTRIBUTES                   *PWDF_OBJECT_ATTRIBUTES;
+typedef struct _WDF_PNPPOWER_EVENT_CALLBACKS            *PWDF_PNPPOWER_EVENT_CALLBACKS;
+typedef struct _WDF_POWER_POLICY_EVENT_CALLBACKS        *PWDF_POWER_POLICY_EVENT_CALLBACKS;
+typedef struct _WDF_FILEOBJECT_CONFIG                   *PWDF_FILEOBJECT_CONFIG;
+typedef struct _WDF_IO_TYPE_CONFIG                      *PWDF_IO_TYPE_CONFIG;
+typedef struct _WDF_DEVICE_STATE                        *PWDF_DEVICE_STATE;
+typedef struct _WDF_DEVICE_PNP_CAPABILITIES             *PWDF_DEVICE_PNP_CAPABILITIES;
+typedef struct _WDF_DEVICE_POWER_CAPABILITIES           *PWDF_DEVICE_POWER_CAPABILITIES;
+typedef struct _WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS   *PWDF_DEVICE_POWER_POLICY_IDLE_SETTINGS;
+typedef struct _WDF_DEVICE_POWER_POLICY_WAKE_SETTINGS   *PWDF_DEVICE_POWER_POLICY_WAKE_SETTINGS;
+typedef struct _WDF_IO_QUEUE_CONFIG                     *PWDF_IO_QUEUE_CONFIG;
+typedef struct _WDF_IO_TARGET_OPEN_PARAMS               *PWDF_IO_TARGET_OPEN_PARAMS;
+typedef struct _WDF_OBJECT_CONTEXT_TYPE_INFO             WDF_OBJECT_CONTEXT_TYPE_INFO;
+typedef const   WDF_OBJECT_CONTEXT_TYPE_INFO            *PCWDF_OBJECT_CONTEXT_TYPE_INFO;
+typedef struct _WDF_REQUEST_PARAMETERS                  *PWDF_REQUEST_PARAMETERS;
+typedef struct _WDF_USB_DEVICE_INFORMATION              *PWDF_USB_DEVICE_INFORMATION;
+typedef struct _WDF_USB_DEVICE_SELECT_CONFIG_PARAMS     *PWDF_USB_DEVICE_SELECT_CONFIG_PARAMS;
+typedef struct _WDF_USB_PIPE_INFORMATION                *PWDF_USB_PIPE_INFORMATION;
+typedef struct _WDF_USB_CONTINUOUS_READER_CONFIG        *PWDF_USB_CONTINUOUS_READER_CONFIG;
+typedef void   *WDFCONTEXT;
+// WDF_DEVICE_IO_TYPE and WDF_IO_TARGET_SENT_IO_ACTION are already defined as enums
+// in wdk-10/Include/wdf/umdf/1.11/wudfddi_types.h (included transitively via wudfddi.h).
+// Do NOT redefine them here — it causes a conflicting-declaration error.
+typedef ULONG   WDF_DEVICE_FAILED_ACTION;     // enum WDF_DEVICE_FAILED_ACTION in wdfdevice.h
+typedef ULONG   POOL_TYPE;                    // enum POOL_TYPE in wudfwdm.h
+typedef ULONG   DEVICE_REGISTRY_PROPERTY;     // enum DEVICE_REGISTRY_PROPERTY in wudfwdm.h
+typedef void  (*PFN_WDF_IO_QUEUE_STATE)(WDFQUEUE Queue, WDFCONTEXT Context);
+
+// UNICODE_STRING — not in mingw headers; defined in WDK ntdef.h but that
+// header conflicts with mingw windows.h. Define the three types directly.
+typedef struct _UNICODE_STRING { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } UNICODE_STRING;
+typedef UNICODE_STRING  *PUNICODE_STRING;
+typedef const UNICODE_STRING *PCUNICODE_STRING;
+
+
+// -----------------------------------------------------------------------
 // WDF callback typedefs (no wdf.h needed — use void* for handles)
 // -----------------------------------------------------------------------
 typedef NTSTATUS (*Wdf2_EvtDriverDeviceAdd)(void *driver, void *deviceInit);
@@ -244,7 +311,7 @@ static WDF2_DRIVER_GLOBALS g_wdf2Globals;
 static Wdf2Driver         *g_wdf2Driver  = nullptr;
 static Wdf2Device         *g_wdf2Device  = nullptr;
 static Wdf2Queue          *g_wdf2Queue   = nullptr;
-static WDFFUNC             g_wdf2Table[257];
+// g_wdf2Table declared below, after all stub function definitions.
 
 // -----------------------------------------------------------------------
 // WDF stub implementations
@@ -262,84 +329,98 @@ static WDFFUNC             g_wdf2Table[257];
 //   +0x00: Size, +0x08: EvtDriverDeviceAdd, +0x10: EvtDriverUnload,
 //   +0x18: DriverInitFlags, +0x1C: DriverPoolTag
 static NTSTATUS WINAPI
-stub_WdfDriverCreate(void *globals, void *drvObj, void *regPath,
-                     void *drvAttrs, void *drvConfig, void **pDriver)
+stub_WdfDriverCreate(PWDF_DRIVER_GLOBALS DriverGlobals, PDRIVER_OBJECT DriverObject,
+                     PCUNICODE_STRING RegistryPath,
+                     PWDF_OBJECT_ATTRIBUTES DriverAttributes,
+                     PWDF_DRIVER_CONFIG DriverConfig, WDFDRIVER *Driver)
 {
-    HLOG_USER("[WDF2] WdfDriverCreate: config=%p attrs=%p\n", drvConfig, drvAttrs);
-    if (drvConfig)
-        HLOG_USER("[WDF2]   config.Size=0x%lx\n", (unsigned long)*(ULONG*)drvConfig);
+    HLOG_USER("[WDF2] WdfDriverCreate: config=%p attrs=%p\n", DriverConfig, DriverAttributes);
+    if (DriverConfig)
+        HLOG_USER("[WDF2]   config.Size=0x%lx\n", (unsigned long)*(ULONG*)DriverConfig);
 
     g_wdf2Driver = new Wdf2Driver();
-    g_wdf2Driver->allocContext(drvAttrs);
-    if (drvConfig) {
-        g_wdf2Driver->evtDeviceAdd = *(Wdf2_EvtDriverDeviceAdd*)((char*)drvConfig + 0x08);
-        g_wdf2Driver->evtUnload    = *(Wdf2_EvtDriverUnload*)    ((char*)drvConfig + 0x10);
+    g_wdf2Driver->allocContext(DriverAttributes);
+    if (DriverConfig) {
+        g_wdf2Driver->evtDeviceAdd = *(Wdf2_EvtDriverDeviceAdd*)((char*)DriverConfig + 0x08);
+        g_wdf2Driver->evtUnload    = *(Wdf2_EvtDriverUnload*)    ((char*)DriverConfig + 0x10);
     }
     g_wdf2Globals.Driver = g_wdf2Driver;
-    if (pDriver) *pDriver = g_wdf2Driver;
+    if (Driver) *Driver = g_wdf2Driver;
     HLOG_USER("[WDF2]   EvtDriverDeviceAdd=%p\n", (void*)g_wdf2Driver->evtDeviceAdd);
     return 0;
 }
 
 // --- WdfDeviceInitSetPnpPowerEventCallbacks (index 19) ---
 static void WINAPI
-stub_WdfDeviceInitSetPnpPowerEventCallbacks(void *globals, void *devInit, void *cbs)
+stub_WdfDeviceInitSetPnpPowerEventCallbacks(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                             PWDFDEVICE_INIT DeviceInit,
+                                             PWDF_PNPPOWER_EVENT_CALLBACKS PnpPowerEventCallbacks)
 {
     HLOG_USER("[WDF2] WdfDeviceInitSetPnpPowerEventCallbacks\n");
-    auto *di = (Wdf2DeviceInit*)devInit;
-    if (di && cbs) {
-        ULONG sz = *(ULONG*)cbs;
+    auto *di = (Wdf2DeviceInit*)DeviceInit;
+    if (di && PnpPowerEventCallbacks) {
+        ULONG sz = *(ULONG*)PnpPowerEventCallbacks;
         if (sz > (ULONG)sizeof(di->pnpPowerCbs)) sz = (ULONG)sizeof(di->pnpPowerCbs);
-        memcpy(di->pnpPowerCbs, cbs, sz);
+        memcpy(di->pnpPowerCbs, PnpPowerEventCallbacks, sz);
     }
 }
 
 // --- WdfDeviceInitSetPowerPolicyEventCallbacks (index 20) ---
 static void WINAPI
-stub_WdfDeviceInitSetPowerPolicyEventCallbacks(void *globals, void *devInit, void *cbs)
+stub_WdfDeviceInitSetPowerPolicyEventCallbacks(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                                PWDFDEVICE_INIT DeviceInit,
+                                                PWDF_POWER_POLICY_EVENT_CALLBACKS PowerPolicyEventCallbacks)
 {
     HLOG_USER("[WDF2] WdfDeviceInitSetPowerPolicyEventCallbacks\n");
-    auto *di = (Wdf2DeviceInit*)devInit;
-    if (di && cbs) {
-        ULONG sz = *(ULONG*)cbs;
+    auto *di = (Wdf2DeviceInit*)DeviceInit;
+    if (di && PowerPolicyEventCallbacks) {
+        ULONG sz = *(ULONG*)PowerPolicyEventCallbacks;
         if (sz > (ULONG)sizeof(di->powerPolicyCbs)) sz = (ULONG)sizeof(di->powerPolicyCbs);
-        memcpy(di->powerPolicyCbs, cbs, sz);
+        memcpy(di->powerPolicyCbs, PowerPolicyEventCallbacks, sz);
     }
 }
 
 // --- WdfDeviceInitSetPowerPolicyOwnership (index 21) ---
 static void WINAPI
-stub_WdfDeviceInitSetPowerPolicyOwnership(void *globals, void *devInit, BOOL owner)
+stub_WdfDeviceInitSetPowerPolicyOwnership(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                           PWDFDEVICE_INIT DeviceInit, BOOLEAN IsPowerPolicyOwner)
 {
-    HLOG_USER("[WDF2] WdfDeviceInitSetPowerPolicyOwnership(%d)\n", owner);
-    auto *di = (Wdf2DeviceInit*)devInit;
-    if (di) di->powerPolicyOwner = owner;
+    HLOG_USER("[WDF2] WdfDeviceInitSetPowerPolicyOwnership(%d)\n", IsPowerPolicyOwner);
+    auto *di = (Wdf2DeviceInit*)DeviceInit;
+    if (di) di->powerPolicyOwner = IsPowerPolicyOwner;
 }
 
 // --- WdfDeviceInitSetIoType (index 22) --- no-op
 static void WINAPI
-stub_WdfDeviceInitSetIoType(void *globals, void *devInit, int ioType)
+stub_WdfDeviceInitSetIoType(PWDF_DRIVER_GLOBALS DriverGlobals,
+                             PWDFDEVICE_INIT DeviceInit, WDF_DEVICE_IO_TYPE IoType)
 {
-    HLOG_USER("[WDF2] WdfDeviceInitSetIoType(%d) no-op\n", ioType);
+    HLOG_USER("[WDF2] WdfDeviceInitSetIoType(%lu) no-op\n", (unsigned long)IoType);
 }
 
 // --- WdfDeviceInitSetFileObjectConfig (index 23) --- no-op
 static void WINAPI
-stub_WdfDeviceInitSetFileObjectConfig(void *globals, void *devInit, void *cfg, void *attrs)
+stub_WdfDeviceInitSetFileObjectConfig(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                       PWDFDEVICE_INIT DeviceInit,
+                                       PWDF_FILEOBJECT_CONFIG FileObjectConfig,
+                                       PWDF_OBJECT_ATTRIBUTES FileObjectAttributes)
 {
     HLOG_USER("[WDF2] WdfDeviceInitSetFileObjectConfig no-op\n");
 }
 
 // --- WdfDeviceInitSetRequestAttributes (index 24) --- no-op
 static void WINAPI
-stub_WdfDeviceInitSetRequestAttributes(void *globals, void *devInit, void *attrs)
+stub_WdfDeviceInitSetRequestAttributes(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                        PWDFDEVICE_INIT DeviceInit,
+                                        PWDF_OBJECT_ATTRIBUTES RequestAttributes)
 {
     HLOG_USER("[WDF2] WdfDeviceInitSetRequestAttributes no-op\n");
 }
 
 // --- WdfDeviceInitSetIoTypeEx (index 43) --- no-op
 static void WINAPI
-stub_WdfDeviceInitSetIoTypeEx(void *globals, void *devInit, void *cfg)
+stub_WdfDeviceInitSetIoTypeEx(PWDF_DRIVER_GLOBALS DriverGlobals,
+                               PWDFDEVICE_INIT DeviceInit, PWDF_IO_TYPE_CONFIG IoTypeConfig)
 {
     HLOG_USER("[WDF2] WdfDeviceInitSetIoTypeEx no-op\n");
 }
@@ -350,31 +431,35 @@ stub_WdfDeviceInitSetIoTypeEx(void *globals, void *devInit, void *cfg)
 //   +0x18 ExecutionLevel, +0x1C SynchronizationScope,
 //   +0x20 ParentObject, +0x28 ContextSizeOverride, +0x30 ContextTypeInfo
 static NTSTATUS WINAPI
-stub_WdfDeviceCreate(void *globals, void **ppDevInit, void *devAttrs, void **pDevice)
+stub_WdfDeviceCreate(PWDF_DRIVER_GLOBALS DriverGlobals, PWDFDEVICE_INIT *DeviceInit,
+                     PWDF_OBJECT_ATTRIBUTES DeviceAttributes, WDFDEVICE *Device)
 {
     HLOG_USER("[WDF2] WdfDeviceCreate\n");
-    auto *di = ppDevInit ? (Wdf2DeviceInit*)*ppDevInit : nullptr;
+    auto *di = DeviceInit ? (Wdf2DeviceInit*)*DeviceInit : nullptr;
 
     g_wdf2Device = new Wdf2Device();
     g_wdf2Device->driver = g_wdf2Driver;
     g_wdf2Device->init   = di;
-    g_wdf2Device->allocContext(devAttrs);
+    g_wdf2Device->allocContext(DeviceAttributes);
 
-    if (ppDevInit) *ppDevInit = nullptr; // "consumed" by the framework
-    if (pDevice)   *pDevice   = g_wdf2Device;
+    if (DeviceInit) *DeviceInit = nullptr; // "consumed" by the framework
+    if (Device)     *Device     = g_wdf2Device;
     return 0;
 }
 
 // --- WdfDeviceSetStaticStopRemove (index 26) --- no-op
 static void WINAPI
-stub_WdfDeviceSetStaticStopRemove(void *globals, void *device, BOOL value)
+stub_WdfDeviceSetStaticStopRemove(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                   WDFDEVICE Device, BOOLEAN Stoppable)
 {
     HLOG_USER("[WDF2] WdfDeviceSetStaticStopRemove no-op\n");
 }
 
 // --- WdfDeviceCreateDeviceInterface (index 27) --- no-op
 static NTSTATUS WINAPI
-stub_WdfDeviceCreateDeviceInterface(void *globals, void *device, void *guid, void *refStr)
+stub_WdfDeviceCreateDeviceInterface(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                                     CONST GUID *InterfaceClassGUID,
+                                     PCUNICODE_STRING ReferenceString)
 {
     HLOG_USER("[WDF2] WdfDeviceCreateDeviceInterface no-op\n");
     return 0;
@@ -382,16 +467,19 @@ stub_WdfDeviceCreateDeviceInterface(void *globals, void *device, void *guid, voi
 
 // --- WdfDeviceSetDeviceInterfaceState (index 28) --- no-op
 static void WINAPI
-stub_WdfDeviceSetDeviceInterfaceState(void *globals, void *device, void *guid,
-                                      void *refStr, BOOL enable)
+stub_WdfDeviceSetDeviceInterfaceState(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                                      CONST GUID *InterfaceClassGUID,
+                                      PCUNICODE_STRING ReferenceString,
+                                      BOOLEAN IsInterfaceEnabled)
 {
-    HLOG_USER("[WDF2] WdfDeviceSetDeviceInterfaceState(%d) no-op\n", enable);
+    HLOG_USER("[WDF2] WdfDeviceSetDeviceInterfaceState(%d) no-op\n", IsInterfaceEnabled);
 }
 
 // --- WdfDeviceQueryProperty (index 31) --- return STATUS_NOT_FOUND
 static NTSTATUS WINAPI
-stub_WdfDeviceQueryProperty(void *globals, void *device, int prop, ULONG bufSz,
-                             void *buf, ULONG *pLen)
+stub_WdfDeviceQueryProperty(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                             DEVICE_REGISTRY_PROPERTY DeviceProperty, ULONG BufferLength,
+                             PVOID PropertyBuffer, PULONG ResultLength)
 {
     HLOG_USER("[WDF2] WdfDeviceQueryProperty no-op\n");
     return 0xC0000225L; // STATUS_NOT_FOUND
@@ -399,29 +487,32 @@ stub_WdfDeviceQueryProperty(void *globals, void *device, int prop, ULONG bufSz,
 
 // --- WdfDeviceSetPnpCapabilities (index 33) --- no-op
 static void WINAPI
-stub_WdfDeviceSetPnpCapabilities(void *globals, void *device, void *caps)
+stub_WdfDeviceSetPnpCapabilities(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                                  PWDF_DEVICE_PNP_CAPABILITIES PnpCapabilities)
 {
     HLOG_USER("[WDF2] WdfDeviceSetPnpCapabilities no-op\n");
 }
 
 // --- WdfDeviceSetPowerCapabilities (index 34) --- no-op
 static void WINAPI
-stub_WdfDeviceSetPowerCapabilities(void *globals, void *device, void *caps)
+stub_WdfDeviceSetPowerCapabilities(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                                    PWDF_DEVICE_POWER_CAPABILITIES PowerCapabilities)
 {
     HLOG_USER("[WDF2] WdfDeviceSetPowerCapabilities no-op\n");
 }
 
 // --- WdfDeviceSetFailed (index 35) --- no-op
 static void WINAPI
-stub_WdfDeviceSetFailed(void *globals, void *device, int reason)
+stub_WdfDeviceSetFailed(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                         WDF_DEVICE_FAILED_ACTION FailedAction)
 {
-    HLOG_USER("[WDF2] WdfDeviceSetFailed(%d) no-op\n", reason);
+    HLOG_USER("[WDF2] WdfDeviceSetFailed(%lu) no-op\n", (unsigned long)FailedAction);
 }
 
 // --- WdfDeviceStopIdleNoTrack (index 36) --- return success
 static NTSTATUS WINAPI
-stub_WdfDeviceStopIdleNoTrack(void *globals, void *device, BOOL waitForD0,
-                               void *file, int line, const char *func)
+stub_WdfDeviceStopIdleNoTrack(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                               BOOLEAN WaitForD0)
 {
     WDF2_LOG(2, "[WDF2] WdfDeviceStopIdleNoTrack\n");
     return 0;
@@ -429,49 +520,50 @@ stub_WdfDeviceStopIdleNoTrack(void *globals, void *device, BOOL waitForD0,
 
 // --- WdfDeviceResumeIdleNoTrack (index 37) --- no-op
 static void WINAPI
-stub_WdfDeviceResumeIdleNoTrack(void *globals, void *device,
-                                 void *file, int line, const char *func)
+stub_WdfDeviceResumeIdleNoTrack(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device)
 {
     WDF2_LOG(2, "[WDF2] WdfDeviceResumeIdleNoTrack\n");
 }
 
 // --- WdfDeviceGetDefaultQueue (index 39) ---
-static void* WINAPI
-stub_WdfDeviceGetDefaultQueue(void *globals, void *device)
+static WDFQUEUE WINAPI
+stub_WdfDeviceGetDefaultQueue(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device)
 {
-    auto *dev = (Wdf2Device*)device;
-    void *q = dev ? dev->queue : nullptr;
+    auto *dev = (Wdf2Device*)Device;
+    WDFQUEUE q = dev ? dev->queue : nullptr;
     WDF2_LOG(2, "[WDF2] WdfDeviceGetDefaultQueue -> %p\n", q);
     return q;
 }
 
 // --- WdfDeviceGetSystemPowerAction (index 41) --- return PowerActionNone = 0
-static int WINAPI
-stub_WdfDeviceGetSystemPowerAction(void *globals, void *device)
+static POWER_ACTION WINAPI
+stub_WdfDeviceGetSystemPowerAction(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device)
 {
     WDF2_LOG(2, "[WDF2] WdfDeviceGetSystemPowerAction -> 0 (PowerActionNone)\n");
-    return 0;
+    return (POWER_ACTION)0;
 }
 
 // --- WdfDeviceSetDeviceState (index 13) --- no-op
 static void WINAPI
-stub_WdfDeviceSetDeviceState(void *globals, void *device, void *state)
+stub_WdfDeviceSetDeviceState(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                              PWDF_DEVICE_STATE DeviceState)
 {
     HLOG_USER("[WDF2] WdfDeviceSetDeviceState no-op\n");
 }
 
 // --- WdfDeviceGetDriver (index 14) ---
-static void* WINAPI
-stub_WdfDeviceGetDriver(void *globals, void *device)
+static WDFDRIVER WINAPI
+stub_WdfDeviceGetDriver(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device)
 {
     WDF2_LOG(2, "[WDF2] WdfDeviceGetDriver -> %p\n", (void*)g_wdf2Driver);
-    return g_wdf2Driver;
+    return (WDFDRIVER)g_wdf2Driver;
 }
 
 // --- WdfDeviceOpenRegistryKey (index 18) ---
 static NTSTATUS WINAPI
-stub_WdfDeviceOpenRegistryKey(void *globals, void *device, ULONG devInstKeyType,
-                               ULONG access, void *attrs, void **pKey)
+stub_WdfDeviceOpenRegistryKey(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                               ULONG DeviceInstanceKeyType, ACCESS_MASK DesiredAccess,
+                               PWDF_OBJECT_ATTRIBUTES KeyAttributes, WDFKEY *Key)
 {
     HLOG_USER("[WDF2] WdfDeviceOpenRegistryKey -> STATUS_OBJECT_NAME_NOT_FOUND\n");
     return 0xC0000034L; // STATUS_OBJECT_NAME_NOT_FOUND
@@ -479,7 +571,8 @@ stub_WdfDeviceOpenRegistryKey(void *globals, void *device, ULONG devInstKeyType,
 
 // --- WdfDeviceAssignS0IdleSettings (index 16) --- return success
 static NTSTATUS WINAPI
-stub_WdfDeviceAssignS0IdleSettings(void *globals, void *device, void *settings)
+stub_WdfDeviceAssignS0IdleSettings(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                                    PWDF_DEVICE_POWER_POLICY_IDLE_SETTINGS Settings)
 {
     HLOG_USER("[WDF2] WdfDeviceAssignS0IdleSettings no-op\n");
     return 0;
@@ -487,24 +580,26 @@ stub_WdfDeviceAssignS0IdleSettings(void *globals, void *device, void *settings)
 
 // --- WdfDeviceAssignSxWakeSettings (index 17) --- return success
 static NTSTATUS WINAPI
-stub_WdfDeviceAssignSxWakeSettings(void *globals, void *device, void *settings)
+stub_WdfDeviceAssignSxWakeSettings(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                                    PWDF_DEVICE_POWER_POLICY_WAKE_SETTINGS Settings)
 {
     HLOG_USER("[WDF2] WdfDeviceAssignSxWakeSettings no-op\n");
     return 0;
 }
 
 // --- WdfDriverCreate table index 57; WdfDriverGetRegistryPath index 58 ---
-static NTSTATUS WINAPI
-stub_WdfDriverGetRegistryPath(void *globals, void *driver, void *string)
+static PWSTR WINAPI
+stub_WdfDriverGetRegistryPath(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDRIVER Driver)
 {
-    HLOG_USER("[WDF2] WdfDriverGetRegistryPath -> empty\n");
-    return 0;
+    HLOG_USER("[WDF2] WdfDriverGetRegistryPath -> NULL\n");
+    return nullptr;
 }
 
 // --- WdfDriverOpenParametersRegistryKey (index 59) ---
 static NTSTATUS WINAPI
-stub_WdfDriverOpenParametersRegistryKey(void *globals, void *driver, ULONG access,
-                                         void *attrs, void **pKey)
+stub_WdfDriverOpenParametersRegistryKey(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDRIVER Driver,
+                                         ACCESS_MASK DesiredAccess,
+                                         PWDF_OBJECT_ATTRIBUTES KeyAttributes, WDFKEY *Key)
 {
     HLOG_USER("[WDF2] WdfDriverOpenParametersRegistryKey -> STATUS_OBJECT_NAME_NOT_FOUND\n");
     return 0xC0000034L;
@@ -518,65 +613,68 @@ stub_WdfDriverOpenParametersRegistryKey(void *globals, void *driver, ULONG acces
 //   +0x28 EvtIoDeviceControl, +0x30 EvtIoInternalDeviceControl,
 //   +0x38 EvtIoStop, +0x40 EvtIoResume
 static NTSTATUS WINAPI
-stub_WdfIoQueueCreate(void *globals, void *device, void *config,
-                      void *queueAttrs, void **pQueue)
+stub_WdfIoQueueCreate(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                      PWDF_IO_QUEUE_CONFIG Config,
+                      PWDF_OBJECT_ATTRIBUTES QueueAttributes, WDFQUEUE *Queue)
 {
     HLOG_USER("[WDF2] WdfIoQueueCreate\n");
     auto *q = new Wdf2Queue();
-    q->device = (Wdf2Device*)device;
-    q->allocContext(queueAttrs);
-    if (config)
-        q->evtIoDeviceControl = *(Wdf2_EvtIoDeviceControl*)((char*)config + 0x28);
+    q->device = (Wdf2Device*)Device;
+    q->allocContext(QueueAttributes);
+    if (Config)
+        q->evtIoDeviceControl = *(Wdf2_EvtIoDeviceControl*)((char*)Config + 0x28);
 
     HLOG_USER("[WDF2]   EvtIoDeviceControl=%p\n", (void*)q->evtIoDeviceControl);
 
-    if (device && !((Wdf2Device*)device)->queue)
-        ((Wdf2Device*)device)->queue = q;
+    if (Device && !((Wdf2Device*)Device)->queue)
+        ((Wdf2Device*)Device)->queue = q;
     if (!g_wdf2Queue)
         g_wdf2Queue = q;
-    if (pQueue) *pQueue = q;
+    if (Queue) *Queue = q;
     return 0;
 }
 
 // --- WdfIoQueueGetDevice (index 90) ---
-static void* WINAPI
-stub_WdfIoQueueGetDevice(void *globals, void *queue)
+static WDFDEVICE WINAPI
+stub_WdfIoQueueGetDevice(PWDF_DRIVER_GLOBALS DriverGlobals, WDFQUEUE Queue)
 {
-    auto *q = (Wdf2Queue*)queue;
-    void *dev = q ? q->device : nullptr;
+    auto *q = (Wdf2Queue*)Queue;
+    WDFDEVICE dev = q ? q->device : nullptr;
     WDF2_LOG(2, "[WDF2] WdfIoQueueGetDevice -> %p\n", dev);
     return dev;
 }
 
 // --- WdfIoQueueStart (index 87) --- no-op
-static NTSTATUS WINAPI
-stub_WdfIoQueueStart(void *globals, void *queue)
+static VOID WINAPI
+stub_WdfIoQueueStart(PWDF_DRIVER_GLOBALS DriverGlobals, WDFQUEUE Queue)
 {
     WDF2_LOG(2, "[WDF2] WdfIoQueueStart\n");
-    return 0;
 }
 
 // --- WdfIoQueueStop (index 88) --- no-op
 static void WINAPI
-stub_WdfIoQueueStop(void *globals, void *queue, void *stopCb, void *ctx)
+stub_WdfIoQueueStop(PWDF_DRIVER_GLOBALS DriverGlobals, WDFQUEUE Queue,
+                     PFN_WDF_IO_QUEUE_STATE StopComplete, WDFCONTEXT Context)
 {
     WDF2_LOG(2, "[WDF2] WdfIoQueueStop\n");
 }
 
 // --- WdfIoTargetCreate (index 102) ---
 static NTSTATUS WINAPI
-stub_WdfIoTargetCreate(void *globals, void *device, void *attrs, void **pTarget)
+stub_WdfIoTargetCreate(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                        PWDF_OBJECT_ATTRIBUTES IoTargetAttributes, WDFIOTARGET *IoTarget)
 {
     HLOG_USER("[WDF2] WdfIoTargetCreate\n");
     // Return a tagged non-NULL pointer as dummy handle
     static char dummy_target[8];
-    if (pTarget) *pTarget = dummy_target;
+    if (IoTarget) *IoTarget = dummy_target;
     return 0;
 }
 
 // --- WdfIoTargetOpen (index 103) --- stub; succeeds without actual USB
 static NTSTATUS WINAPI
-stub_WdfIoTargetOpen(void *globals, void *target, void *params)
+stub_WdfIoTargetOpen(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget,
+                      PWDF_IO_TARGET_OPEN_PARAMS OpenParams)
 {
     HLOG_USER("[WDF2] WdfIoTargetOpen (stub -> success)\n");
     return 0;
@@ -584,21 +682,21 @@ stub_WdfIoTargetOpen(void *globals, void *target, void *params)
 
 // --- WdfIoTargetCloseForQueryRemove (index 104) --- no-op
 static void WINAPI
-stub_WdfIoTargetCloseForQueryRemove(void *globals, void *target)
+stub_WdfIoTargetCloseForQueryRemove(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget)
 {
     WDF2_LOG(2, "[WDF2] WdfIoTargetCloseForQueryRemove\n");
 }
 
 // --- WdfIoTargetClose (index 105) --- no-op
 static void WINAPI
-stub_WdfIoTargetClose(void *globals, void *target)
+stub_WdfIoTargetClose(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget)
 {
     WDF2_LOG(2, "[WDF2] WdfIoTargetClose\n");
 }
 
 // --- WdfIoTargetStart (index 106) ---
 static NTSTATUS WINAPI
-stub_WdfIoTargetStart(void *globals, void *target)
+stub_WdfIoTargetStart(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget)
 {
     HLOG_USER("[WDF2] WdfIoTargetStart (stub -> success)\n");
     return 0;
@@ -606,102 +704,110 @@ stub_WdfIoTargetStart(void *globals, void *target)
 
 // --- WdfIoTargetStop (index 107) --- no-op
 static void WINAPI
-stub_WdfIoTargetStop(void *globals, void *target, int action)
+stub_WdfIoTargetStop(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget,
+                      WDF_IO_TARGET_SENT_IO_ACTION Action)
 {
     HLOG_USER("[WDF2] WdfIoTargetStop no-op\n");
 }
 
 // --- WdfIoTargetGetDevice (index 110) ---
-static void* WINAPI
-stub_WdfIoTargetGetDevice(void *globals, void *target)
+static WDFDEVICE WINAPI
+stub_WdfIoTargetGetDevice(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget)
 {
     WDF2_LOG(2, "[WDF2] WdfIoTargetGetDevice -> %p\n", (void*)g_wdf2Device);
-    return g_wdf2Device;
+    return (WDFDEVICE)g_wdf2Device;
 }
 
 // --- WdfMemoryCreate (index 117) ---
 static NTSTATUS WINAPI
-stub_WdfMemoryCreate(void *globals, void *attrs, int poolType, ULONG tag,
-                     size_t bufSize, void **pMem)
+stub_WdfMemoryCreate(PWDF_DRIVER_GLOBALS DriverGlobals,
+                     PWDF_OBJECT_ATTRIBUTES Attributes, POOL_TYPE PoolType,
+                     ULONG PoolTag, size_t BufferSize, WDFMEMORY *Memory,
+                     PVOID *Buffer)
 {
-    HLOG_USER("[WDF2] WdfMemoryCreate(size=%zu)\n", bufSize);
+    HLOG_USER("[WDF2] WdfMemoryCreate(size=%zu)\n", BufferSize);
     auto *m = new Wdf2Memory();
-    m->buf   = calloc(1, bufSize ? bufSize : 1);
-    m->size  = bufSize;
+    m->buf   = calloc(1, BufferSize ? BufferSize : 1);
+    m->size  = BufferSize;
     m->owner = true;
-    m->allocContext(attrs);
-    if (pMem) *pMem = m;
+    m->allocContext(Attributes);
+    if (Memory) *Memory = m;
+    if (Buffer) *Buffer = m->buf;
     return 0;
 }
 
 // --- WdfMemoryCreatePreallocated (index 118) ---
 static NTSTATUS WINAPI
-stub_WdfMemoryCreatePreallocated(void *globals, void *attrs, void *buf, size_t size,
-                                  void **pMem)
+stub_WdfMemoryCreatePreallocated(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                  PWDF_OBJECT_ATTRIBUTES Attributes,
+                                  PVOID Buffer, size_t BufferSize, WDFMEMORY *Memory)
 {
-    HLOG_USER("[WDF2] WdfMemoryCreatePreallocated(buf=%p, size=%zu)\n", buf, size);
+    HLOG_USER("[WDF2] WdfMemoryCreatePreallocated(buf=%p, size=%zu)\n", Buffer, BufferSize);
     auto *m = new Wdf2Memory();
-    m->buf   = buf;
-    m->size  = size;
+    m->buf   = Buffer;
+    m->size  = BufferSize;
     m->owner = false;
-    m->allocContext(attrs);
-    if (pMem) *pMem = m;
+    m->allocContext(Attributes);
+    if (Memory) *Memory = m;
     return 0;
 }
 
 // --- WdfMemoryGetBuffer (index 119) ---
-static void* WINAPI
-stub_WdfMemoryGetBuffer(void *globals, void *mem, size_t *pSize)
+static PVOID WINAPI
+stub_WdfMemoryGetBuffer(PWDF_DRIVER_GLOBALS DriverGlobals, WDFMEMORY Memory, size_t *BufferSize)
 {
-    auto *m = (Wdf2Memory*)mem;
-    if (!m) { if (pSize) *pSize = 0; return nullptr; }
-    if (pSize) *pSize = m->size;
+    auto *m = (Wdf2Memory*)Memory;
+    if (!m) { if (BufferSize) *BufferSize = 0; return nullptr; }
+    if (BufferSize) *BufferSize = m->size;
     WDF2_LOG(2, "[WDF2] WdfMemoryGetBuffer -> %p (size=%zu)\n", m->buf, m->size);
     return m->buf;
 }
 
 // --- WdfObjectGetTypedContextWorker (index 123) ---
-static void* WINAPI
-stub_WdfObjectGetTypedContextWorker(void *globals, void *handle, void *typeInfo)
+static PVOID WINAPI
+stub_WdfObjectGetTypedContextWorker(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                     WDFOBJECT Handle, PCWDF_OBJECT_CONTEXT_TYPE_INFO TypeInfo)
 {
-    auto *obj = (Wdf2Obj*)handle;
-    void *ctx = obj ? obj->context : nullptr;
-    WDF2_LOG(2, "[WDF2] WdfObjectGetTypedContextWorker(handle=%p) -> %p\n", handle, ctx);
+    auto *obj = (Wdf2Obj*)Handle;
+    PVOID ctx = obj ? obj->context : nullptr;
+    WDF2_LOG(2, "[WDF2] WdfObjectGetTypedContextWorker(handle=%p) -> %p\n", Handle, ctx);
     return ctx;
 }
 
 // --- WdfObjectAllocateContext (index 124) ---
 static NTSTATUS WINAPI
-stub_WdfObjectAllocateContext(void *globals, void *handle, void *attrs, void **pCtx)
+stub_WdfObjectAllocateContext(PWDF_DRIVER_GLOBALS DriverGlobals, WDFOBJECT Handle,
+                               PWDF_OBJECT_ATTRIBUTES ContextAttributes, PVOID *Context)
 {
-    auto *obj = (Wdf2Obj*)handle;
+    auto *obj = (Wdf2Obj*)Handle;
     if (!obj) return 0xC000000DL; // STATUS_INVALID_PARAMETER
-    obj->allocContext(attrs);
-    if (pCtx) *pCtx = obj->context;
-    WDF2_LOG(1, "[WDF2] WdfObjectAllocateContext(handle=%p) -> ctx=%p\n", handle, obj->context);
+    obj->allocContext(ContextAttributes);
+    if (Context) *Context = obj->context;
+    WDF2_LOG(1, "[WDF2] WdfObjectAllocateContext(handle=%p) -> ctx=%p\n", Handle, obj->context);
     return 0;
 }
 
 // --- WdfObjectContextGetObject (index 125) ---
-static void* WINAPI
-stub_WdfObjectContextGetObject(void *globals, void *ctx)
+static WDFOBJECT WINAPI
+stub_WdfObjectContextGetObject(PWDF_DRIVER_GLOBALS DriverGlobals, PVOID ContextPointer)
 {
     // We don't track reverse mapping; return NULL
-    WDF2_LOG(2, "[WDF2] WdfObjectContextGetObject(ctx=%p) -> NULL (no reverse map)\n", ctx);
+    WDF2_LOG(2, "[WDF2] WdfObjectContextGetObject(ctx=%p) -> NULL (no reverse map)\n", ContextPointer);
     return nullptr;
 }
 
 // --- WdfObjectDelete (index 129) --- no-op (no ref-counting in stub)
 static void WINAPI
-stub_WdfObjectDelete(void *globals, void *handle)
+stub_WdfObjectDelete(PWDF_DRIVER_GLOBALS DriverGlobals, WDFOBJECT Object)
 {
-    HLOG_USER("[WDF2] WdfObjectDelete(%p) no-op\n", handle);
+    HLOG_USER("[WDF2] WdfObjectDelete(%p) no-op\n", Object);
 }
 
 // --- WdfRegistryOpenKey (index 131) ---
 static NTSTATUS WINAPI
-stub_WdfRegistryOpenKey(void *globals, void *key, void *keyName, ULONG access,
-                         void *attrs, void **pKey)
+stub_WdfRegistryOpenKey(PWDF_DRIVER_GLOBALS DriverGlobals, WDFKEY ParentKey,
+                         PCUNICODE_STRING KeyName, ACCESS_MASK DesiredAccess,
+                         PWDF_OBJECT_ATTRIBUTES KeyAttributes, WDFKEY *Key)
 {
     HLOG_USER("[WDF2] WdfRegistryOpenKey -> STATUS_OBJECT_NAME_NOT_FOUND\n");
     return 0xC0000034L;
@@ -709,8 +815,10 @@ stub_WdfRegistryOpenKey(void *globals, void *key, void *keyName, ULONG access,
 
 // --- WdfRegistryCreateKey (index 132) --- fail
 static NTSTATUS WINAPI
-stub_WdfRegistryCreateKey(void *globals, void *parentKey, void *keyName, ULONG access,
-                           ULONG createOpts, ULONG *disposition, void *attrs, void **pKey)
+stub_WdfRegistryCreateKey(PWDF_DRIVER_GLOBALS DriverGlobals, WDFKEY ParentKey,
+                           PCUNICODE_STRING KeyName, ACCESS_MASK DesiredAccess,
+                           ULONG CreateOptions, PULONG CreateDisposition,
+                           PWDF_OBJECT_ATTRIBUTES KeyAttributes, WDFKEY *Key)
 {
     HLOG_USER("[WDF2] WdfRegistryCreateKey -> STATUS_OBJECT_NAME_NOT_FOUND\n");
     return 0xC0000034L;
@@ -718,14 +826,15 @@ stub_WdfRegistryCreateKey(void *globals, void *parentKey, void *keyName, ULONG a
 
 // --- WdfRegistryClose (index 133) --- no-op
 static void WINAPI
-stub_WdfRegistryClose(void *globals, void *key)
+stub_WdfRegistryClose(PWDF_DRIVER_GLOBALS DriverGlobals, WDFKEY Key)
 {
     HLOG_USER("[WDF2] WdfRegistryClose no-op\n");
 }
 
 // --- WdfRegistryQueryULong (index 141) --- not found
 static NTSTATUS WINAPI
-stub_WdfRegistryQueryULong(void *globals, void *key, void *valueName, ULONG *pValue)
+stub_WdfRegistryQueryULong(PWDF_DRIVER_GLOBALS DriverGlobals, WDFKEY Key,
+                            PCUNICODE_STRING ValueName, PULONG Value)
 {
     HLOG_USER("[WDF2] WdfRegistryQueryULong -> STATUS_OBJECT_NAME_NOT_FOUND\n");
     return 0xC0000034L;
@@ -733,8 +842,9 @@ stub_WdfRegistryQueryULong(void *globals, void *key, void *valueName, ULONG *pVa
 
 // --- WdfRegistryQueryUnicodeString (index 139) --- not found
 static NTSTATUS WINAPI
-stub_WdfRegistryQueryUnicodeString(void *globals, void *key, void *valueName,
-                                    void *requiredSize, void *value)
+stub_WdfRegistryQueryUnicodeString(PWDF_DRIVER_GLOBALS DriverGlobals, WDFKEY Key,
+                                    PCUNICODE_STRING ValueName,
+                                    PUSHORT ValueByteLength, PUNICODE_STRING Value)
 {
     HLOG_USER("[WDF2] WdfRegistryQueryUnicodeString -> STATUS_OBJECT_NAME_NOT_FOUND\n");
     return 0xC0000034L;
@@ -742,17 +852,18 @@ stub_WdfRegistryQueryUnicodeString(void *globals, void *key, void *valueName,
 
 // --- WdfRegistryAssignULong (index 147) --- no-op
 static NTSTATUS WINAPI
-stub_WdfRegistryAssignULong(void *globals, void *key, void *valueName, ULONG value)
+stub_WdfRegistryAssignULong(PWDF_DRIVER_GLOBALS DriverGlobals, WDFKEY Key,
+                             PCUNICODE_STRING ValueName, ULONG Value)
 {
-    WDF2_LOG(2, "[WDF2] WdfRegistryAssignULong(value=%lu)\n", (unsigned long)value);
+    WDF2_LOG(2, "[WDF2] WdfRegistryAssignULong(value=%lu)\n", (unsigned long)Value);
     return 0;
 }
 
 // --- WdfRequestGetStatus (index 153) ---
 static NTSTATUS WINAPI
-stub_WdfRequestGetStatus(void *globals, void *request)
+stub_WdfRequestGetStatus(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request)
 {
-    auto *r = (Wdf2Request*)request;
+    auto *r = (Wdf2Request*)Request;
     NTSTATUS s = r ? r->status : 0;
     WDF2_LOG(2, "[WDF2] WdfRequestGetStatus -> 0x%lx\n", (long)s);
     return s;
@@ -760,22 +871,24 @@ stub_WdfRequestGetStatus(void *globals, void *request)
 
 // --- WdfRequestComplete (index 163) ---
 static void WINAPI
-stub_WdfRequestComplete(void *globals, void *request, NTSTATUS status)
+stub_WdfRequestComplete(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request,
+                         NTSTATUS Status)
 {
-    HLOG_USER("[WDF2] WdfRequestComplete(%p, 0x%lx)\n", request, (long)status);
-    auto *r = (Wdf2Request*)request;
-    if (r) { r->status = status; r->completed = true; }
+    HLOG_USER("[WDF2] WdfRequestComplete(%p, 0x%lx)\n", Request, (long)Status);
+    auto *r = (Wdf2Request*)Request;
+    if (r) { r->status = Status; r->completed = true; }
 }
 
 // --- WdfRequestCompleteWithInformation (index 164) ---
 static void WINAPI
-stub_WdfRequestCompleteWithInformation(void *globals, void *request,
-                                        NTSTATUS status, ULONG_PTR info)
+stub_WdfRequestCompleteWithInformation(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                        WDFREQUEST Request, NTSTATUS Status,
+                                        ULONG_PTR Information)
 {
     HLOG_USER("[WDF2] WdfRequestCompleteWithInformation(%p, 0x%lx, %lu)\n",
-              request, (long)status, (unsigned long)info);
-    auto *r = (Wdf2Request*)request;
-    if (r) { r->status = status; r->information = info; r->completed = true; }
+              Request, (long)Status, (unsigned long)Information);
+    auto *r = (Wdf2Request*)Request;
+    if (r) { r->status = Status; r->information = Information; r->completed = true; }
 }
 
 // --- WdfRequestGetParameters (index 165) ---
@@ -784,86 +897,92 @@ stub_WdfRequestCompleteWithInformation(void *globals, void *request,
 //   +0x08 OutputBufferLength (size_t), +0x10 InputBufferLength (size_t)
 //   +0x18 IoControlCode (ULONG), +0x20 Type3InputBuffer (void*)
 static void WINAPI
-stub_WdfRequestGetParameters(void *globals, void *request, void *params)
+stub_WdfRequestGetParameters(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request,
+                              PWDF_REQUEST_PARAMETERS Parameters)
 {
-    auto *r = (Wdf2Request*)request;
+    auto *r = (Wdf2Request*)Request;
     WDF2_LOG(1, "[WDF2] WdfRequestGetParameters(ioctl=0x%lx)\n", r ? (long)r->ioctlCode : 0L);
-    if (!r || !params) return;
-    ULONG sz = *(ULONG*)params;
+    if (!r || !Parameters) return;
+    ULONG sz = *(ULONG*)Parameters;
     if (sz < 4) return;
-    memset(params, 0, sz);
-    *(ULONG*)((char*)params + 0x00) = sz;
+    memset(Parameters, 0, sz);
+    *(ULONG*)((char*)Parameters + 0x00) = sz;
     // Type = WdfRequestTypeDeviceControl = 0x0E
-    *((UCHAR*)params + 0x05) = 0x0E;
+    *((UCHAR*)Parameters + 0x05) = 0x0E;
     if (sz >= 0x1C) {
-        *(size_t*)((char*)params + 0x08) = r->outMem ? r->outMem->size : 0;
-        *(size_t*)((char*)params + 0x10) = r->inMem  ? r->inMem->size  : 0;
-        *(ULONG*) ((char*)params + 0x18) = r->ioctlCode;
+        *(size_t*)((char*)Parameters + 0x08) = r->outMem ? r->outMem->size : 0;
+        *(size_t*)((char*)Parameters + 0x10) = r->inMem  ? r->inMem->size  : 0;
+        *(ULONG*) ((char*)Parameters + 0x18) = r->ioctlCode;
     }
 }
 
 // --- WdfRequestRetrieveInputMemory (index 166) ---
 static NTSTATUS WINAPI
-stub_WdfRequestRetrieveInputMemory(void *globals, void *request, void **pMem)
+stub_WdfRequestRetrieveInputMemory(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                    WDFREQUEST Request, WDFMEMORY *Memory)
 {
-    auto *r = (Wdf2Request*)request;
+    auto *r = (Wdf2Request*)Request;
     if (!r || !r->inMem) { WDF2_LOG(2, "[WDF2] WdfRequestRetrieveInputMemory -> UNSUCCESSFUL\n"); return 0xC0000001L; }
     WDF2_LOG(2, "[WDF2] WdfRequestRetrieveInputMemory -> %p (size=%zu)\n", r->inMem->buf, r->inMem->size);
-    if (pMem) *pMem = r->inMem;
+    if (Memory) *Memory = r->inMem;
     return 0;
 }
 
 // --- WdfRequestRetrieveOutputMemory (index 167) ---
 static NTSTATUS WINAPI
-stub_WdfRequestRetrieveOutputMemory(void *globals, void *request, void **pMem)
+stub_WdfRequestRetrieveOutputMemory(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                     WDFREQUEST Request, WDFMEMORY *Memory)
 {
-    auto *r = (Wdf2Request*)request;
+    auto *r = (Wdf2Request*)Request;
     if (!r || !r->outMem) { WDF2_LOG(2, "[WDF2] WdfRequestRetrieveOutputMemory -> UNSUCCESSFUL\n"); return 0xC0000001L; }
     WDF2_LOG(2, "[WDF2] WdfRequestRetrieveOutputMemory -> %p (size=%zu)\n", r->outMem->buf, r->outMem->size);
-    if (pMem) *pMem = r->outMem;
+    if (Memory) *Memory = r->outMem;
     return 0;
 }
 
 // --- WdfRequestRetrieveInputBuffer (index 168) ---
 static NTSTATUS WINAPI
-stub_WdfRequestRetrieveInputBuffer(void *globals, void *request, size_t minRequired,
-                                    void **pBuf, size_t *pLen)
+stub_WdfRequestRetrieveInputBuffer(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request,
+                                    size_t MinimumRequiredLength,
+                                    PVOID *Buffer, size_t *Length)
 {
-    auto *r = (Wdf2Request*)request;
+    auto *r = (Wdf2Request*)Request;
     if (!r || !r->inMem) { WDF2_LOG(2, "[WDF2] WdfRequestRetrieveInputBuffer -> UNSUCCESSFUL\n"); return 0xC0000001L; }
     WDF2_LOG(2, "[WDF2] WdfRequestRetrieveInputBuffer -> %p (size=%zu)\n", r->inMem->buf, r->inMem->size);
-    if (pBuf) *pBuf = r->inMem->buf;
-    if (pLen) *pLen = r->inMem->size;
+    if (Buffer) *Buffer = r->inMem->buf;
+    if (Length) *Length = r->inMem->size;
     return 0;
 }
 
 // --- WdfRequestRetrieveOutputBuffer (index 169) ---
 static NTSTATUS WINAPI
-stub_WdfRequestRetrieveOutputBuffer(void *globals, void *request, size_t minRequired,
-                                     void **pBuf, size_t *pLen)
+stub_WdfRequestRetrieveOutputBuffer(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request,
+                                     size_t MinimumRequiredSize,
+                                     PVOID *Buffer, size_t *Length)
 {
-    auto *r = (Wdf2Request*)request;
+    auto *r = (Wdf2Request*)Request;
     if (!r || !r->outMem) { WDF2_LOG(2, "[WDF2] WdfRequestRetrieveOutputBuffer -> UNSUCCESSFUL\n"); return 0xC0000001L; }
     WDF2_LOG(2, "[WDF2] WdfRequestRetrieveOutputBuffer -> %p (size=%zu)\n", r->outMem->buf, r->outMem->size);
-    if (pBuf) *pBuf = r->outMem->buf;
-    if (pLen) *pLen = r->outMem->size;
+    if (Buffer) *Buffer = r->outMem->buf;
+    if (Length) *Length = r->outMem->size;
     return 0;
 }
 
 // --- WdfRequestSetInformation (index 170) ---
 static void WINAPI
-stub_WdfRequestSetInformation(void *globals, void *request, ULONG_PTR info)
+stub_WdfRequestSetInformation(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request,
+                               ULONG_PTR Information)
 {
-    WDF2_LOG(2, "[WDF2] WdfRequestSetInformation(info=%lu)\n", (unsigned long)info);
-    auto *r = (Wdf2Request*)request;
-    if (r) r->information = info;
+    WDF2_LOG(2, "[WDF2] WdfRequestSetInformation(info=%lu)\n", (unsigned long)Information);
+    auto *r = (Wdf2Request*)Request;
+    if (r) r->information = Information;
 }
 
 // --- WdfRequestGetInformation (index 171) ---
 static ULONG_PTR WINAPI
-stub_WdfRequestGetInformation(void *globals, void *request)
+stub_WdfRequestGetInformation(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request)
 {
-    auto *r = (Wdf2Request*)request;
+    auto *r = (Wdf2Request*)Request;
     ULONG_PTR info = r ? r->information : 0;
     WDF2_LOG(2, "[WDF2] WdfRequestGetInformation -> %lu\n", (unsigned long)info);
     return info;
@@ -871,36 +990,46 @@ stub_WdfRequestGetInformation(void *globals, void *request)
 
 // --- WdfRequestForwardToIoQueue (index 174) ---
 static NTSTATUS WINAPI
-stub_WdfRequestForwardToIoQueue(void *globals, void *request, void *queue)
+stub_WdfRequestForwardToIoQueue(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request,
+                                 WDFQUEUE DestinationQueue)
 {
     HLOG_USER("[WDF2] WdfRequestForwardToIoQueue no-op\n");
     return 0;
 }
 
 // --- WdfRequestGetIoQueue (index 175) ---
-static void* WINAPI
-stub_WdfRequestGetIoQueue(void *globals, void *request)
+static WDFQUEUE WINAPI
+stub_WdfRequestGetIoQueue(PWDF_DRIVER_GLOBALS DriverGlobals, WDFREQUEST Request)
 {
-    auto *r = (Wdf2Request*)request;
-    void *q = r ? r->queue : nullptr;
+    auto *r = (Wdf2Request*)Request;
+    WDFQUEUE q = r ? r->queue : nullptr;
     WDF2_LOG(2, "[WDF2] WdfRequestGetIoQueue -> %p\n", q);
     return q;
 }
 
 // --- WdfCmResourceListGetCount (index 186) ---
 static ULONG WINAPI
-stub_WdfCmResourceListGetCount(void *globals, void *list)
+stub_WdfCmResourceListGetCount(PWDF_DRIVER_GLOBALS DriverGlobals, WDFCMRESLIST List)
 {
     WDF2_LOG(1, "[WDF2] WdfCmResourceListGetCount -> 0 (empty)\n");
     return 0; // empty resource list
 }
 
 // --- WdfCmResourceListGetDescriptor (index 187) ---
-static void* WINAPI
-stub_WdfCmResourceListGetDescriptor(void *globals, void *list, ULONG index)
+static PVOID WINAPI
+stub_WdfCmResourceListGetDescriptor(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                     WDFCMRESLIST List, ULONG Index)
 {
-    WDF2_LOG(1, "[WDF2] WdfCmResourceListGetDescriptor(idx=%lu) -> NULL\n", (unsigned long)index);
+    WDF2_LOG(1, "[WDF2] WdfCmResourceListGetDescriptor(idx=%lu) -> NULL\n", (unsigned long)Index);
     return nullptr;
+}
+
+// --- WdfPdoGetParent (index 221) --- returns the single host device
+static WDFDEVICE WINAPI
+stub_WdfPdoGetParent(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device)
+{
+    WDF2_LOG(1, "[WDF2] WdfPdoGetParent -> g_wdf2Device\n");
+    return (WDFDEVICE)g_wdf2Device;
 }
 
 // -----------------------------------------------------------------------
@@ -926,7 +1055,8 @@ static Wdf2UsbDevice g_wdf2UsbDev;
 
 // --- WdfUsbTargetDeviceCreate (index 202) ---
 static NTSTATUS WINAPI
-stub_WdfUsbTargetDeviceCreate(void *globals, void *device, void *attrs, void **pUsbDevice)
+stub_WdfUsbTargetDeviceCreate(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
+                               PWDF_OBJECT_ATTRIBUTES Attributes, WDFUSBDEVICE *UsbDevice)
 {
     // Parse USB_ID env var (format "vid:pid") for VID/PID, default = Goodix 27c6:6594
     USHORT vid = 0x27c6, pid = 0x6594;
@@ -941,7 +1071,7 @@ stub_WdfUsbTargetDeviceCreate(void *globals, void *device, void *attrs, void **p
     g_wdf2UsbDev.iface.pipes[1]   = { 0x01, 512, 3 }; // bulk-out
 
     HLOG_USER("[WDF2] WdfUsbTargetDeviceCreate -> %04x:%04x (2 bulk pipes)\n", vid, pid);
-    if (pUsbDevice) *pUsbDevice = &g_wdf2UsbDev;
+    if (UsbDevice) *UsbDevice = &g_wdf2UsbDev;
     return 0;
 }
 
@@ -949,18 +1079,20 @@ stub_WdfUsbTargetDeviceCreate(void *globals, void *device, void *attrs, void **p
 // Fills WDF_USB_DEVICE_INFORMATION: Size, USBD_Version, Supported_USB_Version,
 // HcdPortCapabilities, Traits
 static NTSTATUS WINAPI
-stub_WdfUsbTargetDeviceRetrieveInformation(void *globals, void *usbDevice, void *info)
+stub_WdfUsbTargetDeviceRetrieveInformation(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                            WDFUSBDEVICE UsbDevice,
+                                            PWDF_USB_DEVICE_INFORMATION Information)
 {
     WDF2_LOG(1, "[WDF2] WdfUsbTargetDeviceRetrieveInformation\n");
-    if (info) {
-        ULONG sz = *(ULONG*)info;
+    if (Information) {
+        ULONG sz = *(ULONG*)Information;
         if (sz >= 20) {
-            memset(info, 0, sz);
-            *(ULONG*)((char*)info + 0)  = sz;          // Size
-            *(ULONG*)((char*)info + 4)  = 0x00050000;  // USBD_Version (5.0 = WinXP+)
-            *(ULONG*)((char*)info + 8)  = 0x00000200;  // Supported_USB_Version (USB 2.0)
-            *(ULONG*)((char*)info + 12) = 0;           // HcdPortCapabilities
-            *(ULONG*)((char*)info + 16) = 2;           // Traits: WDF_USB_DEVICE_TRAIT_AT_HIGH_SPEED
+            memset(Information, 0, sz);
+            *(ULONG*)((char*)Information + 0)  = sz;          // Size
+            *(ULONG*)((char*)Information + 4)  = 0x00050000;  // USBD_Version (5.0 = WinXP+)
+            *(ULONG*)((char*)Information + 8)  = 0x00000200;  // Supported_USB_Version (USB 2.0)
+            *(ULONG*)((char*)Information + 12) = 0;           // HcdPortCapabilities
+            *(ULONG*)((char*)Information + 16) = 2;           // Traits: WDF_USB_DEVICE_TRAIT_AT_HIGH_SPEED
         }
     }
     return 0;
@@ -968,14 +1100,16 @@ stub_WdfUsbTargetDeviceRetrieveInformation(void *globals, void *usbDevice, void 
 
 // --- WdfUsbTargetDeviceGetDeviceDescriptor (index 205) --- void return
 static void WINAPI
-stub_WdfUsbTargetDeviceGetDeviceDescriptor(void *globals, void *usbDevice, void *desc)
+stub_WdfUsbTargetDeviceGetDeviceDescriptor(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                            WDFUSBDEVICE UsbDevice,
+                                            PUSB_DEVICE_DESCRIPTOR UsbDeviceDescriptor)
 {
-    auto *ud = (Wdf2UsbDevice*)usbDevice;
+    auto *ud = (Wdf2UsbDevice*)UsbDevice;
     HLOG_USER("[WDF2] WdfUsbTargetDeviceGetDeviceDescriptor -> %04x:%04x\n",
               ud ? ud->idVendor : 0, ud ? ud->idProduct : 0);
-    if (!desc) return;
+    if (!UsbDeviceDescriptor) return;
     // USB_DEVICE_DESCRIPTOR layout (18 bytes)
-    UCHAR *d = (UCHAR*)desc;
+    UCHAR *d = (UCHAR*)UsbDeviceDescriptor;
     memset(d, 0, 18);
     d[0]  = 18;    d[1] = 0x01;               // bLength, bDescriptorType
     d[2]  = 0x00;  d[3] = 0x02;               // bcdUSB = 0x0200
@@ -990,7 +1124,8 @@ stub_WdfUsbTargetDeviceGetDeviceDescriptor(void *globals, void *usbDevice, void 
 
 // --- WdfUsbTargetDeviceGetNumInterfaces (index 210) --- returns UCHAR
 static UCHAR WINAPI
-stub_WdfUsbTargetDeviceGetNumInterfaces(void *globals, void *usbDevice)
+stub_WdfUsbTargetDeviceGetNumInterfaces(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                         WDFUSBDEVICE UsbDevice)
 {
     HLOG_USER("[WDF2] WdfUsbTargetDeviceGetNumInterfaces -> 1\n");
     return 1;
@@ -1000,17 +1135,19 @@ stub_WdfUsbTargetDeviceGetNumInterfaces(void *globals, void *usbDevice)
 // Output (for SingleInterface): Types.SingleInterface.NumberConfiguredPipes (at +8)
 //                               Types.SingleInterface.ConfiguredUsbInterface (at +16)
 static NTSTATUS WINAPI
-stub_WdfUsbTargetDeviceSelectConfig(void *globals, void *usbDevice,
-                                    void *pipeAttrs, void *params)
+stub_WdfUsbTargetDeviceSelectConfig(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                    WDFUSBDEVICE UsbDevice,
+                                    PWDF_OBJECT_ATTRIBUTES PipeAttributes,
+                                    PWDF_USB_DEVICE_SELECT_CONFIG_PARAMS Params)
 {
-    auto *ud = (Wdf2UsbDevice*)usbDevice;
+    auto *ud = (Wdf2UsbDevice*)UsbDevice;
     HLOG_USER("[WDF2] WdfUsbTargetDeviceSelectConfig\n");
-    if (params && ud) {
+    if (Params && ud) {
         // Types union starts at offset 8; SingleInterface layout:
         //   +0 (=+8):  NumberConfiguredPipes (UCHAR)
         //   +8 (=+16): ConfiguredUsbInterface (ptr, 8-byte aligned)
-        *((UCHAR*)params + 8)         = ud->iface.numPipes;
-        *(void**)((char*)params + 16) = &ud->iface;
+        *((UCHAR*)Params + 8)         = ud->iface.numPipes;
+        *(void**)((char*)Params + 16) = &ud->iface;
     }
     return 0;
 }
@@ -1019,29 +1156,30 @@ stub_WdfUsbTargetDeviceSelectConfig(void *globals, void *usbDevice,
 // WDF_USB_PIPE_INFORMATION: Size(+0), MaxPacketSize(+4), EndpointAddr(+8),
 //   Interval(+9), SettingIndex(+10), PipeType(+12), MaxTransferSize(+16)
 static void WINAPI
-stub_WdfUsbTargetPipeGetInformation(void *globals, void *pipe, void *info)
+stub_WdfUsbTargetPipeGetInformation(PWDF_DRIVER_GLOBALS DriverGlobals, WDFUSBPIPE Pipe,
+                                     PWDF_USB_PIPE_INFORMATION PipeInformation)
 {
-    auto *p = (Wdf2UsbPipe*)pipe;
+    auto *p = (Wdf2UsbPipe*)Pipe;
     WDF2_LOG(1, "[WDF2] WdfUsbTargetPipeGetInformation(pipe=%p ep=0x%02x)\n",
-             pipe, p ? p->endpointAddr : 0);
-    if (!info || !p) return;
-    ULONG sz = *(ULONG*)info;
+             Pipe, p ? p->endpointAddr : 0);
+    if (!PipeInformation || !p) return;
+    ULONG sz = *(ULONG*)PipeInformation;
     if (sz < 20) return;
-    memset(info, 0, sz);
-    *(ULONG*)((char*)info + 0)  = sz;
-    *(ULONG*)((char*)info + 4)  = p->maxPacketSize;
-    *((UCHAR*)info + 8)         = p->endpointAddr;
-    *((UCHAR*)info + 9)         = 0;   // Interval
-    *((UCHAR*)info + 10)        = 0;   // SettingIndex
-    *(ULONG*)((char*)info + 12) = p->pipeType;
-    *(ULONG*)((char*)info + 16) = 4096; // MaximumTransferSize
+    memset(PipeInformation, 0, sz);
+    *(ULONG*)((char*)PipeInformation + 0)  = sz;
+    *(ULONG*)((char*)PipeInformation + 4)  = p->maxPacketSize;
+    *((UCHAR*)PipeInformation + 8)         = p->endpointAddr;
+    *((UCHAR*)PipeInformation + 9)         = 0;   // Interval
+    *((UCHAR*)PipeInformation + 10)        = 0;   // SettingIndex
+    *(ULONG*)((char*)PipeInformation + 12) = p->pipeType;
+    *(ULONG*)((char*)PipeInformation + 16) = 4096; // MaximumTransferSize
 }
 
 // --- WdfUsbTargetPipeIsInEndpoint (index 217) --- returns BOOLEAN
 static UCHAR WINAPI
-stub_WdfUsbTargetPipeIsInEndpoint(void *globals, void *pipe)
+stub_WdfUsbTargetPipeIsInEndpoint(PWDF_DRIVER_GLOBALS DriverGlobals, WDFUSBPIPE Pipe)
 {
-    auto *p = (Wdf2UsbPipe*)pipe;
+    auto *p = (Wdf2UsbPipe*)Pipe;
     UCHAR r = (p && (p->endpointAddr & 0x80)) ? 1 : 0;
     WDF2_LOG(2, "[WDF2] WdfUsbTargetPipeIsInEndpoint(ep=0x%02x) -> %u\n",
              p ? p->endpointAddr : 0, r);
@@ -1050,9 +1188,9 @@ stub_WdfUsbTargetPipeIsInEndpoint(void *globals, void *pipe)
 
 // --- WdfUsbTargetPipeIsOutEndpoint (index 218) --- returns BOOLEAN
 static UCHAR WINAPI
-stub_WdfUsbTargetPipeIsOutEndpoint(void *globals, void *pipe)
+stub_WdfUsbTargetPipeIsOutEndpoint(PWDF_DRIVER_GLOBALS DriverGlobals, WDFUSBPIPE Pipe)
 {
-    auto *p = (Wdf2UsbPipe*)pipe;
+    auto *p = (Wdf2UsbPipe*)Pipe;
     UCHAR r = (p && !(p->endpointAddr & 0x80)) ? 1 : 0;
     WDF2_LOG(2, "[WDF2] WdfUsbTargetPipeIsOutEndpoint(ep=0x%02x) -> %u\n",
              p ? p->endpointAddr : 0, r);
@@ -1061,7 +1199,8 @@ stub_WdfUsbTargetPipeIsOutEndpoint(void *globals, void *pipe)
 
 // --- WdfUsbTargetPipeSetNoMaximumPacketSizeCheck (index 220) --- void, no-op
 static void WINAPI
-stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(void *globals, void *pipe)
+stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                                   WDFUSBPIPE Pipe)
 {
     WDF2_LOG(2, "[WDF2] WdfUsbTargetPipeSetNoMaximumPacketSizeCheck no-op\n");
 }
@@ -1070,151 +1209,157 @@ stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(void *globals, void *pipe)
 // Sets up a continuous reader on bulk/interrupt-in pipe; we have no real USB,
 // so just succeed and let the driver proceed.
 static NTSTATUS WINAPI
-stub_WdfUsbTargetPipeConfigContinuousReader(void *globals, void *pipe, void *config)
+stub_WdfUsbTargetPipeConfigContinuousReader(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                             WDFUSBPIPE Pipe,
+                                             PWDF_USB_CONTINUOUS_READER_CONFIG Config)
 {
     HLOG_USER("[WDF2] WdfUsbTargetPipeConfigContinuousReader no-op\n");
     return 0;
 }
 
 // --- WdfUsbTargetDeviceGetInterface (index 236) ---
-static void* WINAPI
-stub_WdfUsbTargetDeviceGetInterface(void *globals, void *usbDevice, UCHAR ifaceIdx)
+static WDFUSBINTERFACE WINAPI
+stub_WdfUsbTargetDeviceGetInterface(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                     WDFUSBDEVICE UsbDevice, UCHAR InterfaceIndex)
 {
-    auto *ud = (Wdf2UsbDevice*)usbDevice;
-    HLOG_USER("[WDF2] WdfUsbTargetDeviceGetInterface(idx=%u)\n", (unsigned)ifaceIdx);
-    return (ud && ifaceIdx == 0) ? &ud->iface : nullptr;
+    auto *ud = (Wdf2UsbDevice*)UsbDevice;
+    HLOG_USER("[WDF2] WdfUsbTargetDeviceGetInterface(idx=%u)\n", (unsigned)InterfaceIndex);
+    return (ud && InterfaceIndex == 0) ? (WDFUSBINTERFACE)&ud->iface : nullptr;
 }
 
 // --- WdfUsbInterfaceGetNumConfiguredPipes (index 238) --- returns UCHAR
 static UCHAR WINAPI
-stub_WdfUsbInterfaceGetNumConfiguredPipes(void *globals, void *iface)
+stub_WdfUsbInterfaceGetNumConfiguredPipes(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                           WDFUSBINTERFACE UsbInterface)
 {
-    auto *i = (Wdf2UsbInterface*)iface;
+    auto *i = (Wdf2UsbInterface*)UsbInterface;
     UCHAR n = i ? i->numPipes : 0;
     HLOG_USER("[WDF2] WdfUsbInterfaceGetNumConfiguredPipes -> %u\n", (unsigned)n);
     return n;
 }
 
 // --- WdfUsbInterfaceGetConfiguredPipe (index 239) ---
-static void* WINAPI
-stub_WdfUsbInterfaceGetConfiguredPipe(void *globals, void *iface, UCHAR pipeIdx, void *pipeInfo)
+static WDFUSBPIPE WINAPI
+stub_WdfUsbInterfaceGetConfiguredPipe(PWDF_DRIVER_GLOBALS DriverGlobals,
+                                       WDFUSBINTERFACE UsbInterface, UCHAR PipeIndex,
+                                       PWDF_USB_PIPE_INFORMATION PipeInfo)
 {
-    auto *i = (Wdf2UsbInterface*)iface;
-    if (!i || pipeIdx >= i->numPipes) {
-        HLOG_USER("[WDF2] WdfUsbInterfaceGetConfiguredPipe(idx=%u) -> NULL\n", (unsigned)pipeIdx);
+    auto *i = (Wdf2UsbInterface*)UsbInterface;
+    if (!i || PipeIndex >= i->numPipes) {
+        HLOG_USER("[WDF2] WdfUsbInterfaceGetConfiguredPipe(idx=%u) -> NULL\n", (unsigned)PipeIndex);
         return nullptr;
     }
-    auto *p = &i->pipes[pipeIdx];
+    auto *p = &i->pipes[PipeIndex];
     HLOG_USER("[WDF2] WdfUsbInterfaceGetConfiguredPipe(idx=%u) -> ep=0x%02x\n",
-              (unsigned)pipeIdx, p->endpointAddr);
-    if (pipeInfo) stub_WdfUsbTargetPipeGetInformation(globals, p, pipeInfo);
-    return p;
+              (unsigned)PipeIndex, p->endpointAddr);
+    if (PipeInfo) stub_WdfUsbTargetPipeGetInformation(DriverGlobals, (WDFUSBPIPE)p, PipeInfo);
+    return (WDFUSBPIPE)p;
 }
 
-// Generic catch-all stubs (used for unimplemented slots).
-// Each index gets its own instantiation so the log shows the exact slot.
+// Catch-all for unimplemented WDF table slots.
+// Per-slot unimplemented stub: each index N gets its own instantiation so
+// the log shows the exact slot number.
 template<int N>
-struct WdfStubSlot {
-    static NTSTATUS WINAPI stub(void *g, ...) {
-        WDF2_LOG(1, "[WDF2] STUB: unimplemented WDF table entry [%d] called\n", N);
+struct WdfUnimplSlot {
+    static NTSTATUS WINAPI stub(PWDF_DRIVER_GLOBALS, ...) {
+        WDF2_LOG(1, "[WDF2] unimplemented WDF table entry [%d] called\n", N);
         return 0;
     }
-    static void fill() {
-        g_wdf2Table[N] = (WDFFUNC)stub;
-        WdfStubSlot<N-1>::fill();
-    }
 };
-template<> struct WdfStubSlot<-1> { static void fill() {} };
 
-// -----------------------------------------------------------------------
-// Fill g_wdf2Table with stub function pointers
-// -----------------------------------------------------------------------
-static void fill_wdf2_table(void)
-{
-    // Default all slots to per-index stubs (so log shows which slot was hit)
-    WdfStubSlot<256>::fill();
-
-#define SET(idx, fn) g_wdf2Table[idx] = (WDFFUNC)(fn)
-    SET(13,  stub_WdfDeviceSetDeviceState);
-    SET(14,  stub_WdfDeviceGetDriver);
-    SET(16,  stub_WdfDeviceAssignS0IdleSettings);
-    SET(17,  stub_WdfDeviceAssignSxWakeSettings);
-    SET(18,  stub_WdfDeviceOpenRegistryKey);
-    SET(19,  stub_WdfDeviceInitSetPnpPowerEventCallbacks);
-    SET(20,  stub_WdfDeviceInitSetPowerPolicyEventCallbacks);
-    SET(21,  stub_WdfDeviceInitSetPowerPolicyOwnership);
-    SET(22,  stub_WdfDeviceInitSetIoType);
-    SET(23,  stub_WdfDeviceInitSetFileObjectConfig);
-    SET(24,  stub_WdfDeviceInitSetRequestAttributes);
-    SET(25,  stub_WdfDeviceCreate);
-    SET(26,  stub_WdfDeviceSetStaticStopRemove);
-    SET(27,  stub_WdfDeviceCreateDeviceInterface);
-    SET(28,  stub_WdfDeviceSetDeviceInterfaceState);
-    SET(31,  stub_WdfDeviceQueryProperty);
-    SET(33,  stub_WdfDeviceSetPnpCapabilities);
-    SET(34,  stub_WdfDeviceSetPowerCapabilities);
-    SET(35,  stub_WdfDeviceSetFailed);
-    SET(36,  stub_WdfDeviceStopIdleNoTrack);
-    SET(37,  stub_WdfDeviceResumeIdleNoTrack);
-    SET(39,  stub_WdfDeviceGetDefaultQueue);
-    SET(41,  stub_WdfDeviceGetSystemPowerAction);
-    SET(43,  stub_WdfDeviceInitSetIoTypeEx);
-    SET(57,  stub_WdfDriverCreate);
-    SET(58,  stub_WdfDriverGetRegistryPath);
-    SET(59,  stub_WdfDriverOpenParametersRegistryKey);
-    SET(85,  stub_WdfIoQueueCreate);
-    SET(87,  stub_WdfIoQueueStart);
-    SET(88,  stub_WdfIoQueueStop);
-    SET(90,  stub_WdfIoQueueGetDevice);
-    SET(102, stub_WdfIoTargetCreate);
-    SET(103, stub_WdfIoTargetOpen);
-    SET(104, stub_WdfIoTargetCloseForQueryRemove);
-    SET(105, stub_WdfIoTargetClose);
-    SET(106, stub_WdfIoTargetStart);
-    SET(107, stub_WdfIoTargetStop);
-    SET(110, stub_WdfIoTargetGetDevice);
-    SET(117, stub_WdfMemoryCreate);
-    SET(118, stub_WdfMemoryCreatePreallocated);
-    SET(119, stub_WdfMemoryGetBuffer);
-    SET(123, stub_WdfObjectGetTypedContextWorker);
-    SET(124, stub_WdfObjectAllocateContext);
-    SET(125, stub_WdfObjectContextGetObject);
-    SET(129, stub_WdfObjectDelete);
-    SET(131, stub_WdfRegistryOpenKey);
-    SET(132, stub_WdfRegistryCreateKey);
-    SET(133, stub_WdfRegistryClose);
-    SET(139, stub_WdfRegistryQueryUnicodeString);
-    SET(141, stub_WdfRegistryQueryULong);
-    SET(147, stub_WdfRegistryAssignULong);
-    SET(153, stub_WdfRequestGetStatus);
-    SET(163, stub_WdfRequestComplete);
-    SET(164, stub_WdfRequestCompleteWithInformation);
-    SET(165, stub_WdfRequestGetParameters);
-    SET(166, stub_WdfRequestRetrieveInputMemory);
-    SET(167, stub_WdfRequestRetrieveOutputMemory);
-    SET(168, stub_WdfRequestRetrieveInputBuffer);
-    SET(169, stub_WdfRequestRetrieveOutputBuffer);
-    SET(170, stub_WdfRequestSetInformation);
-    SET(171, stub_WdfRequestGetInformation);
-    SET(174, stub_WdfRequestForwardToIoQueue);
-    SET(175, stub_WdfRequestGetIoQueue);
-    SET(186, stub_WdfCmResourceListGetCount);
-    SET(187, stub_WdfCmResourceListGetDescriptor);
-    SET(202, stub_WdfUsbTargetDeviceCreate);
-    SET(204, stub_WdfUsbTargetDeviceRetrieveInformation);
-    SET(205, stub_WdfUsbTargetDeviceGetDeviceDescriptor);
-    SET(210, stub_WdfUsbTargetDeviceGetNumInterfaces);
-    SET(211, stub_WdfUsbTargetDeviceSelectConfig);
-    SET(216, stub_WdfUsbTargetPipeGetInformation);
-    SET(217, stub_WdfUsbTargetPipeIsInEndpoint);
-    SET(218, stub_WdfUsbTargetPipeIsOutEndpoint);
-    SET(220, stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck);
-    SET(225, stub_WdfUsbTargetPipeConfigContinuousReader);
-    SET(236, stub_WdfUsbTargetDeviceGetInterface);
-    SET(238, stub_WdfUsbInterfaceGetNumConfiguredPipes);
-    SET(239, stub_WdfUsbInterfaceGetConfiguredPipe);
-#undef SET
-}
+// WDF function table: struct with constructor so slots are filled at static-init
+// time without an explicit fill_wdf2_table() call.  Slots not listed explicitly
+// default to the per-index WdfUnimplSlot<N>::stub via fill_defaults<N>().
+struct Wdf2FunctionTable {
+    WDFFUNC fn[257];
+    template<int N> void fill_defaults() {
+        fn[N] = (WDFFUNC)WdfUnimplSlot<N>::stub;
+        fill_defaults<N-1>();
+    }
+    Wdf2FunctionTable() {
+        fill_defaults<256>();
+        fn[13]  = (WDFFUNC)stub_WdfDeviceSetDeviceState;
+        fn[14]  = (WDFFUNC)stub_WdfDeviceGetDriver;
+        fn[16]  = (WDFFUNC)stub_WdfDeviceAssignS0IdleSettings;
+        fn[17]  = (WDFFUNC)stub_WdfDeviceAssignSxWakeSettings;
+        fn[18]  = (WDFFUNC)stub_WdfDeviceOpenRegistryKey;
+        fn[19]  = (WDFFUNC)stub_WdfDeviceInitSetPnpPowerEventCallbacks;
+        fn[20]  = (WDFFUNC)stub_WdfDeviceInitSetPowerPolicyEventCallbacks;
+        fn[21]  = (WDFFUNC)stub_WdfDeviceInitSetPowerPolicyOwnership;
+        fn[22]  = (WDFFUNC)stub_WdfDeviceInitSetIoType;
+        fn[23]  = (WDFFUNC)stub_WdfDeviceInitSetFileObjectConfig;
+        fn[24]  = (WDFFUNC)stub_WdfDeviceInitSetRequestAttributes;
+        fn[25]  = (WDFFUNC)stub_WdfDeviceCreate;
+        fn[26]  = (WDFFUNC)stub_WdfDeviceSetStaticStopRemove;
+        fn[27]  = (WDFFUNC)stub_WdfDeviceCreateDeviceInterface;
+        fn[28]  = (WDFFUNC)stub_WdfDeviceSetDeviceInterfaceState;
+        fn[31]  = (WDFFUNC)stub_WdfDeviceQueryProperty;
+        fn[33]  = (WDFFUNC)stub_WdfDeviceSetPnpCapabilities;
+        fn[34]  = (WDFFUNC)stub_WdfDeviceSetPowerCapabilities;
+        fn[35]  = (WDFFUNC)stub_WdfDeviceSetFailed;
+        fn[36]  = (WDFFUNC)stub_WdfDeviceStopIdleNoTrack;
+        fn[37]  = (WDFFUNC)stub_WdfDeviceResumeIdleNoTrack;
+        fn[39]  = (WDFFUNC)stub_WdfDeviceGetDefaultQueue;
+        fn[41]  = (WDFFUNC)stub_WdfDeviceGetSystemPowerAction;
+        fn[43]  = (WDFFUNC)stub_WdfDeviceInitSetIoTypeEx;
+        fn[57]  = (WDFFUNC)stub_WdfDriverCreate;
+        fn[58]  = (WDFFUNC)stub_WdfDriverGetRegistryPath;
+        fn[59]  = (WDFFUNC)stub_WdfDriverOpenParametersRegistryKey;
+        fn[85]  = (WDFFUNC)stub_WdfIoQueueCreate;
+        fn[87]  = (WDFFUNC)stub_WdfIoQueueStart;
+        fn[88]  = (WDFFUNC)stub_WdfIoQueueStop;
+        fn[90]  = (WDFFUNC)stub_WdfIoQueueGetDevice;
+        fn[102] = (WDFFUNC)stub_WdfIoTargetCreate;
+        fn[103] = (WDFFUNC)stub_WdfIoTargetOpen;
+        fn[104] = (WDFFUNC)stub_WdfIoTargetCloseForQueryRemove;
+        fn[105] = (WDFFUNC)stub_WdfIoTargetClose;
+        fn[106] = (WDFFUNC)stub_WdfIoTargetStart;
+        fn[107] = (WDFFUNC)stub_WdfIoTargetStop;
+        fn[110] = (WDFFUNC)stub_WdfIoTargetGetDevice;
+        fn[117] = (WDFFUNC)stub_WdfMemoryCreate;
+        fn[118] = (WDFFUNC)stub_WdfMemoryCreatePreallocated;
+        fn[119] = (WDFFUNC)stub_WdfMemoryGetBuffer;
+        fn[123] = (WDFFUNC)stub_WdfObjectGetTypedContextWorker;
+        fn[124] = (WDFFUNC)stub_WdfObjectAllocateContext;
+        fn[125] = (WDFFUNC)stub_WdfObjectContextGetObject;
+        fn[129] = (WDFFUNC)stub_WdfObjectDelete;
+        fn[131] = (WDFFUNC)stub_WdfRegistryOpenKey;
+        fn[132] = (WDFFUNC)stub_WdfRegistryCreateKey;
+        fn[133] = (WDFFUNC)stub_WdfRegistryClose;
+        fn[139] = (WDFFUNC)stub_WdfRegistryQueryUnicodeString;
+        fn[141] = (WDFFUNC)stub_WdfRegistryQueryULong;
+        fn[147] = (WDFFUNC)stub_WdfRegistryAssignULong;
+        fn[153] = (WDFFUNC)stub_WdfRequestGetStatus;
+        fn[163] = (WDFFUNC)stub_WdfRequestComplete;
+        fn[164] = (WDFFUNC)stub_WdfRequestCompleteWithInformation;
+        fn[165] = (WDFFUNC)stub_WdfRequestGetParameters;
+        fn[166] = (WDFFUNC)stub_WdfRequestRetrieveInputMemory;
+        fn[167] = (WDFFUNC)stub_WdfRequestRetrieveOutputMemory;
+        fn[168] = (WDFFUNC)stub_WdfRequestRetrieveInputBuffer;
+        fn[169] = (WDFFUNC)stub_WdfRequestRetrieveOutputBuffer;
+        fn[170] = (WDFFUNC)stub_WdfRequestSetInformation;
+        fn[171] = (WDFFUNC)stub_WdfRequestGetInformation;
+        fn[174] = (WDFFUNC)stub_WdfRequestForwardToIoQueue;
+        fn[175] = (WDFFUNC)stub_WdfRequestGetIoQueue;
+        fn[186] = (WDFFUNC)stub_WdfCmResourceListGetCount;
+        fn[187] = (WDFFUNC)stub_WdfCmResourceListGetDescriptor;
+        fn[221] = (WDFFUNC)stub_WdfPdoGetParent;
+        fn[202] = (WDFFUNC)stub_WdfUsbTargetDeviceCreate;
+        fn[204] = (WDFFUNC)stub_WdfUsbTargetDeviceRetrieveInformation;
+        fn[205] = (WDFFUNC)stub_WdfUsbTargetDeviceGetDeviceDescriptor;
+        fn[210] = (WDFFUNC)stub_WdfUsbTargetDeviceGetNumInterfaces;
+        fn[211] = (WDFFUNC)stub_WdfUsbTargetDeviceSelectConfig;
+        fn[216] = (WDFFUNC)stub_WdfUsbTargetPipeGetInformation;
+        fn[217] = (WDFFUNC)stub_WdfUsbTargetPipeIsInEndpoint;
+        fn[218] = (WDFFUNC)stub_WdfUsbTargetPipeIsOutEndpoint;
+        fn[220] = (WDFFUNC)stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck;
+        fn[225] = (WDFFUNC)stub_WdfUsbTargetPipeConfigContinuousReader;
+        fn[236] = (WDFFUNC)stub_WdfUsbTargetDeviceGetInterface;
+        fn[238] = (WDFFUNC)stub_WdfUsbInterfaceGetNumConfiguredPipes;
+        fn[239] = (WDFFUNC)stub_WdfUsbInterfaceGetConfiguredPipe;
+    }
+} g_wdf2Table;
+template<> void Wdf2FunctionTable::fill_defaults<-1>() {}
 
 // -----------------------------------------------------------------------
 // host_VersionBind — called by driver's WDF stub with:
@@ -1235,12 +1380,10 @@ host_VersionBind(WDF2_BIND_INFO *bindInfo, void **ppComponentGlobals)
                   (void*)bindInfo->FuncTable);
     }
 
-    fill_wdf2_table();
-
     if (bindInfo && bindInfo->FuncTable) {
         // FuncTable = &WdfFunctions_02015 (pointer to the extern WDFFUNC* in driver)
         // Set: *FuncTable = g_wdf2Table  (WdfFunctions_02015 now points to our array)
-        *(WDFFUNC **)bindInfo->FuncTable = g_wdf2Table;
+        *(WDFFUNC **)bindInfo->FuncTable = g_wdf2Table.fn;
     }
 
     memset(&g_wdf2Globals, 0, sizeof(g_wdf2Globals));
