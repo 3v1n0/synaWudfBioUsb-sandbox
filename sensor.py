@@ -12,7 +12,7 @@ Usage:
   PROTO_TRACE=1 python3 sensor.py list-db
 """
 
-import struct, sys, os, hashlib, hmac, re
+import struct, sys, os, json, time, hashlib, hmac, re
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.primitives import hashes
@@ -123,21 +123,167 @@ CERT_BODY = bytes.fromhex(
 def load_pairing_blob_from_registry(reg_path=None):
     path = reg_path or os.path.expanduser("~/winelatestprefix/user.reg")
     try:
-        text = open(path, "r", encoding="utf-8", errors="ignore").read()
+        lines = open(path, "r", encoding="utf-8", errors="ignore").read().splitlines()
     except OSError:
         return None
 
-    m = re.search(r'"56FB88ED27E90000"=hex:([^\n]*(?:\\\n\s+[0-9a-f,]+)*)',
-                  text, re.IGNORECASE)
-    if not m:
+    marker = '"56FB88ED27E90000"=hex:'
+    start = -1
+    first = ""
+    for i, line in enumerate(lines):
+        pos = line.lower().find(marker.lower())
+        if pos >= 0:
+            start = i
+            first = line[pos + len(marker):]
+            break
+    if start < 0:
         return None
 
-    csv = m.group(1).replace("\\\n", "").replace(" ", "")
-    vals = [v for v in csv.split(",") if v]
+    chunks = [first.strip()]
+    i = start + 1
+    while i < len(lines):
+        nxt = lines[i]
+        if not nxt.startswith("  "):
+            break
+        chunks.append(nxt.strip())
+        if not nxt.rstrip().endswith("\\"):
+            break
+        i += 1
+
+    csv = "".join(chunks).replace("\\", "")
+    vals = [v for v in csv.split(",") if v and re.fullmatch(r"[0-9a-fA-F]{2}", v)]
     try:
         return bytes(int(v, 16) for v in vals)
     except ValueError:
         return None
+
+
+def pairing_fingerprint(pairing_blob):
+    if not pairing_blob:
+        return None
+    return hashlib.sha256(pairing_blob).hexdigest()
+
+
+def parse_ecs2_private_d(blob):
+    if not blob or len(blob) < 8 or blob[:4] != b"ECS2":
+        return None
+    cb_key = struct.unpack("<I", blob[4:8])[0]
+    expected = 8 + cb_key * 3
+    if len(blob) != expected:
+        return None
+    off = 8 + (cb_key * 2)
+    return blob[off:off + cb_key]
+
+
+def _challenge_cache_path():
+    return os.environ.get(
+        "CHALLENGE_CACHE_PATH",
+        os.path.expanduser("~/.cache/syna_challenge_cache.json"),
+    )
+
+
+def load_challenge_cache(path=None):
+    cache_path = path or _challenge_cache_path()
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        entries = data.get("entries", {})
+        return entries if isinstance(entries, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_challenge_cache(entries, path=None):
+    cache_path = path or _challenge_cache_path()
+    parent = os.path.dirname(cache_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    payload = {
+        "version": 1,
+        "entries": entries,
+    }
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+
+
+def resolve_challenge_material(pairing_blob):
+    pair_fp = pairing_fingerprint(pairing_blob)
+    host_override = os.environ.get("CHALLENGE_HOST_142_HEX", "").strip()
+    sign_d_override = os.environ.get("CHALLENGE_SIGN_KEY_D_HEX", "").strip()
+    sign_ecs2_override = os.environ.get("CHALLENGE_SIGN_KEY_ECS2_HEX", "").strip()
+
+    if host_override and (sign_d_override or sign_ecs2_override):
+        host_142 = bytes.fromhex(host_override)
+        if len(host_142) != 142:
+            raise ValueError("CHALLENGE_HOST_142_HEX must decode to 142 bytes")
+
+        sign_d = None
+        sign_ecs2 = None
+        if sign_d_override:
+            sign_d = bytes.fromhex(sign_d_override)
+            if len(sign_d) != 32:
+                raise ValueError("CHALLENGE_SIGN_KEY_D_HEX must decode to 32 bytes")
+        if sign_ecs2_override:
+            sign_ecs2 = bytes.fromhex(sign_ecs2_override)
+            parsed_d = parse_ecs2_private_d(sign_ecs2)
+            if parsed_d is None:
+                raise ValueError("CHALLENGE_SIGN_KEY_ECS2_HEX is not a valid ECS2 key blob")
+            sign_d = parsed_d
+
+        return {
+            "host_142": host_142,
+            "sign_d": sign_d,
+            "sign_ecs2": sign_ecs2,
+            "source": "override",
+            "pairing_fp": pair_fp,
+        }
+
+    allow_cache_replay = os.environ.get("CHALLENGE_ALLOW_CACHE_REPLAY", "0") == "1"
+    if pair_fp and allow_cache_replay:
+        cache = load_challenge_cache()
+        entry = cache.get(pair_fp)
+        if entry:
+            try:
+                host_142 = bytes.fromhex(entry["host_142_hex"])
+                sign_ecs2 = bytes.fromhex(entry["sign_key_ecs2_hex"])
+            except (KeyError, ValueError):
+                host_142 = None
+                sign_ecs2 = None
+            if host_142 and sign_ecs2:
+                sign_d = parse_ecs2_private_d(sign_ecs2)
+                if sign_d and len(host_142) == 142:
+                    return {
+                        "host_142": host_142,
+                        "sign_d": sign_d,
+                        "sign_ecs2": sign_ecs2,
+                        "source": "cache",
+                        "pairing_fp": pair_fp,
+                    }
+
+    allow_legacy = os.environ.get("ALLOW_LEGACY_CHALLENGE", "0") == "1"
+    if allow_legacy:
+        return {
+            "host_142": HOST_142,
+            "sign_d": IDENTITY_KEY_D,
+            "sign_ecs2": None,
+            "source": "legacy",
+            "pairing_fp": pair_fp,
+        }
+    return None
+
+
+def maybe_store_challenge_cache(pair_fp, host_142, sign_ecs2):
+    if not pair_fp or not host_142 or not sign_ecs2:
+        return
+    cache = load_challenge_cache()
+    cache[pair_fp] = {
+        "host_142_hex": host_142.hex(),
+        "sign_key_ecs2_hex": sign_ecs2.hex(),
+        "updated_unix": int(time.time()),
+    }
+    save_challenge_cache(cache)
 
 
 def sign_sha256_digest(priv_d, digest32):
@@ -422,27 +568,28 @@ def initial_exchange(sensor):
     sensor.do_init_cmds()
     print("[init] phase 2 done")
 
-    # Challenge: required for parity; kept toggleable while host_142 derivation
-    # from PairingData is still being re-implemented.
+    # Challenge: required for parity.
     if os.environ.get("SEND_CHALLENGE", "0") == "1":
         pairing_blob = load_pairing_blob_from_registry()
+        pair_fp = pairing_fingerprint(pairing_blob)
         if pairing_blob:
-            print(f"[init] PairingData loaded ({len(pairing_blob)} bytes)")
+            print(f"[init] PairingData loaded ({len(pairing_blob)} bytes, fp={pair_fp[:16]})")
         else:
             print("[init] PairingData not found in user.reg")
 
         print("[init] challenge...")
-        host_142 = HOST_142
-        host_override = os.environ.get("CHALLENGE_HOST_142_HEX", "").strip()
-        if host_override:
-            host_142 = bytes.fromhex(host_override)
-            print("[init] using CHALLENGE_HOST_142_HEX override")
-
-        sign_d = IDENTITY_KEY_D
-        sign_override = os.environ.get("CHALLENGE_SIGN_KEY_D_HEX", "").strip()
-        if sign_override:
-            sign_d = bytes.fromhex(sign_override)
-            print("[init] using CHALLENGE_SIGN_KEY_D_HEX override")
+        material = resolve_challenge_material(pairing_blob)
+        if not material:
+            raise RuntimeError(
+                "No challenge material available. Provide runtime overrides; "
+                "optionally enable CHALLENGE_ALLOW_CACHE_REPLAY=1 for stable pairs; "
+                "or ALLOW_LEGACY_CHALLENGE=1 for diagnostics only."
+            )
+        host_142 = material["host_142"]
+        sign_d = material["sign_d"]
+        sign_ecs2 = material.get("sign_ecs2")
+        source = material.get("source", "?")
+        print(f"[init] challenge source={source}")
 
         finish_hash = hashlib.sha256(host_142).digest()
         der_sig = sign_sha256_digest(sign_d, finish_hash)
@@ -455,6 +602,9 @@ def initial_exchange(sensor):
         response = sensor.ctrl_in(REQ_RESP, length=802)
         status = response[:2].hex() if len(response) >= 2 else "?"
         print(f"[init] challenge response ({len(response)} bytes): status={status}")
+
+        if status == "0000" and material.get("pairing_fp") and sign_ecs2:
+            maybe_store_challenge_cache(material["pairing_fp"], host_142, sign_ecs2)
     else:
         print("[init] challenge skipped (SEND_CHALLENGE!=1)")
 
