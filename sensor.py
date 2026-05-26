@@ -957,11 +957,7 @@ def encrypted_ioctl(sensor, req, data, in_len):
     sensor.ctrl_out(REQ_CMD, value=value, data=enc)
 
     # Receive response
-    try:
-        resp = sensor.ctrl_in(REQ_RESP, length=in_len)
-    except usb.core.USBTimeoutError:
-        print("[tls] warning: response timeout, returning status 0104")
-        return bytes.fromhex("0104")
+    resp = sensor.ctrl_in(REQ_RESP, length=in_len)
     # Decrypt response (skip TLS record header)
     if len(resp) > 5:
         ct, ver, fragment, _ = parse_tls_record(resp)
