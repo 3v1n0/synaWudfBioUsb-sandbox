@@ -184,6 +184,132 @@ def host_142_from_private_d(priv_d):
     return b"\x3f\x5f\x17\x00" + x_le + (b"\x00" * 36) + y_le + (b"\x00" * 38)
 
 
+WINE_DPAPI_SECRET = b"I'm hunting wabbits"
+
+
+def _parse_wine_pairing_wrapper(pairing_blob):
+    if not pairing_blob or len(pairing_blob) < 16:
+        return None
+    ver, zero, len1, len2 = struct.unpack_from("<IIII", pairing_blob, 0)
+    if ver != 1:
+        return None
+    total = 16 + len1 + len2
+    if total > len(pairing_blob):
+        return None
+    blob1 = pairing_blob[16:16 + len1]
+    blob2 = pairing_blob[16 + len1:16 + len1 + len2]
+    return {
+        "blob1": blob1,
+        "blob2": blob2,
+        "version": ver,
+        "zero": zero,
+    }
+
+
+def _parse_wine_protectdata_blob(blob):
+    if not blob or len(blob) < 64:
+        return None
+    i = 0
+
+    def u32():
+        nonlocal i
+        if i + 4 > len(blob):
+            raise ValueError("short u32")
+        v = struct.unpack_from("<I", blob, i)[0]
+        i += 4
+        return v
+
+    try:
+        _count0 = u32()
+        i += 16
+        _count1 = u32()
+        i += 16
+        _null0 = u32()
+        desc_len = u32()
+        i += desc_len
+        _cipher_alg = u32()
+        _cipher_key_len = u32()
+        data0_len = u32()
+        i += data0_len
+        _null1 = u32()
+        _hash_alg = u32()
+        _hash_len = u32()
+        salt_len = u32()
+        salt = blob[i:i + salt_len]
+        i += salt_len
+        cipher_len = u32()
+        cipher = blob[i:i + cipher_len]
+        i += cipher_len
+        fp_len = u32()
+        _fp = blob[i:i + fp_len]
+        i += fp_len
+    except (ValueError, struct.error):
+        return None
+
+    if i != len(blob):
+        return None
+    return {
+        "salt": salt,
+        "cipher": cipher,
+    }
+
+
+def _derive_wine_3des_key(username_bytes, salt, optional_entropy=b""):
+    h = hashlib.sha1()
+    h.update(username_bytes)
+    h.update(WINE_DPAPI_SECRET)
+    h.update(salt)
+    if optional_entropy:
+        h.update(optional_entropy)
+    base = h.digest()
+    pad1 = bytes((0x36 ^ (base[i] if i < len(base) else 0)) for i in range(64))
+    pad2 = bytes((0x5C ^ (base[i] if i < len(base) else 0)) for i in range(64))
+    return (hashlib.sha1(pad1).digest() + hashlib.sha1(pad2).digest())[:24]
+
+
+def _wine_unprotect_blob(blob, username_bytes, optional_entropy=b""):
+    parsed = _parse_wine_protectdata_blob(blob)
+    if not parsed:
+        return None
+    key = _derive_wine_3des_key(username_bytes, parsed["salt"], optional_entropy)
+    dec = Cipher(
+        algorithms.TripleDES(key),
+        modes.CBC(b"\x00" * 8),
+        backend=default_backend(),
+    ).decryptor()
+    pt = dec.update(parsed["cipher"]) + dec.finalize()
+    if pt:
+        pad = pt[-1]
+        if 1 <= pad <= 8 and pt.endswith(bytes([pad]) * pad):
+            pt = pt[:-pad]
+    return pt
+
+
+def derive_challenge_from_pairing_blob(pairing_blob):
+    wrapped = _parse_wine_pairing_wrapper(pairing_blob)
+    if not wrapped:
+        return None
+
+    user = os.environ.get("CHALLENGE_DPAPI_USERNAME", os.environ.get("USER", "ubuntu"))
+    username_bytes = user.encode("ascii", errors="ignore") + b"\x00"
+
+    plain = _wine_unprotect_blob(wrapped["blob1"], username_bytes)
+    if not plain or len(plain) < (6 + 32):
+        return None
+
+    sign_d = plain[6:38][::-1]
+    if len(sign_d) != 32:
+        return None
+
+    host_142 = host_142_from_private_d(sign_d)
+    return {
+        "host_142": host_142,
+        "sign_d": sign_d,
+        "source": "pairing-derived",
+        "sign_ecs2": None,
+    }
+
+
 def _challenge_cache_path():
     return os.environ.get(
         "CHALLENGE_CACHE_PATH",
@@ -251,6 +377,12 @@ def resolve_challenge_material(pairing_blob):
             "source": "override",
             "pairing_fp": pair_fp,
         }
+
+    if pairing_blob:
+        derived = derive_challenge_from_pairing_blob(pairing_blob)
+        if derived:
+            derived["pairing_fp"] = pair_fp
+            return derived
 
     allow_cache_replay = os.environ.get("CHALLENGE_ALLOW_CACHE_REPLAY", "0") == "1"
     if pair_fp and allow_cache_replay:
