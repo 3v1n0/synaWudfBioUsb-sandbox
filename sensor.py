@@ -12,7 +12,7 @@ Usage:
   PROTO_TRACE=1 python3 sensor.py list-db
 """
 
-import struct, sys, os, hashlib, hmac, subprocess, re
+import struct, sys, os, hashlib, hmac
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import hashes
@@ -547,7 +547,7 @@ def encrypted_ioctl(sensor, req, data, in_len):
     # Build the application data record
     plain = req + data
 
-    # Encrypt to application-data fragment, then wrap as TLS record.
+    # Encrypt
     enc = tls_encrypt(
         plain,
         sensor.client_write_key,
@@ -556,11 +556,16 @@ def encrypted_ioctl(sensor, req, data, in_len):
         sensor.seq_client,
         CONTENT_APPLICATIONDATA,
     )
-    record = make_tls_record(CONTENT_APPLICATIONDATA, enc[16:])
     sensor.seq_client += 1
 
-    # Trace path shows two trailing zero bytes on request payload.
-    sensor.ctrl_out(REQ_CMD, value=6, data=record + b"\x00\x00")
+    # Request value differs by plain command family (from proto trace).
+    value = 6
+    if len(req) >= 1:
+        if req[0] == 0x9E:
+            value = 7
+        elif req[0] in (0x9F, 0xA0, 0xA1):
+            value = 2
+    sensor.ctrl_out(REQ_CMD, value=value, data=enc)
 
     # Receive response
     resp = sensor.ctrl_in(REQ_RESP, length=in_len)
@@ -605,15 +610,15 @@ def extract_ascii_label(blob):
 def do_list_db(sensor):
     print("[list-db] querying storage...")
 
-    r = send_plain(sensor, bytes.fromhex("820000000000000207"), 0x80)
+    r = send_plain(sensor, bytes.fromhex("820000000000000207"), 0x67)
     print(f"[list-db] caps: {r.hex()}")
 
-    r = send_plain(sensor, bytes.fromhex("9e01"), 0x80)
+    r = send_plain(sensor, bytes.fromhex("9e01"), 0x6d)
     print(f"[list-db] desc1: {r.hex()}")
-    r = send_plain(sensor, bytes.fromhex("9e01"), 0x80)
+    r = send_plain(sensor, bytes.fromhex("9e01"), 0x6d)
     print(f"[list-db] desc2: {r.hex()}")
 
-    r = send_plain(sensor, bytes.fromhex("9f02000000") + (b"\xff" * 16), 0x200)
+    r = send_plain(sensor, bytes.fromhex("9f02000000") + (b"\xff" * 16), 0x99)
     if len(r) < 4:
         print(f"[list-db] query-all failed: {r.hex()}")
         return r
@@ -634,12 +639,12 @@ def do_list_db(sensor):
 
     records = []
     for rid in ids:
-        probe = send_plain(sensor, bytes.fromhex("9f03000000") + rid, 0x40)
+        probe = send_plain(sensor, bytes.fromhex("9f03000000") + rid, 0xb9)
         if len(probe) < 20 or probe[0:4] != bytes.fromhex("00000100"):
             continue
 
         token = probe[4:20]
-        _ = send_plain(sensor, bytes.fromhex("a003000000") + token, 0x80)
+        _ = send_plain(sensor, bytes.fromhex("a003000000") + token, 0x51)
         detail = send_plain(sensor, bytes.fromhex("a103000000") + token, 0x200)
 
         name = extract_ascii_label(detail)
@@ -661,74 +666,6 @@ def do_list_db(sensor):
     return records
 
 
-def do_list_db_bexe():
-    home = os.path.expanduser("~")
-    wine_bin = os.path.join(home, "wine-install", "bin", "wine")
-    cmd = [wine_bin, "b.exe", "list-db"]
-    env = os.environ.copy()
-    env.setdefault("WINEPREFIX", os.path.join(home, "winelatestprefix"))
-    env.setdefault("WINEDEBUG", "fixme-all")
-    env.setdefault("PROTO_TRACE", "1")
-
-    print("[list-db-bexe] running b.exe list-db...")
-    p = subprocess.run(
-        cmd,
-        cwd=os.getcwd(),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        timeout=180,
-    )
-    out = p.stdout
-
-    m_count = re.search(r"GET_RECORD_COUNT:.*count=(\d+)", out)
-    m_ret = re.search(r"Returned records:\s*(\d+)", out)
-    count = int(m_count.group(1)) if m_count else None
-    returned = int(m_ret.group(1)) if m_ret else None
-
-    records = []
-    lines = out.splitlines()
-    i = 0
-    while i < len(lines):
-        m = re.match(r"\[(\d+)\]\s+IdentityType=(\d+)\s+Subfactor=(\d+)", lines[i])
-        if not m:
-            i += 1
-            continue
-        rec = {
-            "index": int(m.group(1)),
-            "identity_type": int(m.group(2)),
-            "subfactor": int(m.group(3)),
-            "identity_value": None,
-            "template_blob_size": None,
-        }
-        if i + 1 < len(lines):
-            m2 = re.search(r"IdentityValue=(\d+)", lines[i + 1])
-            if m2:
-                rec["identity_value"] = int(m2.group(1))
-        if i + 2 < len(lines):
-            m3 = re.search(r"TemplateBlobSize=(\d+)", lines[i + 2])
-            if m3:
-                rec["template_blob_size"] = int(m3.group(1))
-        records.append(rec)
-        i += 3
-
-    print(f"[list-db-bexe] GET_RECORD_COUNT={count}")
-    print(f"[list-db-bexe] Returned records={returned}")
-    for rec in records:
-        print(
-            f"  [{rec['index']}] type={rec['identity_type']} "
-            f"subfactor={rec['subfactor']} value={rec['identity_value']} "
-            f"blob={rec['template_blob_size']}"
-        )
-
-    return {
-        "get_record_count": count,
-        "returned_records": returned,
-        "records": records,
-        "exit_code": p.returncode,
-    }
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -740,10 +677,6 @@ def main():
         sys.exit(1)
 
     command = sys.argv[1]
-
-    if command == "list-db-bexe":
-        do_list_db_bexe()
-        return 0
 
     sensor = SyncSensor()
     try:
