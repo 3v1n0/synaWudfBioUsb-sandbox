@@ -302,9 +302,13 @@ def derive_challenge_from_pairing_blob(pairing_blob):
         return None
 
     host_142 = host_142_from_private_d(sign_d)
+    cert_pub32 = None
+    if len(plain) >= 220 and plain[184:188] == bytes.fromhex("022000"):
+        cert_pub32 = plain[188:220]
     return {
         "host_142": host_142,
         "sign_d": sign_d,
+        "cert_pub32": cert_pub32,
         "source": "pairing-derived",
         "sign_ecs2": None,
     }
@@ -453,6 +457,7 @@ class SyncSensor:
         self.device_info = None
         self.cert_8e09 = None
         self.cert_8e1a = None
+        self.challenge_material = None
 
     def find_device(self):
         self.dev = usb.core.find(idVendor=SENSOR_VID, idProduct=SENSOR_PID)
@@ -550,11 +555,11 @@ TLS_HEADER_LEN = 5
 def tls_encrypt(plaintext, key, mac_key, iv, seq_num, content_type, version=TLS_VER):
     seq = struct.pack(">Q", seq_num)
     mac_data = seq + bytes([content_type]) + version + struct.pack(">H", len(plaintext)) + plaintext
-    mac = hmac.new(mac_key, mac_data, hashlib.sha256).digest()[:10]
+    mac = hmac.new(mac_key, mac_data, hashlib.sha256).digest()
     block_size = 16
     payload = plaintext + mac
-    pad_len = block_size - (len(payload) % block_size)
-    payload += bytes([pad_len] * pad_len)
+    pad_byte = block_size - ((len(payload) + 1) % block_size)
+    payload += bytes([pad_byte] * (pad_byte + 1))
     if iv is None or len(iv) != 16:
         iv = os.urandom(16)
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
@@ -570,17 +575,25 @@ def tls_decrypt(ciphertext, key, mac_key, iv, seq_num, content_type, version=TLS
     cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
     dec = cipher.decryptor()
     payload = dec.update(ct) + dec.finalize()
-    pad_len = payload[-1]
-    if pad_len < 1 or pad_len > 16:
+    pad_byte = payload[-1]
+    pad_total = pad_byte + 1
+    if pad_total < 1 or pad_total > 16 or len(payload) < pad_total:
         return None
-    payload = payload[:-pad_len]
+    if payload[-pad_total:] != bytes([pad_byte] * pad_total):
+        return None
+    payload = payload[:-pad_total]
+    mac_len = 32
+    if len(payload) < mac_len:
+        return None
+    body = payload[:-mac_len]
+    recv_mac = payload[-mac_len:]
     seq = struct.pack(">Q", seq_num)
     expected_mac = hmac.new(mac_key, seq + bytes([content_type]) + version +
-                            struct.pack(">H", len(payload) - 10) + payload[:-10],
-                            hashlib.sha256).digest()[:10]
-    if payload[-10:] != expected_mac:
+                            struct.pack(">H", len(body)) + body,
+                            hashlib.sha256).digest()
+    if recv_mac != expected_mac:
         return None
-    return payload[:-10]
+    return body
 
 # ---------------------------------------------------------------------------
 # TLS record layer
@@ -683,6 +696,19 @@ def parse_serverhello(data):
     comp = body[pos]; pos += 1
     return server_random, session_id, cipher, remaining
 
+
+def build_client_cert_body(host_142, cert_pub32):
+    body = bytearray(CERT_BODY)
+    host_old = HOST_142
+    i = body.find(host_old)
+    if i >= 0 and len(host_142) == len(host_old):
+        body[i:i + len(host_old)] = host_142
+    marker_old = bytes.fromhex("ca7bcca615a007461f997214f401355a74eb43c08f7265ec0efc4afb4f0fe2")
+    j = body.find(marker_old)
+    if j >= 0 and cert_pub32 and len(cert_pub32) == 32:
+        body[j:j + 32] = cert_pub32
+    return bytes(body)
+
 def sign_hash_ecdsa_p256(priv_d, digest32):
     priv_key = ec.derive_private_key(int.from_bytes(priv_d, "big"), ec.SECP256R1())
     return priv_key.sign(digest32, ec.ECDSA(hashes.SHA256()))
@@ -734,6 +760,7 @@ def initial_exchange(sensor):
         sign_ecs2 = material.get("sign_ecs2")
         source = material.get("source", "?")
         print(f"[init] challenge source={source}")
+        sensor.challenge_material = material
         proto_log("...", "host-142", host_142)
 
         finish_hash = hashlib.sha256(host_142).digest()
@@ -797,8 +824,15 @@ def tls_handshake(sensor):
     handshake_buffer.extend(resp)
 
     # 3. Build client Certificate message (captured structure)
+    cert_pub32 = None
+    host_for_cert = HOST_142
+    if sensor.challenge_material:
+        host_for_cert = sensor.challenge_material.get("host_142", host_for_cert)
+        cert_pub32 = sensor.challenge_material.get("cert_pub32")
+    cert_body = build_client_cert_body(host_for_cert, cert_pub32)
+
     cert_msg = make_handshake_message(HANDSHAKE_CERTIFICATE,
-        struct.pack(">I", len(CERT_BODY))[1:3] + struct.pack(">I", len(CERT_BODY))[1:3] + CERT_BODY)
+        struct.pack(">I", len(cert_body))[1:3] + struct.pack(">I", len(cert_body))[1:3] + cert_body)
     cert_record = make_tls_record(CONTENT_HANDSHAKE, cert_msg)
     handshake_buffer.extend(cert_record)
 
@@ -816,11 +850,21 @@ def tls_handshake(sensor):
     proto_log("...", "finish-hash", hs_hash)
     print(f"[tls] handshake hash: {hs_hash.hex()}")
 
-    # 7. Build CertificateVerify (captured signature format)
-    cv_body = bytes.fromhex(
-        "3045022062ecf64b752f56cbbbc19a1b78f88082f693b411dae203710bfe9abc32e4100a"
-        "022100a649edd3c02396595f47eb528c6b27d7ff643f178fa20c79a1c86a60d24aa5af"
-    )
+    # 7. Build CertificateVerify from current handshake hash and runtime key.
+    sign_d = None
+    if os.environ.get("CHALLENGE_SIGN_KEY_ECS2_HEX", "").strip():
+        sign_d = parse_ecs2_private_d(bytes.fromhex(os.environ["CHALLENGE_SIGN_KEY_ECS2_HEX"].strip()))
+    elif os.environ.get("CHALLENGE_SIGN_KEY_D_HEX", "").strip():
+        sign_d = bytes.fromhex(os.environ["CHALLENGE_SIGN_KEY_D_HEX"].strip())
+    else:
+        pairing_blob = load_pairing_blob_from_registry()
+        derived = derive_challenge_from_pairing_blob(pairing_blob) if pairing_blob else None
+        if derived:
+            sign_d = derived["sign_d"]
+    if not sign_d:
+        sign_d = IDENTITY_KEY_D
+
+    cv_body = sign_sha256_digest(sign_d, hs_hash)
     cv_msg = make_handshake_message(HANDSHAKE_CERTIFICATE_VERIFY, cv_body)
     cv_record = make_tls_record(CONTENT_HANDSHAKE, cv_msg)
     handshake_buffer.extend(cv_record)
@@ -840,6 +884,9 @@ def tls_handshake(sensor):
     sensor.server_write_key = key_block[80:96]
     sensor.client_write_iv = key_block[96:112]
     sensor.server_write_iv = key_block[112:128]
+
+    # Refresh hash after CertificateVerify is appended.
+    hs_hash = compute_handshake_hash(bytes(handshake_buffer))
 
     # Finished verify_data depends on the negotiated master secret.
     client_finished_plain = compute_verify_data(master, hs_hash, is_client=True)
@@ -889,7 +936,7 @@ def encrypted_ioctl(sensor, req, data, in_len):
     plain = req + data
 
     # Encrypt
-    enc = tls_encrypt(
+    enc_fragment = tls_encrypt(
         plain,
         sensor.client_write_key,
         sensor.client_write_mac,
@@ -897,6 +944,7 @@ def encrypted_ioctl(sensor, req, data, in_len):
         sensor.seq_client,
         CONTENT_APPLICATIONDATA,
     )
+    enc = make_tls_record(CONTENT_APPLICATIONDATA, enc_fragment)
     sensor.seq_client += 1
 
     # Request value differs by plain command family (from proto trace).
