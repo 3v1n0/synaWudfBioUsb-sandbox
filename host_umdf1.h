@@ -477,6 +477,7 @@ struct HostRequest : public IWDFIoRequest {
             ctl = c;
             outMem = out;
             inMem = in;
+            cancelCallback = nullptr;
             complete = FALSE;
             informationSize = 0;
             completionStatus = S_OK;
@@ -547,8 +548,9 @@ struct HostRequest : public IWDFIoRequest {
             _In_  HRESULT CompletionStatus,
             /* [annotation][in] */
             _In_  SIZE_T Information){
-            HLOG_INFO("HostRequest::CompleteWithInformation: %lx (%s)\r\n", (unsigned long)CompletionStatus,
-                hresult_to_sting(CompletionStatus));
+            HLOG_INFO("HostRequest::CompleteWithInformation(req=%p ctl=0x%08lx): %lx (%s), info=%zu\r\n",
+                this, (unsigned long)ctl, (unsigned long)CompletionStatus,
+                hresult_to_sting(CompletionStatus), (size_t)Information);
             completionStatus = CompletionStatus;
             informationSize = Information;
             complete = TRUE;
@@ -557,14 +559,16 @@ struct HostRequest : public IWDFIoRequest {
         virtual void STDMETHODCALLTYPE SetInformation(
             /* [annotation][in] */
             _In_  ULONG_PTR Information){
-            HLOG_INFO("HostRequest::SetInformation size=%lld\r\n", Information);
+            HLOG_INFO("HostRequest::SetInformation(req=%p ctl=0x%08lx) size=%lld\r\n",
+                this, (unsigned long)ctl, Information);
             informationSize = Information;
         }
 
         virtual void STDMETHODCALLTYPE Complete(
             /* [annotation][in] */
             _In_  HRESULT CompletionStatus){
-            HLOG_INFO("HostRequest::Complete: %lx (%s)\r\n", (unsigned long)CompletionStatus,
+            HLOG_INFO("HostRequest::Complete(req=%p ctl=0x%08lx): %lx (%s)\r\n",
+                this, (unsigned long)ctl, (unsigned long)CompletionStatus,
                 hresult_to_sting(CompletionStatus));
             completionStatus = CompletionStatus;
             complete = TRUE;
@@ -623,14 +627,14 @@ struct HostRequest : public IWDFIoRequest {
             _Out_opt_  SIZE_T *pInBufferSize,
             /* [annotation][unique][out] */
             _Out_opt_  SIZE_T *pOutBufferSize){
-            HLOG_DEBUG("HostRequest::GetDeviceIoControlParameters %p %p %p",
-                pControlCode, pInBufferSize, pOutBufferSize);
+            HLOG_DEBUG("HostRequest::GetDeviceIoControlParameters req=%p ctl=0x%08lx inMem=%p outMem=%p %p %p %p",
+                this, (unsigned long)ctl, inMem, outMem, pControlCode, pInBufferSize, pOutBufferSize);
             if (pControlCode)
                 *pControlCode = ctl;
             if (pInBufferSize)
-                *pInBufferSize = inMem->size;
+                *pInBufferSize = inMem ? inMem->size : 0;
             if (pOutBufferSize)
-                *pOutBufferSize = outMem->size;
+                *pOutBufferSize = outMem ? outMem->size : 0;
 
             HLOG_DEBUG("=> %zu %zu\r\n",
                     (size_t)(pInBufferSize ? *pInBufferSize : 0),
@@ -644,21 +648,40 @@ struct HostRequest : public IWDFIoRequest {
         virtual void STDMETHODCALLTYPE GetOutputMemory(
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory){
-            HLOG_DEBUG("HostRequest::GetOutputMemory => %p\r\n", outMem);
+            HLOG_DEBUG("HostRequest::GetOutputMemory req=%p ctl=0x%08lx => %p\r\n",
+                this, (unsigned long)ctl, outMem);
             *ppWdfMemory = outMem;
+            if (outMem) {
+                SIZE_T outSize = 0;
+                void *outBuf = outMem->GetDataBuffer(&outSize);
+                HLOG_DEBUG("HostRequest::GetOutputMemory buffer=%p size=%zu\r\n", outBuf, (size_t)outSize);
+            } else {
+                HLOG_USER("HostRequest::GetOutputMemory missing output memory for ctl=0x%08lx\n",
+                    (unsigned long)ctl);
+            }
         }
 
         virtual void STDMETHODCALLTYPE GetInputMemory(
             /* [annotation][out] */
             _Out_  IWDFMemory **ppWdfMemory){
-            HLOG_DEBUG("HostRequest::GetInputMemory => %p\r\n", inMem);
+            HLOG_DEBUG("HostRequest::GetInputMemory req=%p ctl=0x%08lx => %p\r\n",
+                this, (unsigned long)ctl, inMem);
             *ppWdfMemory = inMem;
+            if (inMem) {
+                SIZE_T inSize = 0;
+                void *inBuf = inMem->GetDataBuffer(&inSize);
+                HLOG_DEBUG("HostRequest::GetInputMemory buffer=%p size=%zu\r\n", inBuf, (size_t)inSize);
+            } else {
+                HLOG_USER("HostRequest::GetInputMemory missing input memory for ctl=0x%08lx\n",
+                    (unsigned long)ctl);
+            }
         }
 
         virtual void STDMETHODCALLTYPE MarkCancelable(
             /* [annotation][in] */
             _In_  IRequestCallbackCancel *pCancelCallback){
-            HLOG_DEBUG("HostRequest::MarkCancelable\r\n");
+            HLOG_DEBUG("HostRequest::MarkCancelable req=%p ctl=0x%08lx cb=%p\r\n",
+                this, (unsigned long)ctl, pCancelCallback);
             this->cancelCallback = pCancelCallback;
         }
 
