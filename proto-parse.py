@@ -147,7 +147,7 @@ def guess_struct(data):
 # ---------------------------------------------------------------------------
 
 LINE_RE = re.compile(
-    r"^\[proto\]\s+(?P<dir>>>|<<<)\s+dev\s+(?P<layer>\w+)\s+len=(?P<len>\d+)\s+(?P<hex>[0-9a-fA-F]+)"
+    r"^\[proto\]\s+(?P<dir>>>|<<<|\.\.\.)\s+dev\s+(?P<layer>\w+)\s+len=(?P<len>\d+)\s+(?P<hex>[0-9a-fA-F]+)"
 )
 
 def parse_line(line):
@@ -157,8 +157,9 @@ def parse_line(line):
     raw = bytes.fromhex(m.group("hex"))
     if len(raw) != int(m.group("len")):
         return None
+    dir_str = f"{m.group('dir')} dev"
     return {
-        "dir": f"{m.group('dir')} dev",
+        "dir": dir_str,
         "layer": m.group("layer"),
         "len": len(raw),
         "data": raw,
@@ -296,6 +297,12 @@ def main():
             print(f"  HOST -> DEVICE enc ({l['len']}B)")
             print(f"    Wire: {fmt_hex(l['data'])}")
             i = consume_enc_response(i+1)
+            print()
+
+        # Key material / metadata (neutral direction)
+        elif tag[0] == "... dev" and tag[1] in ("ecdh-secret", "tls-prf", "secret", "key", "iv"):
+            print(f"  KEY {tag[1]} ({l['len']}B): {l['data'].hex()}")
+            i += 1
             print()
 
         # Device-to-host enc (could be event or unsolicited)
