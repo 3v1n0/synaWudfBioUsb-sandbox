@@ -175,6 +175,15 @@ def parse_ecs2_private_d(blob):
     return blob[off:off + cb_key]
 
 
+def host_142_from_private_d(priv_d):
+    key = ec.derive_private_key(int.from_bytes(priv_d, "big"), ec.SECP256R1(),
+                                default_backend())
+    pub = key.public_key().public_numbers()
+    x_le = pub.x.to_bytes(32, "big")[::-1]
+    y_le = pub.y.to_bytes(32, "big")[::-1]
+    return b"\x3f\x5f\x17\x00" + x_le + (b"\x00" * 36) + y_le + (b"\x00" * 38)
+
+
 def _challenge_cache_path():
     return os.environ.get(
         "CHALLENGE_CACHE_PATH",
@@ -214,11 +223,7 @@ def resolve_challenge_material(pairing_blob):
     sign_d_override = os.environ.get("CHALLENGE_SIGN_KEY_D_HEX", "").strip()
     sign_ecs2_override = os.environ.get("CHALLENGE_SIGN_KEY_ECS2_HEX", "").strip()
 
-    if host_override and (sign_d_override or sign_ecs2_override):
-        host_142 = bytes.fromhex(host_override)
-        if len(host_142) != 142:
-            raise ValueError("CHALLENGE_HOST_142_HEX must decode to 142 bytes")
-
+    if sign_d_override or sign_ecs2_override:
         sign_d = None
         sign_ecs2 = None
         if sign_d_override:
@@ -231,6 +236,13 @@ def resolve_challenge_material(pairing_blob):
             if parsed_d is None:
                 raise ValueError("CHALLENGE_SIGN_KEY_ECS2_HEX is not a valid ECS2 key blob")
             sign_d = parsed_d
+
+        if host_override:
+            host_142 = bytes.fromhex(host_override)
+            if len(host_142) != 142:
+                raise ValueError("CHALLENGE_HOST_142_HEX must decode to 142 bytes")
+        else:
+            host_142 = host_142_from_private_d(sign_d)
 
         return {
             "host_142": host_142,
@@ -590,6 +602,7 @@ def initial_exchange(sensor):
         sign_ecs2 = material.get("sign_ecs2")
         source = material.get("source", "?")
         print(f"[init] challenge source={source}")
+        proto_log("...", "host-142", host_142)
 
         finish_hash = hashlib.sha256(host_142).digest()
         der_sig = sign_sha256_digest(sign_d, finish_hash)
