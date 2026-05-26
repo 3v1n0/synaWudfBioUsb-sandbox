@@ -12,9 +12,9 @@ Usage:
   PROTO_TRACE=1 python3 sensor.py list-db
 """
 
-import struct, sys, os, hashlib, hmac
+import struct, sys, os, hashlib, hmac, re
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 
@@ -118,6 +118,32 @@ CERT_BODY = bytes.fromhex(
     "0000000000000000000000000000000000000000000000000000000000000000"
     "00000000000000000000000000000000000000"
 )
+
+
+def load_pairing_blob_from_registry(reg_path=None):
+    path = reg_path or os.path.expanduser("~/winelatestprefix/user.reg")
+    try:
+        text = open(path, "r", encoding="utf-8", errors="ignore").read()
+    except OSError:
+        return None
+
+    m = re.search(r'"56FB88ED27E90000"=hex:([^\n]*(?:\\\n\s+[0-9a-f,]+)*)',
+                  text, re.IGNORECASE)
+    if not m:
+        return None
+
+    csv = m.group(1).replace("\\\n", "").replace(" ", "")
+    vals = [v for v in csv.split(",") if v]
+    try:
+        return bytes(int(v, 16) for v in vals)
+    except ValueError:
+        return None
+
+
+def sign_sha256_digest(priv_d, digest32):
+    key = ec.derive_private_key(int.from_bytes(priv_d, "big"), ec.SECP256R1(),
+                                default_backend())
+    return key.sign(digest32, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
 
 class SyncSensor:
     def __init__(self):
@@ -396,13 +422,33 @@ def initial_exchange(sensor):
     sensor.do_init_cmds()
     print("[init] phase 2 done")
 
-    # Challenge is optional; stale host blobs can trigger 0304 and poison TLS state.
-    if os.environ.get("SEND_CHALLENGE") == "1":
+    # Challenge: required for parity; kept toggleable while host_142 derivation
+    # from PairingData is still being re-implemented.
+    if os.environ.get("SEND_CHALLENGE", "0") == "1":
+        pairing_blob = load_pairing_blob_from_registry()
+        if pairing_blob:
+            print(f"[init] PairingData loaded ({len(pairing_blob)} bytes)")
+        else:
+            print("[init] PairingData not found in user.reg")
+
         print("[init] challenge...")
-        challenge_data = b"\x93" + HOST_142 + b"\x47\x00" + bytes.fromhex(
-            "3045022100a00c567d8d555152dee489787de1e406868b86242600a4f4ad0e051941bf4df7"
-            "022021d2a6dd40565fdf0628bb84995feaf603ac5973e57062f43ec4525104f59a91"
-        )
+        host_142 = HOST_142
+        host_override = os.environ.get("CHALLENGE_HOST_142_HEX", "").strip()
+        if host_override:
+            host_142 = bytes.fromhex(host_override)
+            print("[init] using CHALLENGE_HOST_142_HEX override")
+
+        sign_d = IDENTITY_KEY_D
+        sign_override = os.environ.get("CHALLENGE_SIGN_KEY_D_HEX", "").strip()
+        if sign_override:
+            sign_d = bytes.fromhex(sign_override)
+            print("[init] using CHALLENGE_SIGN_KEY_D_HEX override")
+
+        finish_hash = hashlib.sha256(host_142).digest()
+        der_sig = sign_sha256_digest(sign_d, finish_hash)
+        print(f"[init] challenge hash={finish_hash.hex()} sig_len={len(der_sig)}")
+
+        challenge_data = b"\x93" + host_142 + b"\x47\x00" + der_sig
         challenge_data = challenge_data + b"\x00" * (408 - len(challenge_data))
         assert len(challenge_data) == 408
         sensor.ctrl_out(REQ_CMD, value=1, data=challenge_data)
