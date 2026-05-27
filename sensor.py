@@ -434,10 +434,14 @@ class Sensor:
                 self.app_storage_query_init(2)
                 guids = self.app_storage_query_all()
                 if guids:
+                    filled = 0
                     for idx, g in enumerate(guids):
-                        t(f"\n--- Fetching record {idx} ---")
                         rec = self.app_fetch_record(g)
-                        hexdump(f"Record {idx} data", rec or b'')
+                        if rec and rec != b'\x00\x00\x00\x00':
+                            t(f"Record {idx} ({g.hex()}): {rec.hex()}")
+                            filled += 1
+                    if filled == 0:
+                        t("No enrolled templates found on device")
 
         if self._dry:
             t("[DRY] App commands not executed")
