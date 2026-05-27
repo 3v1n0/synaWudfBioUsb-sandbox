@@ -222,8 +222,8 @@ def get_cert_pairingdata():
         return None
     host_142 = cert_data[:142]
     eck2_le = tlvs.get(2, b'\x00' * 32)
-    # Extract ECS2 public key from cert body at offset 148 (2+142+4)
-    eck2_pub_le = cert_data[148:180] if len(cert_data) >= 180 else b'\x00' * 32
+    # Extract ECS2 public key from cert body at offset 146 (HOST_142[142] + header[4])
+    eck2_pub_le = cert_data[146:178] if len(cert_data) >= 178 else b'\x00' * 32
     # Extract device ECDH static key from Tag 3 (host cert)
     host_cert = tlvs.get(3)
     host_x_be = DEV_X_BE; host_y_be = DEV_Y_BE
@@ -576,10 +576,14 @@ class Sensor:
 
     def build_cert(self):
         run_marker = self.cli_rand[4:6]
-        host_142 = self.build_host142()
-        eck2_pub = self._pairing_eck2_pub_le or b'\x00' * 32
-        cert_data = run_marker + host_142 + struct.pack('>HB', 2, 32) + b'\x00' + eck2_pub + b'\x00' * 220
-        assert len(cert_data) == 400, f"cert_data={len(cert_data)}"
+        if self._pairing_cert_data is not None:
+            cert_data = run_marker + self._pairing_cert_data[:398]
+            assert len(cert_data) == 400, f"pair cert_data={len(cert_data)}"
+        else:
+            host_142 = self.build_host142()
+            eck2_pub = self._pairing_eck2_pub_le or b'\x00' * 32
+            cert_data = run_marker + host_142 + struct.pack('>HB', 2, 32) + b'\x00' + eck2_pub + b'\x00' * 220
+            assert len(cert_data) == 400, f"cert_data={len(cert_data)}"
 
         list_len = struct.pack('>I', 400)[1:4]
         body = list_len + list_len + cert_data + b'\x00\x00'
