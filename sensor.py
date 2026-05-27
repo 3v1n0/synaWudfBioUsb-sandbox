@@ -428,20 +428,20 @@ class Sensor:
         # 6. App commands
         if not self._dry and resp and resp[0] == 0x14:
             t("\n=== App Commands ===")
-            count = self.app_get_record_count()
-            if count is not None and count > 0:
-                self.app_storage_query_init(1)
-                self.app_storage_query_init(2)
-                guids = self.app_storage_query_all()
-                if guids:
-                    enrolled = []
-                    for g in guids:
-                        rec = self.app_fetch_record(g)
-                        if rec and rec != b'\x00\x00\x00\x00':
-                            t(f"  Enrolled: {g.hex()}: {rec.hex()}")
-                            enrolled.append((g, rec))
-                    if not enrolled:
-                        t("  (no enrolled templates)")
+            self.app_get_record_count()
+            self.app_storage_query_init(1)
+            self.app_storage_query_init(2)
+            guids = self.app_storage_query_all()
+            if len(guids) > 0:
+                t(f"Total storage slots: {len(guids)}")
+                enrolled = []
+                for g in guids:
+                    rec = self.app_fetch_record(g)
+                    if rec and rec != b'\x00\x00\x00\x00':
+                        t(f"  Enrolled: {g.hex()}: {rec.hex()}")
+                        enrolled.append((g, rec))
+                if not enrolled:
+                    t("  (no enrolled templates)")
 
         if self._dry:
             t("[DRY] App commands not executed")
@@ -631,12 +631,9 @@ class Sensor:
         plain = b'\x82' + b'\x00' * 6 + b'\x02\x07'
         t("--- GET_RECORD_COUNT ---")
         data = self.app_send(6, plain, 128, label="GET_RECORD_COUNT")
-        if data and len(data) >= 12:
-            count = struct.unpack('>I', data[8:12])[0]
-            t(f"Record count: {count}")
-            return count
-        hexdump("Raw record count response", data or b'')
-        return None
+        if data:
+            hexdump("Record count plain", data)
+        return data
 
     def app_storage_query_init(self, seq_n):
         t(f"--- STORAGE_QUERY_INIT ({seq_n}) ---")
