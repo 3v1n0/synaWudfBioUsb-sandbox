@@ -73,15 +73,54 @@ hello_v2_main(int argc, char *argv[], HMODULE pDll,
     }
 
     // v2 IOCTL helper — synchronous dispatch through EvtIoDeviceControl
+    // Logging mirrors v1: HLOG_USER for the "about to" line (always visible),
+    // HLOG_INFO for the generic result line (requires HELLO_LOG >= 1).
     auto v2ioctl = [](ULONG code,
                       const void *in,  size_t inLen,
                       void       *out, size_t outLen,
                       ULONG_PTR  *pInfo = nullptr) -> NTSTATUS {
+        // Map common IOCTL codes to human-readable names (same codes defined above)
+        const char *name;
+        switch (code) {
+        case 0x440004: name = "GET_ATTRIBUTES";                break;
+        case 0x440008: name = "RESET";                         break;
+        case 0x44000C: name = "CALIBRATE";                     break;
+        case 0x440010: name = "GET_SENSOR_STATUS";             break;
+        case 0x440014: name = "CAPTURE_DATA";                  break;
+        case 0x440018: name = "UPDATE_FIRMWARE";               break;
+        case 0x44001C: name = "GET_SUPPORTED_ALGORITHMS";      break;
+        case 0x440020: name = "SENSOR_CONTROL";                break;
+        case 0x44002C: name = "GET_SUPPORTED_DATABASES";       break;
+        case 0x442004: name = "ENGINE_QUERY_PREFERRED_FORMAT"; break;
+        case 0x44200C: name = "ENGINE_CREATE_ENROLLMENT";      break;
+        case 0x442010: name = "ENGINE_UPDATE_ENROLLMENT";      break;
+        case 0x442014: name = "ENGINE_CHECK_FOR_DUPLICATE";    break;
+        case 0x442018: name = "ENGINE_COMMIT_ENROLLMENT";      break;
+        case 0x44201C: name = "ENGINE_DISCARD_ENROLLMENT";     break;
+        case 0x442020: name = "ENGINE_DISCARD_SMI_DATA";       break;
+        case 0x442028: name = "ENGINE_ERASE_DATABASE";         break;
+        case 0x44202C: name = "STORAGE_GET_RECORD_COUNT";      break;
+        case 0x442030: name = "ENGINE_STORAGE_QUERY";          break;
+        case 0x442034: name = "STORAGE_DELETE_RECORD";         break;
+        case 0x442038: name = "ENGINE_GET_PROPERTY";           break;
+        case 0x44203C: name = "ENGINE_SET_PROPERTY";           break;
+        case 0x442040: name = "ENGINE_RESET_OWNERSHIP";        break;
+        case 0x442044: name = "ENGINE_SET_LED_STATE";          break;
+        case 0x442048: name = "ENGINE_SAP_REQUEST";            break;
+        case 0x442050: name = "ENGINE_GET_TEMPLATE";           break;
+        case 0x442054: name = "ENGINE_SET_TEMPLATE_LIST";      break;
+        case 0x442058: name = "ENGINE_IDENTIFY_FEATURE_SET";   break;
+        case 0x442064: name = "ENGINE_GET_IS_NON_ENROLL_COMMIT_PROC"; break;
+        case 0x442080: name = "ENGINE_SET_BIOTEST_RUNNING_STATE"; break;
+        default:       name = "(unknown)";                     break;
+        }
+        HLOG_USER("about to IOCTL_BIOMETRIC_%s (0x%08lx) inLen=%zu outLen=%zu\n",
+                  name, (unsigned long)code, inLen, outLen);
         ULONG_PTR info = 0;
         NTSTATUS s = wdf2_dispatch_ioctl(code, in, inLen, out, outLen, &info);
         if (pInfo) *pInfo = info;
-        HLOG_USER("[v2] ioctl 0x%08lx -> 0x%lx (info=%zu)\n",
-                  (unsigned long)code, (unsigned long)s, (size_t)info);
+        HLOG_INFO("IOCTL_BIOMETRIC_%s -> status=0x%lx (%s) info=%zu\n",
+                  name, (unsigned long)s, hresult_to_sting(s), (size_t)info);
         return s;
     };
 

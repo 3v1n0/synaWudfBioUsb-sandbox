@@ -687,6 +687,9 @@ stub_WdfIoTargetCloseForQueryRemove(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARG
     WDF2_LOG(2, "[WDF2] WdfIoTargetCloseForQueryRemove\n");
 }
 
+// Forward declaration: body defined after Wdf2UsbPipe
+static void wdf2_maybe_start_cont_reader(WDFIOTARGET IoTarget);
+
 // --- WdfIoTargetClose (index 105) --- no-op
 static void WINAPI
 stub_WdfIoTargetClose(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget)
@@ -698,7 +701,8 @@ stub_WdfIoTargetClose(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget)
 static NTSTATUS WINAPI
 stub_WdfIoTargetStart(PWDF_DRIVER_GLOBALS DriverGlobals, WDFIOTARGET IoTarget)
 {
-    HLOG_USER("[WDF2] WdfIoTargetStart (stub -> success)\n");
+    HLOG_USER("[WDF2] WdfIoTargetStart target=%p\n", (void*)IoTarget);
+    wdf2_maybe_start_cont_reader(IoTarget);
     return 0;
 }
 
@@ -1024,14 +1028,6 @@ stub_WdfCmResourceListGetDescriptor(PWDF_DRIVER_GLOBALS DriverGlobals,
     return nullptr;
 }
 
-// --- WdfPdoGetParent (index 221) --- returns the single host device
-static WDFDEVICE WINAPI
-stub_WdfPdoGetParent(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device)
-{
-    WDF2_LOG(1, "[WDF2] WdfPdoGetParent -> g_wdf2Device\n");
-    return (WDFDEVICE)g_wdf2Device;
-}
-
 // -----------------------------------------------------------------------
 // USB WDF stubs  (indices 202-239)
 // -----------------------------------------------------------------------
@@ -1053,6 +1049,196 @@ struct Wdf2UsbDevice {
 };
 static Wdf2UsbDevice g_wdf2UsbDev;
 
+// ---------------------------------------------------------------------------
+// WinUSB / real-device globals and helpers
+// ---------------------------------------------------------------------------
+static HANDLE                  g_wdf2DevFile      = INVALID_HANDLE_VALUE;
+static WINUSB_INTERFACE_HANDLE g_wdf2WinusbHandle = NULL;
+typedef void (WINAPI *wdf2_usb_read_cb_t)(WDFUSBPIPE, WDFMEMORY, size_t, WDFCONTEXT);
+static wdf2_usb_read_cb_t g_wdf2ContReadCb     = NULL;
+static WDFCONTEXT         g_wdf2ContReadCtx    = NULL;
+static size_t             g_wdf2ContReadBufLen = 0;
+static WDFUSBPIPE         g_wdf2ContReadPipe   = NULL;
+
+// Opens the real USB device via WinUsb_Initialize, stores handle in globals.
+// Writes the "VID:PID\r\n" text to a temp file so the Wine unix-lib can find it.
+static void wdf2_open_winusb_device(USHORT vid, USHORT pid)
+{
+    if (g_wdf2WinusbHandle != NULL) return;  // already open
+
+    // Write VID:PID to a temp file that the Wine WinUSB unix-lib reads via
+    // ReadFile(DeviceHandle, buf, ...) — the file acts as the device path.
+    char vidpid[32];
+    snprintf(vidpid, sizeof(vidpid), "%04x:%04x\r\n", vid, pid);
+    char tmpPath[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmpPath);
+    strncat(tmpPath, "wdf2_usb_dev.txt", sizeof(tmpPath) - strlen(tmpPath) - 1);
+    {
+        FILE *fp = fopen(tmpPath, "wt");
+        if (fp) { fputs(vidpid, fp); fclose(fp); }
+    }
+    WCHAR wPath[MAX_PATH];
+    MultiByteToWideChar(CP_UTF8, 0, tmpPath, -1, wPath, MAX_PATH);
+    g_wdf2DevFile = CreateFileW(wPath,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        NULL, OPEN_EXISTING,
+        FILE_FLAG_OVERLAPPED, NULL);
+    if (g_wdf2DevFile == INVALID_HANDLE_VALUE) {
+        HLOG_USER("[WDF2] wdf2_open_winusb_device: CreateFileW failed err=%lu\n", GetLastError());
+        return;
+    }
+    WINUSB_INTERFACE_HANDLE h = NULL;
+    if (!WinUsb_Initialize(g_wdf2DevFile, &h)) {
+        HLOG_USER("[WDF2] wdf2_open_winusb_device: WinUsb_Initialize failed err=%lu\n", GetLastError());
+        CloseHandle(g_wdf2DevFile);
+        g_wdf2DevFile = INVALID_HANDLE_VALUE;
+        return;
+    }
+    g_wdf2WinusbHandle = h;
+    HLOG_USER("[WDF2] WinUSB opened %04x:%04x handle=%p\n", vid, pid, (void*)h);
+}
+
+// Reads buffer pointer+length from a WDF_MEMORY_DESCRIPTOR (raw offsets, 64-bit).
+// Type field at +0x00 (ULONG):
+//   1 = buffer (ptr at +0x08, len at +0x10)
+//   3 = WDFMEMORY handle (at +0x08; use WdfMemoryGetBuffer)
+static BOOL wdf2_get_memdesc_buffer(const void *mdesc, void **buf, ULONG *len)
+{
+    if (!mdesc) return FALSE;
+    ULONG type;
+    memcpy(&type, (const char*)mdesc + 0x00, 4);
+    if (type == 1) {
+        memcpy(buf, (const char*)mdesc + 0x08, 8);
+        memcpy(len, (const char*)mdesc + 0x10, 4);
+        return TRUE;
+    }
+    if (type == 3) {
+        void *hmem = NULL;
+        memcpy(&hmem, (const char*)mdesc + 0x08, 8);
+        if (!hmem) return FALSE;
+        auto *m = (Wdf2Memory*)hmem;
+        *buf = m->buf;
+        *len = (ULONG)m->size;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// --- WdfUsbTargetPipeWriteSynchronously (UMDF v2 index 221) ---
+// Writes to the USB pipe identified by Pipe->endpointAddr (should be EP 0x01 OUT).
+static NTSTATUS WINAPI
+stub_WdfUsbTargetPipeWriteSynchronously(PWDF_DRIVER_GLOBALS DriverGlobals,
+    WDFUSBPIPE Pipe, WDFREQUEST Request,
+    void *RequestOptions,
+    void *MemoryDescriptor,
+    PULONG_PTR BytesWritten)
+{
+    Wdf2UsbPipe *p = (Wdf2UsbPipe*)Pipe;
+    UCHAR ep = p ? p->endpointAddr : 0;
+    void *buf = NULL; ULONG len = 0;
+    if (!wdf2_get_memdesc_buffer(MemoryDescriptor, &buf, &len)) {
+        HLOG_USER("[WDF2] WdfUsbTargetPipeWriteSynchronously ep=0x%02x: bad MemoryDescriptor\n", ep);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!g_wdf2WinusbHandle) {
+        HLOG_USER("[WDF2] WdfUsbTargetPipeWriteSynchronously ep=0x%02x: no WinUSB handle\n", ep);
+        return (NTSTATUS)0xC000009DL;
+    }
+    ULONG transferred = 0;
+    { ULONG _i; HLOG_USER("[WDF2] WdfUsbTargetPipeWriteSynchronously ep=0x%02x len=%lu data:", ep, (unsigned long)len);
+      for(_i=0;_i<len&&_i<64;_i++) HLOG_USER(" %02x", ((unsigned char*)buf)[_i]);
+      HLOG_USER("\n"); }
+    BOOL ok = WinUsb_WritePipe(g_wdf2WinusbHandle, ep, (PUCHAR)buf, len, &transferred, NULL);
+    HLOG_USER("[WDF2] WdfUsbTargetPipeWriteSynchronously ep=0x%02x len=%lu -> ok=%d transferred=%lu err=%lu\n",
+              ep, (unsigned long)len, ok, (unsigned long)transferred, ok ? 0UL : (unsigned long)GetLastError());
+    if (BytesWritten) *BytesWritten = transferred;
+    return ok ? 0 : (NTSTATUS)0xC0000185L;
+}
+
+// --- WdfUsbTargetPipeReadSynchronously (UMDF v2 index 223) ---
+// Reads from the USB pipe identified by Pipe->endpointAddr (should be EP 0x83 IN).
+static NTSTATUS WINAPI
+stub_WdfUsbTargetPipeReadSynchronously(PWDF_DRIVER_GLOBALS DriverGlobals,
+    WDFUSBPIPE Pipe, WDFREQUEST Request,
+    void *RequestOptions,
+    void *MemoryDescriptor,
+    PULONG_PTR BytesRead)
+{
+    Wdf2UsbPipe *p = (Wdf2UsbPipe*)Pipe;
+    UCHAR ep = p ? p->endpointAddr : 0;
+    void *buf = NULL; ULONG len = 0;
+    if (!wdf2_get_memdesc_buffer(MemoryDescriptor, &buf, &len)) {
+        HLOG_USER("[WDF2] WdfUsbTargetPipeReadSynchronously ep=0x%02x: bad MemoryDescriptor\n", ep);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!g_wdf2WinusbHandle) {
+        HLOG_USER("[WDF2] WdfUsbTargetPipeReadSynchronously ep=0x%02x: no WinUSB handle\n", ep);
+        return (NTSTATUS)0xC000009DL;
+    }
+    ULONG transferred = 0;
+    BOOL ok = WinUsb_ReadPipe(g_wdf2WinusbHandle, ep, (PUCHAR)buf, len, &transferred, NULL);
+    HLOG_USER("[WDF2] WdfUsbTargetPipeReadSynchronously ep=0x%02x len=%lu -> ok=%d transferred=%lu err=%lu\n",
+              ep, (unsigned long)len, ok, (unsigned long)transferred, ok ? 0UL : (unsigned long)GetLastError());
+    if (BytesRead) *BytesRead = transferred;
+    return ok ? 0 : (NTSTATUS)0xC0000185L;
+}
+
+// --- WdfIoTargetSendReadSynchronously (index 182) ---
+// Calls WinUsb_ReadPipe on the bulk-in endpoint (EP 0x83).
+static NTSTATUS WINAPI
+stub_WdfIoTargetSendReadSynchronously(PWDF_DRIVER_GLOBALS DriverGlobals,
+    WDFIOTARGET IoTarget, WDFREQUEST Request,
+    PLONGLONG RequestOptions,
+    void *MemoryDescriptor,
+    PLONGLONG StartingOffset, PULONG_PTR BytesRead)
+{
+    void *buf = NULL; ULONG len = 0;
+    if (!wdf2_get_memdesc_buffer(MemoryDescriptor, &buf, &len)) {
+        HLOG_USER("[WDF2] WdfIoTargetSendReadSynchronously: bad MemoryDescriptor\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!g_wdf2WinusbHandle) {
+        HLOG_USER("[WDF2] WdfIoTargetSendReadSynchronously: no WinUSB handle\n");
+        return (NTSTATUS)0xC000009DL; // STATUS_DEVICE_NOT_CONNECTED
+    }
+    ULONG transferred = 0;
+    BOOL ok = WinUsb_ReadPipe(g_wdf2WinusbHandle, 0x83, (PUCHAR)buf, len, &transferred, NULL);
+    HLOG_USER("[WDF2] WdfIoTargetSendReadSynchronously ep=0x83 len=%lu -> ok=%d transferred=%lu err=%lu\n",
+              (unsigned long)len, ok, (unsigned long)transferred, ok ? 0UL : (unsigned long)GetLastError());
+    if (BytesRead) *BytesRead = transferred;
+    return ok ? 0 : (NTSTATUS)0xC0000185L; // STATUS_IO_DEVICE_ERROR
+}
+
+// --- WdfIoTargetSendWriteSynchronously (index 184) ---
+// Calls WinUsb_WritePipe on the bulk-out endpoint (EP 0x01).
+static NTSTATUS WINAPI
+stub_WdfIoTargetSendWriteSynchronously(PWDF_DRIVER_GLOBALS DriverGlobals,
+    WDFIOTARGET IoTarget, WDFREQUEST Request,
+    PLONGLONG RequestOptions,
+    void *MemoryDescriptor,
+    PLONGLONG StartingOffset, PULONG_PTR BytesWritten)
+{
+    void *buf = NULL; ULONG len = 0;
+    if (!wdf2_get_memdesc_buffer(MemoryDescriptor, &buf, &len)) {
+        HLOG_USER("[WDF2] WdfIoTargetSendWriteSynchronously: bad MemoryDescriptor\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!g_wdf2WinusbHandle) {
+        HLOG_USER("[WDF2] WdfIoTargetSendWriteSynchronously: no WinUSB handle\n");
+        return (NTSTATUS)0xC000009DL; // STATUS_DEVICE_NOT_CONNECTED
+    }
+    ULONG transferred = 0;
+    BOOL ok = WinUsb_WritePipe(g_wdf2WinusbHandle, 0x01, (PUCHAR)buf, len, &transferred, NULL);
+    HLOG_USER("[WDF2] WdfIoTargetSendWriteSynchronously ep=0x01 len=%lu -> ok=%d transferred=%lu err=%lu\n",
+              (unsigned long)len, ok, (unsigned long)transferred, ok ? 0UL : (unsigned long)GetLastError());
+    if (BytesWritten) *BytesWritten = transferred;
+    return ok ? 0 : (NTSTATUS)0xC0000185L; // STATUS_IO_DEVICE_ERROR
+}
+
+// Forward declaration for cont-reader helper defined after Wdf2UsbPipe
+static void wdf2_maybe_start_cont_reader(WDFIOTARGET IoTarget);
+
 // --- WdfUsbTargetDeviceCreate (index 202) ---
 static NTSTATUS WINAPI
 stub_WdfUsbTargetDeviceCreate(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Device,
@@ -1067,8 +1253,11 @@ stub_WdfUsbTargetDeviceCreate(PWDF_DRIVER_GLOBALS DriverGlobals, WDFDEVICE Devic
     g_wdf2UsbDev.idProduct = pid;
     // Two bulk endpoints: 0x81 bulk-in, 0x01 bulk-out
     g_wdf2UsbDev.iface.numPipes   = 2;
-    g_wdf2UsbDev.iface.pipes[0]   = { 0x81, 512, 3 }; // bulk-in
-    g_wdf2UsbDev.iface.pipes[1]   = { 0x01, 512, 3 }; // bulk-out
+    g_wdf2UsbDev.iface.pipes[0]   = { 0x83, 64, 3 };  // bulk-in EP 3
+    g_wdf2UsbDev.iface.pipes[1]   = { 0x01, 64, 3 };  // bulk-out EP 1
+
+    // Open the real device via WinUSB (idempotent)
+    wdf2_open_winusb_device(vid, pid);
 
     HLOG_USER("[WDF2] WdfUsbTargetDeviceCreate -> %04x:%04x (2 bulk pipes)\n", vid, pid);
     if (UsbDevice) *UsbDevice = &g_wdf2UsbDev;
@@ -1205,15 +1394,62 @@ stub_WdfUsbTargetPipeSetNoMaximumPacketSizeCheck(PWDF_DRIVER_GLOBALS DriverGloba
     WDF2_LOG(2, "[WDF2] WdfUsbTargetPipeSetNoMaximumPacketSizeCheck no-op\n");
 }
 
-// --- WdfUsbTargetPipeConfigContinuousReader (index 225) --- no-op
-// Sets up a continuous reader on bulk/interrupt-in pipe; we have no real USB,
-// so just succeed and let the driver proceed.
+// Continuous reader thread: loops reading from EP 0x83, calling g_wdf2ContReadCb
+static DWORD WINAPI wdf2_cont_reader_thread(LPVOID)
+{
+    size_t bufLen = g_wdf2ContReadBufLen > 0 ? g_wdf2ContReadBufLen : 512;
+    HLOG_USER("[WDF2] cont_reader_thread started ep=0x83 bufLen=%zu\n", bufLen);
+    void *buf = malloc(bufLen);
+    if (!buf) { HLOG_USER("[WDF2] cont_reader_thread: malloc failed\n"); return 1; }
+    while (g_wdf2ContReadCb) {
+        ULONG transferred = 0;
+        BOOL ok = WinUsb_ReadPipe(g_wdf2WinusbHandle, 0x83, (PUCHAR)buf, (ULONG)bufLen, &transferred, NULL);
+        HLOG_USER("[WDF2] cont_reader_thread: ok=%d transferred=%lu err=%lu\n",
+                  ok, (unsigned long)transferred, ok ? 0UL : (unsigned long)GetLastError());
+        if (ok && transferred > 0 && g_wdf2ContReadCb) {
+            { ULONG _i; HLOG_USER("[WDF2] cont_reader ep=0x83 got %lu bytes:", transferred);
+              for(_i=0;_i<transferred&&_i<32;_i++) HLOG_USER(" %02x", ((unsigned char*)buf)[_i]);
+              if(transferred>32) HLOG_USER("..."); HLOG_USER("\n"); }
+            auto *m = new Wdf2Memory();
+            m->buf = malloc(transferred); m->size = transferred; m->owner = true;
+            if (m->buf) memcpy(m->buf, buf, transferred);
+            g_wdf2ContReadCb(g_wdf2ContReadPipe, (WDFMEMORY)m, transferred, g_wdf2ContReadCtx);
+        } else if (!ok) {
+            HLOG_USER("[WDF2] cont_reader_thread: read failed, retrying in 200ms\n");
+            Sleep(200);
+        }
+    }
+    free(buf);
+    HLOG_USER("[WDF2] cont_reader_thread exiting\n");
+    return 0;
+}
+
+static void wdf2_start_cont_reader(WDFUSBPIPE pipe)
+{
+    g_wdf2ContReadPipe = pipe;
+    HLOG_USER("[WDF2] wdf2_start_cont_reader: spawning thread\n");
+    CreateThread(NULL, 0, wdf2_cont_reader_thread, NULL, 0, NULL);
+}
+
+// --- WdfUsbTargetPipeConfigContinuousReader (index 225) ---
 static NTSTATUS WINAPI
 stub_WdfUsbTargetPipeConfigContinuousReader(PWDF_DRIVER_GLOBALS DriverGlobals,
                                              WDFUSBPIPE Pipe,
                                              PWDF_USB_CONTINUOUS_READER_CONFIG Config)
 {
-    HLOG_USER("[WDF2] WdfUsbTargetPipeConfigContinuousReader no-op\n");
+    if (Config) {
+        const char *c = (const char*)Config;
+        size_t transferLen = 0;
+        void *cb = NULL, *ctx = NULL;
+        memcpy(&transferLen, c + 0x08, sizeof(size_t));
+        memcpy(&cb,          c + 0x30, sizeof(void*));
+        memcpy(&ctx,         c + 0x38, sizeof(void*));
+        g_wdf2ContReadCb     = (wdf2_usb_read_cb_t)cb;
+        g_wdf2ContReadCtx    = (WDFCONTEXT)ctx;
+        g_wdf2ContReadBufLen = transferLen ? transferLen : 512;
+    }
+    HLOG_USER("[WDF2] WdfUsbTargetPipeConfigContinuousReader pipe=%p cb=%p bufLen=%zu\n",
+              (void*)Pipe, (void*)(void*)g_wdf2ContReadCb, g_wdf2ContReadBufLen);
     return 0;
 }
 
@@ -1256,13 +1492,25 @@ stub_WdfUsbInterfaceGetConfiguredPipe(PWDF_DRIVER_GLOBALS DriverGlobals,
     return (WDFUSBPIPE)p;
 }
 
+// Post-Wdf2UsbPipe: continuous reader start helper
+static void wdf2_maybe_start_cont_reader(WDFIOTARGET IoTarget)
+{
+    if (!IoTarget || !g_wdf2ContReadCb || !g_wdf2WinusbHandle) return;
+    // Check if this is the bulk-in pipe (EP 0x83, pipes[0])
+    auto *p = (Wdf2UsbPipe*)IoTarget;
+    bool isBulkIn = (p == &g_wdf2UsbDev.iface.pipes[0] && p->endpointAddr == 0x83);
+    HLOG_USER("[WDF2] wdf2_maybe_start_cont_reader: target=%p isBulkIn=%d\n",
+              (void*)IoTarget, (int)isBulkIn);
+    if (isBulkIn) wdf2_start_cont_reader((WDFUSBPIPE)p);
+}
+
 // Catch-all for unimplemented WDF table slots.
 // Per-slot unimplemented stub: each index N gets its own instantiation so
 // the log shows the exact slot number.
 template<int N>
 struct WdfUnimplSlot {
     static NTSTATUS WINAPI stub(PWDF_DRIVER_GLOBALS, ...) {
-        WDF2_LOG(1, "[WDF2] unimplemented WDF table entry [%d] called\n", N);
+        HLOG_USER("[WDF2] UNIMPL slot [%d] called\n", N);
         return 0;
     }
 };
@@ -1341,9 +1589,12 @@ struct Wdf2FunctionTable {
         fn[171] = (WDFFUNC)stub_WdfRequestGetInformation;
         fn[174] = (WDFFUNC)stub_WdfRequestForwardToIoQueue;
         fn[175] = (WDFFUNC)stub_WdfRequestGetIoQueue;
+        fn[111] = (WDFFUNC)stub_WdfIoTargetSendReadSynchronously;
+        fn[113] = (WDFFUNC)stub_WdfIoTargetSendWriteSynchronously;
         fn[186] = (WDFFUNC)stub_WdfCmResourceListGetCount;
         fn[187] = (WDFFUNC)stub_WdfCmResourceListGetDescriptor;
-        fn[221] = (WDFFUNC)stub_WdfPdoGetParent;
+        fn[221] = (WDFFUNC)stub_WdfUsbTargetPipeWriteSynchronously;
+        fn[223] = (WDFFUNC)stub_WdfUsbTargetPipeReadSynchronously;
         fn[202] = (WDFFUNC)stub_WdfUsbTargetDeviceCreate;
         fn[204] = (WDFFUNC)stub_WdfUsbTargetDeviceRetrieveInformation;
         fn[205] = (WDFFUNC)stub_WdfUsbTargetDeviceGetDeviceDescriptor;
