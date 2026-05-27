@@ -240,7 +240,7 @@ class Sensor:
         pkt = fmt_setup(BM_OUT, req, value, 0, len(data))
         t(f">>> {req_label or ''} {pkt} data={data[:80].hex()}")
         if self._dry: return
-    USB_TIMEOUT = 3  # 3 seconds
+    USB_TIMEOUT = 10000  # 10 seconds
     def ctrl_out(self, req, value=0, data=b'', req_label=""):
         pkt = fmt_setup(BM_OUT, req, value, 0, len(data))
         t(f">>> {req_label or ''} {pkt} data={data[:80].hex()}")
