@@ -612,7 +612,7 @@ class Sensor:
 
     def app_send(self, value, plain, resp_len=256, label=""):
         out = self.app_encrypt(plain)
-        hexdump(f"App OUT({label})", out)
+        t(f"  APP({label}): plain={plain.hex()}")
         self.ctrl_out(REQ_CMD, value, out, req_label=f"APP_OUT({label})")
         resp = self.ctrl_in(REQ_RESP, resp_len, 0, req_label=f"APP_IN({label})")
         if not resp:
