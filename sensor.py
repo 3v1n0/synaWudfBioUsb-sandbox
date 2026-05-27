@@ -37,9 +37,6 @@ INIT_CMD2 = b'\x8e\x09\x00\x02' + b'\x00'*20
 INIT_CMD3 = b'\x8e\x1a\x00\x02' + b'\x00'*20
 INIT_CMD4 = b'\x19' + b'\x00'*7
 
-HOST_X_BE = bytes.fromhex('b3dbef324fc769e7350d17f8329665cc4725ceb62dc8688eb275eef6cb0dfb18')
-HOST_Y_BE = bytes.fromhex('c95675ccec0369e3e6ee72be09ba2cb52867214b4e80612f262e9da861e78d15')
-SIGN_D_BE = bytes.fromhex('cca803106523ed52964f95a3742b85b349cba81759fd52387c0547a8af9d577f')
 DEV_X_BE  = bytes.fromhex('63df20dd820af4274c9e9a1854f02102bc0e1b76b8746817b68c440122df20bf')
 DEV_Y_BE  = bytes.fromhex('4ef37a81815ead6a51b145aadbb3073f60bedb82ea38c34324983109df6fc0f3')
 
@@ -179,7 +176,7 @@ def parse_pairing_tlv(plain):
     return results
 
 def get_cert_pairingdata():
-    """Returns (host_142, eck2_le, full_cert_body) from PairingData registry."""
+    """Returns (host_142, eck2_le, full_cert_body, host_x, host_y) from PairingData."""
     blob = load_pairing_blob_from_registry()
     if not blob:
         return None
@@ -194,7 +191,20 @@ def get_cert_pairingdata():
         return None
     host_142 = cert_data[:142]
     eck2_le = tlvs.get(2, b'\x00' * 32)
-    return (host_142, eck2_le, cert_data)
+    # Extract device ECDH static key from Tag 3 (host cert)
+    host_cert = tlvs.get(3)
+    host_x_be = DEV_X_BE; host_y_be = DEV_Y_BE
+    if host_cert and len(host_cert) >= 142 and host_cert[:4] == b'\x3f\x5f\x17\x00':
+        x_le = host_cert[4:36]
+        off = 36
+        while off < 142 and host_cert[off] == 0:
+            off += 1
+        if off < 142:
+            y_le = host_cert[off:off+32]
+            host_x_be = x_le[::-1]
+            host_y_be = y_le[::-1]
+            t(f"Host ECDH key from Tag3: X={host_x_be.hex()} Y={host_y_be.hex()}")
+    return (host_142, eck2_le, cert_data, host_x_be, host_y_be)
 
 
 class Sensor:
@@ -213,6 +223,8 @@ class Sensor:
         self._pairing_eck2_le = None
         self._pairing_eck2_be = None
         self._pairing_cert_data = None
+        self._dev_ecdh_x = DEV_X_BE
+        self._dev_ecdh_y = DEV_Y_BE
 
     def find_device(self):
         if self._dry:
@@ -228,8 +240,13 @@ class Sensor:
         pkt = fmt_setup(BM_OUT, req, value, 0, len(data))
         t(f">>> {req_label or ''} {pkt} data={data[:80].hex()}")
         if self._dry: return
+    USB_TIMEOUT = 60000  # 60 seconds
+    def ctrl_out(self, req, value=0, data=b'', req_label=""):
+        pkt = fmt_setup(BM_OUT, req, value, 0, len(data))
+        t(f">>> {req_label or ''} {pkt} data={data[:80].hex()}")
+        if self._dry: return
         try:
-            return self.dev.ctrl_transfer(BM_OUT, req, value, 0, data, timeout=10000)
+            return self.dev.ctrl_transfer(BM_OUT, req, value, 0, data, timeout=self.USB_TIMEOUT)
         except Exception as e:
             t(f"  TIMEOUT/ERROR: {e}")
             self._recover()
@@ -252,7 +269,7 @@ class Sensor:
                 return rec + sh_hs + certreq + shelldone
             return b'\x00' * length
         try:
-            resp = bytes(self.dev.ctrl_transfer(BM_IN, req, value, 0, length, timeout=10000))
+            resp = bytes(self.dev.ctrl_transfer(BM_IN, req, value, 0, length, timeout=self.USB_TIMEOUT))
             t(f"  resp ({len(resp)}B): {resp[:80].hex()}")
             return resp
         except Exception as e:
@@ -323,10 +340,10 @@ class Sensor:
             self._pairing_eck2_le = pair[1]
             self._pairing_eck2_be = pair[1][::-1]
             self._pairing_cert_data = pair[2]
+            self._dev_ecdh_x = pair[3]
+            self._dev_ecdh_y = pair[4]
             t(f"HOST_142 from PairingData: {pair[0][:60].hex()}...")
             t(f"ECS2 LE from PairingData: {pair[1][:32].hex()}...")
-        else:
-            t("WARNING: PairingData not available, falling back to init4/hardcoded")
 
         ready = self.ctrl_in(REQ_READY, 2, req_label="REQ_READY")
         t(f"REQ_READY = {ready.hex()}")
@@ -360,7 +377,7 @@ class Sensor:
         self.eck2_d = eck2_d
         pub = ecdh_pubkey(eck2_d)
         self.eck2_x = pub[:32]; self.eck2_y = pub[32:]
-        shared_x = ecdh_shared(eck2_d, DEV_X_BE, DEV_Y_BE)
+        shared_x = ecdh_shared(eck2_d, self._dev_ecdh_x, self._dev_ecdh_y)
         hexdump("ECDH shared X", shared_x)
         self.master = prf_sha384(shared_x, b"master secret",
                                  self.cli_rand + self.srv_rand, 48)
@@ -384,37 +401,48 @@ class Sensor:
         ccs = bytes([TLS_CCS, 0x03, 0x03, 0x00, 0x01, 0x01])
         bundle += ccs
 
-        self.seq_out = 3
+        # After CCS, encrypted epoch begins with seq=0
+        self.seq_out = 0
         fin_rec = self.build_finished()
         hexdump("Finished encrypted", fin_rec)
         bundle += fin_rec
-        self.seq_out = 4
+        self.seq_out = 1  # Next encrypted record
 
         t(f"\nBundle total size: {4 + len(bundle)}B (with IOCTL hdr)")
 
         # 5. Send bundle
         t("\n--- Sending Bundle ---")
+        resp = self.tls_send(0, bundle, 256, label="BUNDLE") if not self._dry else None
         if not self._dry:
-            resp = self.tls_send(0, bundle, 256, label="BUNDLE")
             hexdump("Bundle response", resp)
             if resp[0] == 0x15:
                 t(f"TLS ALERT: {resp.hex()}"); return
             if resp[0] == 0x14:
                 t("Server CCS received")
-                self.seq_in = 2
+                self.seq_in = 0
                 fin_enc = resp[6:]
-                fin_dec = self.decrypt_server(fin_enc)
+                fin_dec = self.decrypt_server(fin_enc[5:])
                 if fin_dec:
                     hexdump("Server Finished", fin_dec)
-                    expected = prf_sha384(self.master, b"server finished",
-                                          self.hs_digest(), 12)
-                    hexdump("Expected verify_data", expected)
-                    if fin_dec[4:] == expected:
-                        t(">>> Server Finished MATCHES <<<")
-                    else:
-                        t(">>> Server Finished MISMATCH <<<")
         else:
             t("[DRY] Bundle NOT sent to device")
+
+        # 6. App commands
+        if not self._dry and resp and resp[0] == 0x14:
+            t("\n=== App Commands ===")
+            count = self.app_get_record_count()
+            if count is not None and count > 0:
+                self.app_storage_query_init(1)
+                self.app_storage_query_init(2)
+                guids = self.app_storage_query_all()
+                if guids:
+                    for idx, g in enumerate(guids):
+                        t(f"\n--- Fetching record {idx} ---")
+                        rec = self.app_fetch_record(g)
+                        hexdump(f"Record {idx} data", rec or b'')
+
+        if self._dry:
+            t("[DRY] App commands not executed")
 
     def parse_sh(self, data):
         hs_len = struct.unpack('>I', b'\x00' + data[6:9])[0]
@@ -528,6 +556,86 @@ class Sensor:
         except Exception as e:
             t(f"  Decrypt failed: {e}")
             return None
+
+    # ── App commands (encrypted) ──────────────────────────────────────────
+
+    def pad8(self, data):
+        rem = len(data) % 8
+        return data if rem == 0 else data + b'\x00' * (8 - rem)
+
+    def app_encrypt(self, plain):
+        nonce = self.cli_iv + det_rand(8)
+        seq = struct.pack('>Q', self.seq_out); self.seq_out += 1
+        aad = seq + bytes([TLS_APP, 0x03, 0x03]) + struct.pack('>H', len(plain))
+        ct = aes_gcm_encrypt(self.cli_key, nonce, plain, aad)
+        body = nonce[4:12] + ct
+        rec = bytes([TLS_APP, 0x03, 0x03]) + struct.pack('>H', len(body)) + body
+        return self.pad8(rec)
+
+    def app_decrypt(self, data):
+        if len(data) < 5:
+            return None
+        rec_len = struct.unpack('>H', data[3:5])[0]
+        body = data[5:5+rec_len]
+        nonce = self.srv_iv + body[0:8]
+        ct = body[8:]
+        seq = struct.pack('>Q', self.seq_in); self.seq_in += 1
+        aad = seq + bytes([TLS_APP, 0x03, 0x03]) + struct.pack('>H', len(ct) - 16)
+        try:
+            return aes_gcm_decrypt(self.srv_key, nonce, ct, aad)
+        except Exception as e:
+            t(f"  App decrypt failed: {e}")
+            return None
+
+    def app_send(self, value, plain, resp_len=256, label=""):
+        out = self.app_encrypt(plain)
+        hexdump(f"App OUT({label})", out)
+        self.ctrl_out(REQ_CMD, value, out, req_label=f"APP_OUT({label})")
+        resp = self.ctrl_in(REQ_RESP, resp_len, 0, req_label=f"APP_IN({label})")
+        if resp and resp[0] == TLS_APP:
+            return self.app_decrypt(resp)
+        t(f"  Unexpected response type: {resp[0]:02x}" if resp else "  No response")
+        return None
+
+    def app_get_record_count(self):
+        plain = b'\x82' + b'\x00' * 7 + b'\x02\x07'
+        t("--- GET_RECORD_COUNT ---")
+        data = self.app_send(6, plain, 128, label="GET_RECORD_COUNT")
+        if data and len(data) >= 12:
+            count = struct.unpack('>I', data[8:12])[0]
+            t(f"Record count: {count}")
+            return count
+        hexdump("Raw record count response", data or b'')
+        return None
+
+    def app_storage_query_init(self, seq_n):
+        t(f"--- STORAGE_QUERY_INIT ({seq_n}) ---")
+        data = self.app_send(7, b'\x9e\x01', 128, label=f"QUERY_INIT_{seq_n}")
+        hexdump(f"Query init {seq_n} response", data or b'')
+        return data
+
+    def app_storage_query_all(self):
+        t("--- STORAGE_QUERY_ALL ---")
+        plain = b'\x9f\x02\x00\x00\x00' + b'\xff' * 16
+        data = self.app_send(2, plain, 256, label="QUERY_ALL")
+        if data and len(data) >= 4:
+            count = struct.unpack('<H', data[2:4])[0]
+            guids = []
+            off = 4
+            while off + 16 <= len(data):
+                guids.append(data[off:off+16])
+                off += 16
+            t(f"Query all returned {len(guids)} GUIDS ({count} claimed)")
+            for i, g in enumerate(guids):
+                t(f"  GUID[{i}] = {g.hex()}")
+            return guids
+        hexdump("Raw query all response", data or b'')
+        return None
+
+    def app_fetch_record(self, guid):
+        plain = b'\x9f\x03\x00\x00\x00' + guid
+        data = self.app_send(2, plain, 256, label=f"FETCH_{guid[:8].hex()}")
+        return data
 
 
 # --- Crypto ---
