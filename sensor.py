@@ -619,7 +619,10 @@ class Sensor:
             t("  No response")
             return None
         if resp[0] == TLS_APP:
-            return self.app_decrypt(resp)
+            pt = self.app_decrypt(resp)
+            if pt is not None:
+                t(f"  APP({label}) resp: {pt.hex()}")
+            return pt
         if resp[0] == 0x15:
             level, desc = self.decrypt_alert(resp)
             t(f"  TLS ALERT: level={level} desc={desc}")
