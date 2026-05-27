@@ -25,7 +25,7 @@ Key derivation (confirmed from native trace with Wine sym-key tracing):
   verify_data = PRF_SHA384(master, "client finished", hs_hash_sha256, 12)
 
 Certificate body (400 bytes):
-  [0:2]   run_marker = server_random[4:6]
+  [0:2]   run_marker = cli_rand[4:6]
   [2:144] HOST_142 from PairingData tag=1 blob[0:142]
   [144:146] LE u16 = 32 (pub_key length)
   [146:178] pub_key from PairingData tag=1 blob[144:176]
@@ -155,7 +155,8 @@ def load_pairing_data(reg_path=None):
     """
     if reg_path is None:
         reg_path = os.path.expanduser('~/winelatestprefix/user.reg')
-    text = open(reg_path, encoding='utf-16-le', errors='replace').read()
+    with open(reg_path, errors='replace') as f:
+        text = f.read()
     # Find Software\\Synaptics\\PairingData section
     m = re.search(
         r'\[Software\\\\Synaptics\\\\PairingData\].*?(?=\[|\Z)',
@@ -173,17 +174,75 @@ def load_pairing_data(reg_path=None):
 
 def _unprotect_dpapi_wine(blob):
     """
-    Unwrap a Wine DPAPI blob using the Wine-compatible 3DES-CBC scheme.
-    Returns decrypted bytes.
+    Unwrap a Wine DPAPI blob via wine's CryptUnprotectData.
+    Uses a Wine C helper compiled on-the-fly.
     """
-    # Wine CryptUnprotectData uses 3DES-CBC with a key derived from:
-    #   HMAC-SHA1(PBKDF2(username, salt, 1, 20, SHA1), optional_entropy)
-    # and the salt is embedded in the blob header.
-    #
-    # Full parse: rely on sensor.py from the known-working implementation.
-    # For now, use the subprocess approach to call the existing parse function.
-    raise NotImplementedError(
-        "DPAPI unwrap: use load_pairing_material() instead")
+    import tempfile, subprocess, shutil
+    # Check if helper binary exists, if not compile it
+    helper_dir = os.path.join(os.path.dirname(__file__), '_dpapi_helper')
+    os.makedirs(helper_dir, exist_ok=True)
+    helper_src = os.path.join(helper_dir, 'dpapi_unprotect.c')
+    helper_bin = os.path.join(helper_dir, 'dpapi_unprotect.exe')
+    if not os.path.exists(helper_bin):
+        src = r'''
+#include <windows.h>
+#include <wincrypt.h>
+#include <stdio.h>
+int main() {
+    DWORD blob_size;
+    DATA_BLOB blob_in, blob_out;
+    if (fread(&blob_size, sizeof(blob_size), 1, stdin) != 1) return 1;
+    BYTE *buf = (BYTE*)malloc(blob_size);
+    if (!buf) return 1;
+    if (fread(buf, 1, blob_size, stdin) != blob_size) { free(buf); return 1; }
+    blob_in.pbData = buf;
+    blob_in.cbData = blob_size;
+    blob_out.pbData = NULL;
+    blob_out.cbData = 0;
+    if (!CryptUnprotectData(&blob_in, NULL, NULL, NULL, NULL, 0, &blob_out)) {
+        free(buf); return 1;
+    }
+    fwrite(&blob_out.cbData, sizeof(blob_out.cbData), 1, stdout);
+    fwrite(blob_out.pbData, 1, blob_out.cbData, stdout);
+    LocalFree(blob_out.pbData);
+    free(buf);
+    return 0;
+}
+'''
+        with open(helper_src, 'w') as f:
+            f.write(src)
+        wine_env = os.environ.copy()
+        wine_env['WINEPREFIX'] = os.path.expanduser('~/winelatestprefix')
+        winegcc = shutil.which('winegcc') or '/usr/bin/winegcc'
+        ret = subprocess.run(
+            [winegcc, '-o', helper_bin, helper_src, '-lcrypt32'],
+            capture_output=True, env=wine_env)
+        if ret.returncode != 0:
+            raise RuntimeError(
+                f"Failed to compile DPAPI helper: {ret.stderr.decode()}")
+    size_bytes = struct.pack('<I', len(blob))
+    wine_env = os.environ.copy()
+    wine_env['WINEPREFIX'] = os.path.expanduser('~/winelatestprefix')
+    # Use Xvfb virtual display for Wine GUI apps
+    xvfb = shutil.which('Xvfb') or '/usr/bin/Xvfb'
+    xvfb_proc = subprocess.Popen([xvfb, ':99', '-screen', '0', '800x600x16'],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+    try:
+        wine_env['DISPLAY'] = ':99'
+        proc = subprocess.run(
+            [os.path.expanduser('~/wine-install/bin/wine'), helper_bin],
+            input=size_bytes + blob, capture_output=True, timeout=30,
+            env=wine_env)
+    finally:
+        xvfb_proc.terminate()
+        xvfb_proc.wait(timeout=5)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"DPAPI decryption failed: ret={proc.returncode} "
+            f"stderr={proc.stderr.decode(errors='replace')[:200]}")
+    out_size = struct.unpack_from('<I', proc.stdout)[0]
+    return proc.stdout[4:4 + out_size]
 
 
 def load_pairing_material():
@@ -259,18 +318,12 @@ def load_pairing_from_blob(blob):
 def extract_ecs2_private_d(blob):
     """
     Extract the ECS2 private key D from the DPAPI-decrypted PairingData blob.
-    The signing private key D is at blob[6:38] (LE bytes).
+    Tag 2 of the TLV is the 32-byte client private key, stored in LE.
     Reversed to BE for use with ec.derive_private_key().
     """
-    # tag=2 data (32 bytes) at offset 6 is the device-session key,
-    # not the signing D. The signing D comes from Wine's ECS2 keypair
-    # which is the runtime key derived from PairingData.
-    # For challenge construction, we need to call BCryptSignHash which
-    # uses the runtime key. Without Wine, we can use the pre-captured
-    # sign-key from trace (session-specific).
-    raise NotImplementedError(
-        "Signing key D must be obtained from Wine runtime trace "
-        "or by DPAPI-decrypting the PairingData blob offline.")
+    f = parse_pairing_tlv(blob)
+    tag2_le = f[2]
+    return tag2_le[::-1]
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +336,7 @@ def sign_ecdsa_sha256(priv_d_be, digest32):
     """
     d_int = int.from_bytes(priv_d_be, 'big')
     priv = ec.derive_private_key(d_int, ec.SECP256R1(), default_backend())
-    return priv.sign(digest32, ec.ECDSA(ec_utils.Prehashed()))
+    return priv.sign(digest32, ec.ECDSA(ec_utils.Prehashed(hashes.SHA256())))
 
 
 def sign_ecdsa_raw(priv_d_be, digest32):
@@ -304,11 +357,27 @@ class Sensor:
         self.find_device()
 
     def find_device(self):
-        dev = usb.core.find(idVendor=SENSOR_VID, idProduct=SENSOR_PID)
+        import time
+        dev = None
+        for attempt in range(3):
+            dev = usb.core.find(idVendor=SENSOR_VID, idProduct=SENSOR_PID)
+            if dev is not None:
+                break
+            time.sleep(1)
         if dev is None:
             raise RuntimeError(
                 f"Sensor {SENSOR_VID:#06x}:{SENSOR_PID:#06x} not found")
-        dev.set_configuration()
+        # Detach kernel driver if active
+        #for iface in range(2):
+        #    try:
+        #        if dev.is_kernel_driver_active(iface):
+        #            dev.detach_kernel_driver(iface)
+        #    except (usb.core.USBError, NotImplementedError):
+        #        pass
+        try:
+            dev.set_configuration()
+        except usb.core.USBError:
+            pass  # may already be configured
         self.dev = dev
 
     # --- Low-level USB helpers ---
@@ -368,8 +437,8 @@ class Sensor:
           cmd 0x8e1a (read cert, 24B -> 78B)
           cmd 0x19   (phase marker, 8B -> 68B)
         """
-        # Signal start
-        self.ctrl_out(REQ_START)
+        # Signal start (native uses value=1)
+        self.ctrl_out(REQ_START, value=1)
         ack = self.ctrl_in(REQ_ACK, 1)
         assert ack == b'\x01', f"REQ_ACK = {ack.hex()}, expected 01"
 
@@ -492,7 +561,8 @@ class TLSState:
 # ---------------------------------------------------------------------------
 # TLS handshake
 # ---------------------------------------------------------------------------
-def do_tls_handshake(sensor, host_142, pub_key32, sign_d_be=None):
+def do_tls_handshake(sensor, host_142, pub_key32, dev_142=None,
+                     sign_d_be=None):
     """
     Perform the full TLS 1.2 handshake with the device.
 
@@ -500,21 +570,42 @@ def do_tls_handshake(sensor, host_142, pub_key32, sign_d_be=None):
       sensor     -- Sensor instance (USB connected)
       host_142   -- 142-byte host EC key blob from PairingData tag=1[0:142]
       pub_key32  -- 32-byte host pub key from PairingData tag=1[144:176]
-      sign_d_be  -- 32-byte private signing key (big-endian) for CertVerify.
-                    If None, CertVerify will be skipped (may cause server alert).
+      sign_d_be  -- 32-byte signing D (BE) for CertVerify.
+                     If None, computed from host_142 X (legacy fallback).
 
     Returns TLSState with keys set up.
     """
     state = TLSState()
 
     # -----------------------------------------------------------------------
-    # Generate ephemeral ECDH key pair
+    # Client identity key for Cert content and CertVerify signing.
+    # From PairingData Tag 2 (LE), reversed to BE = D.
+    # The device verifies against public key Q = D*G = (host_X_BE, host_Y_BE)
+    # which matches the certificate's X,Y coordinates.
+    #
+    # host_142 format: 3f5f1700 + X_le(32) + 36*00 + Y_le(32) + 38*00
     # -----------------------------------------------------------------------
-    ephemeral_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
-    eph_pub = ephemeral_key.public_key().public_numbers()
-    eph_x_be = eph_pub.x.to_bytes(32, 'big')
-    eph_y_be = eph_pub.y.to_bytes(32, 'big')
-    eph_d_be = ephemeral_key.private_numbers().private_value.to_bytes(32, 'big')
+    cli_x_le = host_142[4:36]
+    cli_y_le = host_142[72:104]
+    cli_x_be = cli_x_le[::-1]
+    cli_y_be = cli_y_le[::-1]
+
+    if sign_d_be is not None:
+        eck2_d_be = sign_d_be
+    else:
+        eck2_d_be = cli_x_be  # legacy fallback
+    eck2_d_int = int.from_bytes(eck2_d_be, 'big')
+    identity_key = ec.derive_private_key(eck2_d_int, ec.SECP256R1(),
+                                         default_backend())
+
+    # -----------------------------------------------------------------------
+    # Ephemeral ECDH key – fresh per session for key exchange
+    # -----------------------------------------------------------------------
+    eph_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+    eph_pub = eph_key.public_key()
+    eph_nums = eph_pub.public_numbers()
+    eph_x_be = eph_nums.x.to_bytes(32, 'big')
+    eph_y_be = eph_nums.y.to_bytes(32, 'big')
 
     # -----------------------------------------------------------------------
     # Build ClientHello
@@ -537,15 +628,15 @@ def do_tls_handshake(sensor, host_142, pub_key32, sign_d_be=None):
         + b'\x00\xa8'
         + b'\x00\xa9'
         + b'\x00'                  # compression: no methods (length=0)
-        # extensions (10 bytes)
-        + b'\x00\x0a'
-        + b'\x00\x0a'             # ext: supported_groups
-        + b'\x00\x04'
-        + b'\x00\x02'
-        + b'\x00\x17'             # secp256r1
-        + b'\x00\x0b'             # ext: ec_point_formats
-        + b'\x00\x02'
-        + b'\x01\x00'             # uncompressed
+        # Extensions: native format with ext_len=10 (covers first ext + header
+        # of second). ext2 data + 4 trailing zeros follow outside.
+        + b'\x00\x0a'             # ext_len_total = 10 (native value)
+        + b'\x00\x04'             # ext type = 4 (not 0x000a supported_groups)
+        + b'\x00\x02'             # ext data len = 2
+        + b'\x00\x17'             # data = secp256r1
+        + b'\x00\x0b'             # ext type = 0x0b (ec_point_formats)
+        + b'\x00\x02'             # ext data len = 2
+        + b'\x01\x00'             # 1 format: uncompressed (outside ext area)
         + b'\x00\x00\x00\x00'    # 4 trailing zeros (native format)
     )
     ch_hs = make_hs_message(0x01, ch_body)   # ClientHello
@@ -556,63 +647,54 @@ def do_tls_handshake(sensor, host_142, pub_key32, sign_d_be=None):
 
     # Send via value=4 (matches native trace: 4016040000...)
     sensor.ctrl_out(REQ_CMD, value=4, data=b'\x44\x00\x00\x00' + ch_rec)
-    raw_sh = sensor.ctrl_in(REQ_RESP, 1)  # returns full ServerHello bytes
+    # Receive ServerHello + CertificateRequest + ServerHelloDone
+    raw_sh = sensor.ctrl_in(REQ_RESP, 0x400)
 
     # -----------------------------------------------------------------------
     # Parse ServerHello response
     # -----------------------------------------------------------------------
-    # Strip leading byte if needed
+    # Strip 44000000 prefix if present
     data = raw_sh
-    # Parse multiple TLS records
+    if data[:4] == b'\x44\x00\x00\x00':
+        data = data[4:]
+    # Parse TLS records - expect one handshake record with multiple messages
     srv_rand = None
-    records = []
     off = 0
-    while off < len(data):
-        if off + 5 > len(data):
-            break
+    while off + 5 <= len(data):
         rec_type = data[off]
         rec_len  = struct.unpack_from('>H', data, off + 3)[0]
         rec_body = data[off + 5: off + 5 + rec_len]
-        records.append((rec_type, rec_body))
-        off += 5 + rec_len
-
-    # Process handshake record(s)
-    for rec_type, rec_body in records:
         if rec_type != TLS_HANDSHAKE:
+            off += 5 + rec_len
             continue
         # Parse handshake messages within the record
         hoff = 0
         while hoff < len(rec_body):
             ht = rec_body[hoff]
-            hl = int.from_bytes(rec_body[hoff+1:hoff+4], 'big')
-            hbody = rec_body[hoff+4: hoff+4+hl]
-            hs_msg = rec_body[hoff:hoff+4+hl]
+            hl = int.from_bytes(rec_body[hoff+1:hoff+3], 'big')
+            hbody = rec_body[hoff+3: hoff+3+hl]
+            hs_msg = rec_body[hoff:hoff+3+hl]
             state.feed_hs(hs_msg)
             if ht == 0x02:  # ServerHello
-                # version(2) + random(32) + session_id_len(1) + ... + cipher(2) + comp(1)
                 srv_rand = hbody[2:34]
-            elif ht == 0x0b:  # Certificate
-                # cert_list_len(3) + cert_len(3) + cert_body(cert_len)
-                cert_list_len = int.from_bytes(hbody[0:3], 'big')
-                cert_len      = int.from_bytes(hbody[3:6], 'big')
-                dev_cert_body = hbody[6: 6 + cert_len]
-                # Extract device ECDH public key from cert body (DEV_142)
-                # cert body structure: run_marker(2) + DEV_142(142) + ...
-                dev_142 = dev_cert_body[2:144]
+                # NO server Certificate in hash (device sends CertReq not Cert)
+            elif ht == 0x0d:  # CertificateRequest
+                pass  # We know device wants mutual TLS
             elif ht == 0x0e:  # ServerHelloDone
                 pass
-            hoff += 4 + hl
+            hoff += 3 + hl
+        off += 5 + rec_len
 
     if srv_rand is None:
         raise RuntimeError("ServerHello not received or parsed")
 
-    # run_marker for our Certificate = srv_rand[4:6]
-    run_marker = srv_rand[4:6]
-
+    # dev_142 is the device's key blob
+    # Extract device ECDH static public key from dev_142
+    # Format: 3f5f1700 + X_le(32) + 36*00 + Y_le(32) + 38*00
+    # Y offset = 72 (verified against decrypted PairingData trace)
     # -----------------------------------------------------------------------
-    # Extract device ECDH static public key from DEV_142
-    # DEV_142: 3f5f1700 + X_le(32) + 36*00 + Y_le(32) + 38*00
-    # -----------------------------------------------------------------------
+    if dev_142 is None:
+        dev_142 = host_142[:142]
     dev_x_le = dev_142[4:36]
     dev_y_le = dev_142[72:104]
     dev_x_int = int.from_bytes(dev_x_le[::-1], 'big')
@@ -622,58 +704,48 @@ def do_tls_handshake(sensor, host_142, pub_key32, sign_d_be=None):
     ).public_key(default_backend())
 
     # -----------------------------------------------------------------------
-    # ECDH key exchange -> pre-master (= master) secret
+    # ECDH key exchange – use ephemeral client key with device's static key
     # -----------------------------------------------------------------------
-    ecdh_x = ephemeral_key.exchange(ec.ECDH(), device_pub)  # 32 bytes
+    ecdh_x = eph_key.exchange(ec.ECDH(), device_pub)  # 32 bytes
     master = prf(ecdh_x, 'master secret', cli_rand + srv_rand, 48)
     state.setup_keys(master, cli_rand, srv_rand)
 
     # -----------------------------------------------------------------------
     # Build client Certificate (from PairingData)
+    # cert_data: run_marker(2) + host_142(142) + u16le(32) + pub_key32(32)
+    #            + zeros(222) = 400 bytes
+    # run_marker = cli_rand[4:6] (session ID embedded in cert)
     # -----------------------------------------------------------------------
-    # cert_body (400 bytes): run_marker(2) + host_142(142) + u16le(32) + pub_key32(32) + 222*0
-    cert_body = (run_marker + host_142
-                 + struct.pack('<H', 32) + pub_key32
+    run_marker = cli_rand[4:6]
+    cert_data = (run_marker + host_142 + struct.pack('<H', 32) + pub_key32
                  + bytes(222))
-    assert len(cert_body) == 400, f"cert_body len={len(cert_body)}"
+    assert len(cert_data) == 400, f"cert_data len={len(cert_data)}"
 
     cert_hs_body = (
         b'\x00\x01\x90'       # cert_list_len = 400
         + b'\x00\x01\x90'     # cert_len = 400
-        + cert_body
+        + cert_data           # 400-byte cert body (includes run_marker)
     )
     cert_hs = make_hs_message(0x0b, cert_hs_body)  # Certificate
 
     # -----------------------------------------------------------------------
-    # Build ClientKeyExchange: uncompressed ephemeral ECDH pub point
+    # Build ClientKeyExchange: uncompressed client ECDH pub point
+    # Native trace shows CKE sent even for 0xc02e (ECDH_ECDSA).
     # -----------------------------------------------------------------------
-    eph_pub_uncompressed = b'\x04' + eph_x_be + eph_y_be
-    cke_body = (
-        struct.pack('>H', 1 + 64)   # length of point data
-        + eph_pub_uncompressed
-    )
+    cke_body = b'\x04' + eph_x_be + eph_y_be
     cke_hs = make_hs_message(0x10, cke_body)  # ClientKeyExchange
 
-    # Feed to HS hash before CertVerify
+    # Feed to HS hash: Client Certificate BEFORE CKE
     state.feed_hs(cert_hs)
     state.feed_hs(cke_hs)
 
     # -----------------------------------------------------------------------
-    # CertVerify: ECDSA sign handshake hash
+    # CertVerify: ECDSA sign handshake hash with identity key (ECK2)
     # -----------------------------------------------------------------------
-    if sign_d_be is not None:
-        hs_digest = state.get_hs_hash()
-        sig_der = sign_ecdsa_sha256(sign_d_be, hs_digest)
-        # Build CertVerify message
-        cv_body = (
-            b'\x04\x01'               # hash=SHA256, sig=RSA (native uses 0x0401)
-            + struct.pack('>H', len(sig_der))
-            + sig_der
-        )
-        cv_hs = make_hs_message(0x0f, cv_body)  # CertificateVerify
-        state.feed_hs(cv_hs)
-    else:
-        cv_hs = b''
+    hs_digest = state.get_hs_hash()
+    sig_der = sign_ecdsa_sha256(eck2_d_be, hs_digest)
+    cv_hs = make_hs_message(0x0f, sig_der)  # CertificateVerify
+    state.feed_hs(cv_hs)
 
     # -----------------------------------------------------------------------
     # ChangeCipherSpec + Finished
@@ -698,12 +770,11 @@ def do_tls_handshake(sensor, host_142, pub_key32, sign_d_be=None):
     burst += fin_record
 
     proto_log('>>>', 'enc', burst)
-    sensor.ctrl_out(REQ_CMD, value=1, data=burst)
+    sensor.ctrl_out(REQ_CMD, value=7, data=burst)
 
     # -----------------------------------------------------------------------
     # Receive server CCS + Finished
     # -----------------------------------------------------------------------
-    raw_sfin = sensor.ctrl_in(REQ_RESP, 1)  # trigger
     raw_sfin = sensor.ctrl_in(REQ_RESP, 0x200)
 
     # Parse server Finished to verify
@@ -844,34 +915,65 @@ def main_list_db():
         # If already decrypted (i.e., known format starts with 0200...):
         if raw_blob[:2] == b'\x02\x00':
             pairing_blob = raw_blob
+        elif raw_blob[:4] == b'\x01\x00\x00\x00':
+            print("  DPAPI encrypted, decrypting via Wine...")
+            pairing_blob = _unprotect_dpapi_wine(raw_blob)
+            print(f"  Decrypted: {len(pairing_blob)} bytes, starts with {pairing_blob[:4].hex()}")
         else:
             raise RuntimeError(
-                "PairingData needs DPAPI decryption. "
-                "Run b.exe first to populate the registry with decrypted data, "
-                "or implement offline DPAPI unwrap.")
-        host_142, pub_key32, dev_142, dev_sig = load_pairing_from_blob(pairing_blob)
+                f"Unknown PairingData format: {raw_blob[:8].hex()}")
+        host_142, pub_key32, dev_142, dev_sig = load_pairing_from_blob(
+            pairing_blob)
+        print(f"  host_142: {host_142[:8].hex()}...")
+        print(f"  pub_key32: {pub_key32[:8].hex()}...")
+        print(f"  dev_142: {dev_142[:8].hex()}...")
+        # Signing D = PairingData Tag 2 (client private key, LE),
+        # reversed to BE. D*G = (host_X_BE, host_Y_BE) from cert.
+        tag2_be = extract_ecs2_private_d(pairing_blob)
+        print(f"  tag2_be (signing D): {tag2_be[:8].hex()}...")
     except Exception as e:
         print(f"  WARNING: PairingData not available ({e})")
-        print("  Using hardcoded session values from trace (session-specific!)")
-        # These are from the native trace -- will NOT work in a new session
+        print("  Using hardcoded PairingData fields from b.exe trace")
+        # Fields extracted from b.exe trace decrypted PairingData
+        # host_142: 3f5f1700 + X_le(32) + 36*00 + Y_le(32) + 38*00
+        # X = host_X_BE = b3dbef324fc769e7350d17f8329665cc4725ceb62dc8688eb275eef6cb0dfb18
+        # Y = host_Y_BE = c95675ccec0369e3e6ee72be09ba2cb52867214b4e80612f262e9da861e78d15
         host_142 = bytes.fromhex(
             "3f5f170018fb0dcbf6ee75b28e68c82db6ce2547cc659632f8170d35e769c74f"
             "32efdbb30000000000000000000000000000000000000000000000000000000000"
             "0000000000000000158de761a89d2e262f61804e4b216728b52cba09be72eee6e3"
-            "6903eccc7556c9000000000000000000000000000000000000000000000000000000"
-            "0000000000000000000000000002"
+            "0369ccec5576c90000000000000000000000000000000000000000000000000000"
+            "000000000000000000000000000000"
         )[:142]
         pub_key32 = bytes.fromhex(
-            "b851e1b012ca65858a81377efab1e9b2c47c0f3cab2a3da14aa4fd6c7c1f1eb5"
-        )
-        sign_d_be = None  # CertVerify will be skipped
-    else:
-        # sign_d_be would come from decrypting ECS2 signing key from PairingData
-        sign_d_be = None  # TODO: extract from PairingData
+            "b3dbef324fc769e7350d17f8329665cc"
+            "4725ceb62dc8688eb275eef6cb0dfb18")
+        # dev_142: 3f5f1700 + X_le(32) + 36B zeros + Y_le(32) + 38B zeros
+        dev_142 = bytes.fromhex(
+            "3f5f1700"
+            "bf20df2201448cb6176874b8761b0ebc0221f054189a9e4c27f40a82dd20df63"
+            + "00" * 36
+            + "f3c06fdf0931982443c338ea82dbbe603f07b3dbaa45b1516aad5e81817af34e"
+            + "00" * 38
+        )[:142]
+        dev_sig = bytes.fromhex(
+            "3044022054b3be9cbe2ec2842b9284c4c716e63f4ef26b1648849a27"
+            "3237187465be5db702203ad7bba69d0ccf69f7a02fdcf754259427b1"
+            "0276d7bda1385cbe016bfd4adfaf")
+        # tag2_BE = PairingData Tag 2 (client private key, LE), reversed to BE
+        # tag2_BE * G = (host_X_BE, host_Y_BE) shown in cert
+        tag2_be = bytes.fromhex(
+            "cca803106523ed52964f95a3742b85b3"
+            "49cba81759fd52387c0547a8af9d577f")
+    print(f"  host_142: {host_142[:8].hex()}...")
+    print(f"  pub_key32: {pub_key32[:8].hex()}...")
+    print(f"  dev_142: {dev_142[:8].hex()}...")
+    print(f"  tag2_be (signing D): {tag2_be[:8].hex()}...")
 
     print("Starting TLS handshake...")
     try:
-        tls_state = do_tls_handshake(sensor, host_142, pub_key32, sign_d_be)
+        tls_state = do_tls_handshake(sensor, host_142, pub_key32,
+                                       dev_142, tag2_be)
     except Exception as e:
         print(f"TLS handshake failed: {e}")
         raise
