@@ -240,7 +240,7 @@ class Sensor:
         pkt = fmt_setup(BM_OUT, req, value, 0, len(data))
         t(f">>> {req_label or ''} {pkt} data={data[:80].hex()}")
         if self._dry: return
-    USB_TIMEOUT = 60000  # 60 seconds
+    USB_TIMEOUT = 3  # 3 seconds
     def ctrl_out(self, req, value=0, data=b'', req_label=""):
         pkt = fmt_setup(BM_OUT, req, value, 0, len(data))
         t(f">>> {req_label or ''} {pkt} data={data[:80].hex()}")
@@ -587,14 +587,42 @@ class Sensor:
             t(f"  App decrypt failed: {e}")
             return None
 
+    def decrypt_alert(self, data):
+        if len(data) < 5:
+            return None, None
+        rec_len = struct.unpack('>H', data[3:5])[0]
+        body = data[5:5+rec_len]
+        nonce = self.srv_iv + body[0:8]
+        ct = body[8:]
+        seq = struct.pack('>Q', self.seq_in); self.seq_in += 1
+        aad = seq + bytes([0x15, 0x03, 0x03]) + struct.pack('>H', 2)
+        try:
+            pt = aes_gcm_decrypt(self.srv_key, nonce, ct, aad)
+            return pt[0], pt[1]
+        except Exception as e:
+            t(f"  Alert decrypt failed: {e}")
+            return None, None
+
     def app_send(self, value, plain, resp_len=256, label=""):
         out = self.app_encrypt(plain)
         hexdump(f"App OUT({label})", out)
         self.ctrl_out(REQ_CMD, value, out, req_label=f"APP_OUT({label})")
         resp = self.ctrl_in(REQ_RESP, resp_len, 0, req_label=f"APP_IN({label})")
-        if resp and resp[0] == TLS_APP:
+        if not resp:
+            t("  No response")
+            return None
+        if resp[0] == TLS_APP:
             return self.app_decrypt(resp)
-        t(f"  Unexpected response type: {resp[0]:02x}" if resp else "  No response")
+        if resp[0] == 0x15:
+            level, desc = self.decrypt_alert(resp)
+            t(f"  TLS ALERT: level={level} desc={desc}")
+            ALERTS = {0x15: "decode_error", 0x21: "decrypt_error",
+                      0x28: "handshake_failure", 0x2a: "bad_record_mac",
+                      0x2f: "illegal_parameter", 0x46: "protocol_version",
+                      0x47: "insufficient_security", 0x50: "bad_certificate"}
+            t(f"  Alert meaning: {ALERTS.get(desc, 'unknown')}")
+            return None
+        t(f"  Unexpected response type: {resp[0]:02x}")
         return None
 
     def app_get_record_count(self):
