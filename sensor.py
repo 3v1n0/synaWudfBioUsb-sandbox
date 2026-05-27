@@ -6,7 +6,7 @@ Protocol summary:
   Phase 1: 3x (REQ_START + init_cmds)
   Phase 2: REQ_READY -- returns 0000 (challenge is optional)
   Phase 3: TLS 1.2 handshake over custom USB framing
-  Phase 4: Encrypted IOCTL app commands (AES-256-GCM)
+  Phase 4: Encrypted IOCTL biometric commands (AES-256-GCM)
 
 Key derivation (confirmed from native Wine trace):
   Cipher suite: 0xc02e (driver uses AES-256-GCM internally)
@@ -34,6 +34,20 @@ PairingData (local file or Wine registry):
   tag=2: 32-byte ECS2 private key D (LE)
   tag=3: 142-byte device cert body (DEV_142)
 
+USB wValue map (confirmed from b.exe trace):
+  Init cmds (plain):  OUT value=1 / IN value=0 (init2/init3: IN value=0x8000)
+  ClientHello:        OUT value=4 / IN value=0
+  Bundle:             OUT value=0 / IN value=0
+  GET_RECORD_COUNT:   OUT value=6 / IN value=0
+  STORAGE_QUERY_INIT: OUT value=7 / IN value=0
+  STORAGE_QUERY_ALL:  OUT value=2 / IN value=0
+  FETCH_RECORD:       OUT value=2 / IN value=0
+
+Class hierarchy:
+  Sensor        -- USB transport layer (ctrl_out / ctrl_in)
+  SensorTLS     -- extends Sensor; adds TLS 1.2 handshake
+  BiometricSensor -- extends SensorTLS; adds fingerprint commands
+
 Usage:
   lxc exec kensington-playground -- python3 /path/sensor.py list-db
   SENSOR_TRACE=1 ... python3 sensor.py list-db
@@ -60,8 +74,8 @@ USB_TIMEOUT  = 10000   # ms
 SENSOR_TRACE = os.environ.get("SENSOR_TRACE", "0") == "1"
 
 # Deterministic RNG for replay/comparison against b.exe trace
-_DET_RNG   = os.environ.get("PROTO_DETERMINISTIC_RNG", "0") == "1"
-_det_ctr   = 0
+_DET_RNG = os.environ.get("PROTO_DETERMINISTIC_RNG", "0") == "1"
+_det_ctr = 0
 
 def _rand(n):
     global _det_ctr
@@ -307,7 +321,7 @@ def load_pairing_data():
 def get_pairing_fields(tlvs):
     """
     Extract (host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le)
-    from TLV dict.
+    from a PairingData TLV dict.
     """
     cert_data = tlvs.get(1)
     if not cert_data or len(cert_data) < 142:
@@ -316,7 +330,7 @@ def get_pairing_fields(tlvs):
         return None
     host_142    = cert_data[:142]
     eck2_le     = tlvs.get(2, b'\x00' * 32)
-    # Public key X coord (LE) stored at cert_data[146:178]
+    # Public key X coord (LE) at cert_data[146:178]
     # (after HOST_142[0:142] + header[142:146])
     eck2_pub_le = (cert_data[146:178]
                    if len(cert_data) >= 178 else b'\x00' * 32)
@@ -330,9 +344,8 @@ def get_pairing_fields(tlvs):
         while off < 142 and host_cert[off] == 0:
             off += 1
         if off < 142:
-            y_le   = host_cert[off:off + 32]
             dev_x_be = x_le[::-1]
-            dev_y_be = y_le[::-1]
+            dev_y_be = host_cert[off:off + 32][::-1]
     return host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le
 
 
@@ -410,7 +423,7 @@ def sign_ecdsa_sha256(priv_d_be, digest32):
 
 
 # ---------------------------------------------------------------------------
-# TLS state (keys + sequence numbers)
+# TLS session state (keys + sequence numbers + handshake hash)
 # ---------------------------------------------------------------------------
 
 class TLSState:
@@ -451,10 +464,15 @@ class TLSState:
 
 
 # ---------------------------------------------------------------------------
-# USB Sensor
+# Sensor -- USB transport layer
 # ---------------------------------------------------------------------------
 
 class Sensor:
+    """
+    Raw USB control transfer layer. Handles device enumeration and the
+    3-round init sequence (REQ_START + 4 cmds + REQ_READY).
+    """
+
     def __init__(self):
         self.dev = None
 
@@ -490,26 +508,32 @@ class Sensor:
             _log(f"  ERROR: {exc}")
             raise
 
-    # --- Init phase ---
+    # --- Init protocol ---
 
     def init_phase(self, n):
-        """One init round: REQ_START + 4 commands."""
+        """
+        One init round: REQ_START + 4 plain commands.
+        init2/init3 IN use wValue=0x8000 and request 4096 bytes (native).
+        """
         self.ctrl_out(REQ_START, value=1, label=f"REQ_START(r{n})")
         ack = self.ctrl_in(REQ_ACK, 1, label=f"REQ_ACK(r{n})")
         assert ack == b'\x01', f"ACK={ack.hex()}"
 
-        def cmd(data, resp_len, lbl):
+        def cmd(data, resp_len, lbl, resp_value=0):
             self.ctrl_out(REQ_CMD, value=1, data=data, label=lbl)
-            return self.ctrl_in(REQ_RESP, resp_len, label=lbl)
+            return self.ctrl_in(REQ_RESP, resp_len,
+                                value=resp_value, label=lbl)
 
-        cmd(bytes.fromhex('0100000000000000'), 0x26, f"init1(r{n})")
+        cmd(bytes.fromhex('0100000000000000'),
+            0x26, f"init1(r{n})")
         cmd(bytes.fromhex(
             '8e0900020000000000000000000000000000000000000000'),
-            0x1a, f"init2(r{n})")
+            4096, f"init2(r{n})", resp_value=0x8000)
         cmd(bytes.fromhex(
             '8e1a00020000000000000000000000000000000000000000'),
-            0x4e, f"init3(r{n})")
-        cmd(bytes.fromhex('1900000000000000'), 0x44, f"init4(r{n})")
+            4096, f"init3(r{n})", resp_value=0x8000)
+        cmd(bytes.fromhex('1900000000000000'),
+            0x44, f"init4(r{n})")
 
     def init_phases(self):
         """Run 3 init rounds as native b.exe does."""
@@ -522,251 +546,283 @@ class Sensor:
 
 
 # ---------------------------------------------------------------------------
-# TLS handshake
+# SensorTLS -- extends Sensor with TLS 1.2 handshake
 # ---------------------------------------------------------------------------
 
-def do_tls_handshake(sensor, host_142, eck2_be, eck2_pub_le,
-                     cert_data_398, dev_x_be, dev_y_be):
+class SensorTLS(Sensor):
     """
-    Full TLS 1.2 handshake with the device. Returns TLSState.
-
-    Parameters:
-      sensor        -- connected Sensor
-      host_142      -- 142-byte host EC key blob (from PairingData tag=1)
-      eck2_be       -- 32-byte ECS2 private key D (BE) for CertVerify signing
-      eck2_pub_le   -- 32-byte ECS2 public key X coord (LE) for cert embedding
-      cert_data_398 -- 398-byte cert body (PairingData tag=1); None = fresh
-      dev_x_be      -- 32-byte device ECDH static pub X (BE)
-      dev_y_be      -- 32-byte device ECDH static pub Y (BE)
+    Adds TLS 1.2 handshake on top of the raw USB transport.
+    After connect(), self.tls holds the established TLSState.
     """
-    state    = TLSState()
-    cli_rand = _rand(32)
-    _log(f"cli_rand={cli_rand.hex()}")
 
-    # ----- Ephemeral ECDH key pair -----
-    eck2_d  = _rand(32)
-    pub     = ecdh_pubkey(eck2_d)
-    eph_x   = pub[:32]
-    eph_y   = pub[32:]
-    _log(f"eph_x={eph_x.hex()}")
+    def __init__(self):
+        super().__init__()
+        self.tls = None
 
-    # ----- ClientHello -----
-    sess_id  = b'\x07' + b'\x00' * 7
-    suites   = b'\xc0\x05' + CIPHER_SUITE + b'\x00\x3d\x00\x8d\x00\xa8\x00\xa9'
-    ext_data = (b'\x00\x04\x00\x02\x00\x17'
-                b'\x00\x0b\x00\x02\x01\x00'
-                b'\x00\x00\x00\x00')
-    ch_body = (TLS_VER + cli_rand + sess_id
-               + struct.pack('>H', len(suites)) + suites
-               + b'\x00' + struct.pack('>H', len(ext_data)) + ext_data)
-    ch_hs  = make_hs_message(0x01, ch_body)
-    ch_rec = make_tls_record(TLS_HANDSHAKE, ch_hs)
-    state.feed_hs(ch_hs)
-    _hexdump("CH record", ch_rec)
+    def connect(self, host_142, eck2_be, eck2_pub_le,
+                cert_data_398, dev_x_be, dev_y_be):
+        """
+        Perform the full TLS 1.2 handshake with the device.
 
-    # Send CH (value=4, with 44000000 IOCTL header)
-    sensor.ctrl_out(REQ_CMD, value=4,
-                    data=b'\x44\x00\x00\x00' + ch_rec, label="TLS_OUT(CH)")
-    raw_sh = sensor.ctrl_in(REQ_RESP, 0x400, label="TLS_IN(CH)")
-    if raw_sh and raw_sh[0] == TLS_ALERT:
-        raise RuntimeError(f"TLS Alert on CH: {raw_sh.hex()}")
+        Parameters:
+          host_142      -- 142-byte host EC key blob (PairingData tag=1[0:142])
+          eck2_be       -- 32-byte ECS2 private key D (BE) for CertVerify
+          eck2_pub_le   -- 32-byte ECS2 public key X coord (LE) for cert
+          cert_data_398 -- 398-byte stored cert body (tag=1); None = fresh
+          dev_x_be      -- 32-byte device ECDH static pub X (BE)
+          dev_y_be      -- 32-byte device ECDH static pub Y (BE)
+        """
+        state    = TLSState()
+        cli_rand = _rand(32)
+        _log(f"cli_rand={cli_rand.hex()}")
 
-    # ----- Parse ServerHello + CertReq + SHellDone -----
-    srv_rand = None
-    off      = 0
-    while off + 5 <= len(raw_sh):
-        rtype = raw_sh[off]
-        rlen  = struct.unpack_from('>H', raw_sh, off + 3)[0]
-        rbody = raw_sh[off + 5: off + 5 + rlen]
-        off  += 5 + rlen
-        if rtype != TLS_HANDSHAKE:
-            continue
-        hoff = 0
-        while hoff < len(rbody):
-            ht   = rbody[hoff]
-            hl   = struct.unpack_from('>I', b'\x00' + rbody[hoff+1:hoff+4])[0]
-            hmsg = rbody[hoff: hoff + 4 + hl]
-            state.feed_hs(hmsg)
-            if ht == 0x02:       # ServerHello
-                srv_rand = hmsg[6:38]
-                _log(f"SH: cipher={hmsg[38+rbody[hoff+38]:].hex()[:4]}")
-            elif ht == 0x0d:     # CertificateRequest -- expected
-                pass
-            elif ht == 0x0e:     # ServerHelloDone
-                pass
-            hoff += 4 + hl
-    if srv_rand is None:
-        raise RuntimeError("ServerHello not received or parsed")
-    _log(f"srv_rand={srv_rand.hex()}")
+        # ----- Ephemeral ECDH key pair -----
+        eck2_d = _rand(32)
+        pub    = ecdh_pubkey(eck2_d)
+        eph_x, eph_y = pub[:32], pub[32:]
+        _log(f"eph_x={eph_x.hex()}")
 
-    # ----- Key derivation -----
-    shared_x = ecdh_shared(eck2_d, dev_x_be, dev_y_be)
-    master   = prf(shared_x, 'master secret', cli_rand + srv_rand, 48)
-    state.setup_keys(master, cli_rand, srv_rand)
-    _hexdump("master secret", master)
+        # ----- ClientHello -----
+        # Extension format from b.exe trace: ext_len=0x000a covers 10 bytes
+        # (two ext type+len+data), with ec_point_formats data and 4 trailing
+        # zeros placed outside (native quirk).
+        sess_id   = b'\x07' + b'\x00' * 7
+        suites    = (b'\xc0\x05' + CIPHER_SUITE
+                     + b'\x00\x3d\x00\x8d\x00\xa8\x00\xa9')
+        ext_block = b'\x00\x04\x00\x02\x00\x17\x00\x0b\x00\x02'  # 10 bytes
+        ch_body = (TLS_VER + cli_rand + sess_id
+                   + struct.pack('>H', len(suites)) + suites
+                   + b'\x00'                         # compression: length=0
+                   + struct.pack('>H', len(ext_block)) + ext_block
+                   + b'\x01\x00'                     # ec_point_formats data
+                   + b'\x00\x00\x00\x00')            # trailing zeros (native)
+        ch_hs  = make_hs_message(0x01, ch_body)
+        ch_rec = make_tls_record(TLS_HANDSHAKE, ch_hs)
+        state.feed_hs(ch_hs)
+        _hexdump("CH record", ch_rec)
 
-    # ----- Client Certificate -----
-    run_marker = cli_rand[4:6]
-    if cert_data_398 is not None:
-        cert_body = run_marker + cert_data_398[:398]
-    else:
-        pub_key = eck2_pub_le or b'\x00' * 32
-        cert_body = (run_marker + host_142
-                     + struct.pack('>HB', 2, 32) + b'\x00'
-                     + pub_key + b'\x00' * 220)
-    assert len(cert_body) == 400, f"cert_body={len(cert_body)}"
+        # Send CH: value=4 with 44000000 IOCTL header (confirmed b.exe trace)
+        self.ctrl_out(REQ_CMD, value=4,
+                      data=b'\x44\x00\x00\x00' + ch_rec,
+                      label="TLS_OUT(CH)")
+        raw_sh = self.ctrl_in(REQ_RESP, 0x400, label="TLS_IN(CH)")
+        if raw_sh and raw_sh[0] == TLS_ALERT:
+            raise RuntimeError(f"TLS Alert on ClientHello: {raw_sh.hex()}")
 
-    body     = b'\x00\x01\x90' + b'\x00\x01\x90' + cert_body
-    cert_hs  = make_hs_message(0x0b, body)   # Certificate
-    state.feed_hs(cert_hs)
-    _hexdump("Cert HS", cert_hs)
+        # ----- Parse ServerHello + CertReq + ServerHelloDone -----
+        srv_rand = None
+        off      = 0
+        while off + 5 <= len(raw_sh):
+            rtype = raw_sh[off]
+            rlen  = struct.unpack_from('>H', raw_sh, off + 3)[0]
+            rbody = raw_sh[off + 5: off + 5 + rlen]
+            off  += 5 + rlen
+            if rtype != TLS_HANDSHAKE:
+                continue
+            hoff = 0
+            while hoff < len(rbody):
+                ht   = rbody[hoff]
+                hl   = struct.unpack_from('>I',
+                           b'\x00' + rbody[hoff+1:hoff+4])[0]
+                hmsg = rbody[hoff: hoff + 4 + hl]
+                state.feed_hs(hmsg)
+                if ht == 0x02:    # ServerHello
+                    srv_rand = hmsg[6:38]
+                elif ht == 0x0d:  # CertificateRequest -- expected, no action
+                    pass
+                elif ht == 0x0e:  # ServerHelloDone
+                    pass
+                hoff += 4 + hl
+        if srv_rand is None:
+            raise RuntimeError("ServerHello not received or parsed")
+        _log(f"srv_rand={srv_rand.hex()}")
 
-    # ----- ClientKeyExchange -----
-    cke_hs = make_hs_message(0x10, b'\x04' + eph_x + eph_y)
-    state.feed_hs(cke_hs)
+        # ----- Key derivation -----
+        shared_x = ecdh_shared(eck2_d, dev_x_be, dev_y_be)
+        master   = prf(shared_x, 'master secret', cli_rand + srv_rand, 48)
+        state.setup_keys(master, cli_rand, srv_rand)
+        _hexdump("master secret", master)
 
-    # ----- CertificateVerify -----
-    hs_dig = state.hs_digest()
-    _hexdump("HS hash for CertVerify", hs_dig)
-    sig_der = sign_ecdsa_sha256(eck2_be, hs_dig)
-    cv_hs   = make_hs_message(0x0f, sig_der)
-    state.feed_hs(cv_hs)
+        # ----- Client Certificate -----
+        run_marker = cli_rand[4:6]
+        if cert_data_398 is not None:
+            cert_body = run_marker + cert_data_398[:398]
+        else:
+            pub_key   = eck2_pub_le or b'\x00' * 32
+            cert_body = (run_marker + host_142
+                         + struct.pack('>HB', 2, 32) + b'\x00'
+                         + pub_key + b'\x00' * 220)
+        assert len(cert_body) == 400, f"cert_body len={len(cert_body)}"
 
-    # ----- ChangeCipherSpec + Finished -----
-    hs_hash_fin = state.hs_digest()
-    verify      = prf(master, 'client finished', hs_hash_fin, 12)
-    fin_hs      = make_hs_message(0x14, verify)
+        cert_hs = make_hs_message(0x0b,
+                      b'\x00\x01\x90' + b'\x00\x01\x90' + cert_body)
+        state.feed_hs(cert_hs)
+        _hexdump("Cert HS", cert_hs)
 
-    hs_plain = cert_hs + cke_hs + cv_hs
-    hs_rec   = make_tls_record(TLS_HANDSHAKE, hs_plain)
-    ccs_rec  = make_tls_record(TLS_CHANGE_CS, b'\x01')
+        # ----- ClientKeyExchange -----
+        cke_hs = make_hs_message(0x10, b'\x04' + eph_x + eph_y)
+        state.feed_hs(cke_hs)
 
-    # Reset client seq after CCS
-    state.client_seq = 0
-    fin_cipher = state.encrypt(TLS_HANDSHAKE, fin_hs)
-    state.client_seq = 1   # next encrypted record starts at 1
-    fin_rec = make_tls_record(TLS_HANDSHAKE, fin_cipher)
+        # ----- CertificateVerify -----
+        hs_dig = state.hs_digest()
+        _hexdump("HS hash for CertVerify", hs_dig)
+        sig_der = sign_ecdsa_sha256(eck2_be, hs_dig)
+        cv_hs   = make_hs_message(0x0f, sig_der)
+        state.feed_hs(cv_hs)
 
-    burst = b'\x44\x00\x00\x00' + hs_rec + ccs_rec + fin_rec
-    _hexdump("bundle total", burst)
-    sensor.ctrl_out(REQ_CMD, value=0, data=burst, label="TLS_OUT(BUNDLE)")
-    raw_sfin = sensor.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
+        # ----- ChangeCipherSpec + Finished -----
+        verify  = prf(master, 'client finished', state.hs_digest(), 12)
+        fin_hs  = make_hs_message(0x14, verify)
 
-    # ----- Server CCS + Finished -----
-    state.server_seq = 0
-    off = 0
-    while off + 5 <= len(raw_sfin):
-        stype = raw_sfin[off]
-        slen  = struct.unpack_from('>H', raw_sfin, off + 3)[0]
-        sbody = raw_sfin[off + 5: off + 5 + slen]
-        off  += 5 + slen
-        if stype == TLS_ALERT:
-            raise RuntimeError(f"TLS Alert from server: {sbody.hex()}")
-        if stype == TLS_HANDSHAKE:
-            try:
-                srv_fin = state.decrypt(TLS_HANDSHAKE, sbody)
-                _hexdump("Server Finished", srv_fin)
-            except Exception as exc:
-                _log(f"  Server Finished decrypt failed: {exc}")
-    return state
+        hs_rec  = make_tls_record(TLS_HANDSHAKE, cert_hs + cke_hs + cv_hs)
+        ccs_rec = make_tls_record(TLS_CHANGE_CS, b'\x01')
+
+        # Encrypted epoch begins at seq=0 after CCS
+        state.client_seq = 0
+        fin_cipher = state.encrypt(TLS_HANDSHAKE, fin_hs)
+        state.client_seq = 1   # next encrypted record is seq=1
+        fin_rec = make_tls_record(TLS_HANDSHAKE, fin_cipher)
+
+        # Send bundle: value=0 (confirmed b.exe trace)
+        burst = b'\x44\x00\x00\x00' + hs_rec + ccs_rec + fin_rec
+        _hexdump("bundle", burst)
+        self.ctrl_out(REQ_CMD, value=0, data=burst,
+                      label="TLS_OUT(BUNDLE)")
+        raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
+
+        # ----- Server CCS + Finished -----
+        state.server_seq = 0
+        off = 0
+        while off + 5 <= len(raw_sfin):
+            stype = raw_sfin[off]
+            slen  = struct.unpack_from('>H', raw_sfin, off + 3)[0]
+            sbody = raw_sfin[off + 5: off + 5 + slen]
+            off  += 5 + slen
+            if stype == TLS_ALERT:
+                raise RuntimeError(
+                    f"TLS Alert from server: {sbody.hex()}")
+            if stype == TLS_HANDSHAKE:
+                try:
+                    srv_fin = state.decrypt(TLS_HANDSHAKE, sbody)
+                    _hexdump("Server Finished", srv_fin)
+                except Exception as exc:
+                    _log(f"  Server Finished decrypt failed: {exc}")
+
+        self.tls = state
+        _log("TLS handshake complete")
+
+    def tls_send(self, plain, value, label=""):
+        """Encrypt plain as TLS ApplicationData, send, decrypt response."""
+        assert self.tls is not None, "call connect() first"
+        body = self.tls.encrypt(TLS_APP_DATA, plain)
+        rec  = make_tls_record(TLS_APP_DATA, body)
+        # Pad to 8-byte alignment (native format)
+        pad  = (-len(rec)) % 8
+        self.ctrl_out(REQ_CMD, value=value,
+                      data=rec + bytes(pad), label=f"TLS_OUT({label})")
+        raw = self.ctrl_in(REQ_RESP, 256, label=f"TLS_IN({label})")
+        if not raw:
+            return None
+        if raw[0] == TLS_ALERT:
+            _log(f"  TLS ALERT: {raw.hex()}")
+            return None
+        rtype = raw[0]
+        rlen  = struct.unpack('>H', raw[3:5])[0]
+        rbody = raw[5: 5 + rlen]
+        try:
+            pt = self.tls.decrypt(rtype, rbody)
+            _log(f"  TLS({label}) resp: {pt.hex()}")
+            return pt
+        except Exception as exc:
+            _log(f"  TLS({label}) decrypt failed: {exc}")
+            return None
 
 
 # ---------------------------------------------------------------------------
-# App commands (encrypted IOCTL layer)
+# BiometricSensor -- extends SensorTLS with fingerprint commands
 # ---------------------------------------------------------------------------
 
-def _app_encrypt(state, content_type, plain):
-    body = state.encrypt(content_type, plain)
-    rec  = make_tls_record(content_type, body)
-    # Pad to 8-byte alignment (native format)
-    pad  = (-len(rec)) % 8
-    return rec + bytes(pad)
-
-
-def _app_decrypt(state, data):
-    if len(data) < 5:
-        return None
-    rtype  = data[0]
-    rlen   = struct.unpack('>H', data[3:5])[0]
-    rbody  = data[5: 5 + rlen]
-    return state.decrypt(rtype, rbody)
-
-
-def app_cmd(sensor, state, plain, value=7, label=""):
-    """Send one encrypted app command, return decrypted response."""
-    _log(f"  APP({label}) plain: {plain.hex()}")
-    out = _app_encrypt(state, TLS_APP_DATA, plain)
-    sensor.ctrl_out(REQ_CMD, value=value, data=out, label=f"APP_OUT({label})")
-    raw = sensor.ctrl_in(REQ_RESP, 256, label=f"APP_IN({label})")
-    if not raw:
-        _log("  No response")
-        return None
-    if raw[0] == TLS_ALERT:
-        _log(f"  TLS ALERT: {raw.hex()}")
-        return None
-    try:
-        pt = _app_decrypt(state, raw)
-        _log(f"  APP({label}) resp: {pt.hex() if pt else 'None'}")
-        return pt
-    except Exception as exc:
-        _log(f"  App decrypt failed: {exc}")
-        return None
-
-
-# ---------------------------------------------------------------------------
-# list-db command sequence
-# ---------------------------------------------------------------------------
-
-def do_list_db(sensor, state):
+class BiometricSensor(SensorTLS):
     """
-    Enumerate fingerprint database.
-    Prints enrolled records to stdout regardless of SENSOR_TRACE.
+    High-level fingerprint database commands over the encrypted TLS channel.
 
-    Sequence:
-      GET_RECORD_COUNT  (value=6)
-      STORAGE_QUERY_INIT x2 (value=7)
-      STORAGE_QUERY_ALL wildcard (value=2)
-      FETCH_RECORD for each GUID (value=2)
+    Command value codes (from b.exe trace):
+      GET_RECORD_COUNT  -> value=6
+      STORAGE_QUERY_INIT -> value=7
+      STORAGE_QUERY_ALL  -> value=2
+      FETCH_RECORD       -> value=2
     """
-    # GET_RECORD_COUNT
-    app_cmd(sensor, state, bytes.fromhex('820000000000000207'),
+
+    def get_record_count(self):
+        """Send GET_RECORD_COUNT, return raw response."""
+        return self.tls_send(
+            bytes.fromhex('820000000000000207'),
             value=6, label="GET_RECORD_COUNT")
 
-    # STORAGE_QUERY_INIT x2
-    for n in (1, 2):
-        app_cmd(sensor, state, bytes.fromhex('9e01'),
-                value=7, label=f"QUERY_INIT_{n}")
+    def storage_query_init(self, n):
+        """Send STORAGE_QUERY_INIT (call twice before QUERY_ALL)."""
+        return self.tls_send(
+            bytes.fromhex('9e01'),
+            value=7, label=f"QUERY_INIT_{n}")
 
-    # STORAGE_QUERY_ALL wildcard
-    query_resp = app_cmd(sensor, state,
-                         bytes.fromhex('9f02' + '00' * 3 + 'ff' * 16),
-                         value=2, label="QUERY_ALL")
-    if not query_resp or len(query_resp) < 4:
-        print("No records (empty QUERY_ALL response)")
-        return
+    def storage_query_all(self):
+        """
+        Send STORAGE_QUERY_ALL wildcard.
+        Returns list of 16-byte GUIDs for all allocated storage slots.
+        """
+        resp = self.tls_send(
+            bytes.fromhex('9f02' + '00' * 3 + 'ff' * 16),
+            value=2, label="QUERY_ALL")
+        if not resp or len(resp) < 4:
+            return []
+        slot_count = struct.unpack('<H', resp[2:4])[0]
+        guids, off = [], 4
+        while off + 16 <= len(resp):
+            guids.append(resp[off: off + 16])
+            off += 16
+        _log(f"QUERY_ALL: {len(guids)} slots "
+             f"(header claims {slot_count})")
+        return guids
 
-    slot_count = struct.unpack('<H', query_resp[2:4])[0]
-    guids = []
-    off = 4
-    while off + 16 <= len(query_resp):
-        guids.append(query_resp[off: off + 16])
-        off += 16
-    _log(f"STORAGE_QUERY_ALL: {len(guids)} slots (header claims {slot_count})")
+    def fetch_record(self, guid):
+        """
+        Fetch a single record by GUID.
+        Returns raw response bytes, or None on error.
+        An all-zero 4-byte response means the slot is empty.
+        """
+        return self.tls_send(
+            bytes.fromhex('9f03' + '00' * 3) + guid,
+            value=2, label=f"FETCH_{guid[:4].hex()}")
 
-    enrolled = []
-    for guid in guids:
-        rec = app_cmd(sensor, state,
-                      bytes.fromhex('9f03' + '00' * 3) + guid,
-                      value=2, label=f"FETCH_{guid[:4].hex()}")
-        if rec and rec != b'\x00\x00\x00\x00':
-            enrolled.append((guid, rec))
+    def list_enrolled(self):
+        """
+        Full list-db sequence. Returns list of (guid, record_data) for
+        all non-empty slots. Prints results to stdout.
+        """
+        self.get_record_count()
 
-    if not enrolled:
-        print("No enrolled fingerprints found.")
-    else:
-        print(f"Enrolled fingerprints ({len(enrolled)}):")
-        for guid, rec in enrolled:
-            print(f"  {guid.hex()}  data={rec.hex()}")
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+
+        guids = self.storage_query_all()
+        if not guids:
+            print("No storage slots found.")
+            return []
+
+        enrolled = []
+        for guid in guids:
+            rec = self.fetch_record(guid)
+            if rec and rec != b'\x00\x00\x00\x00':
+                enrolled.append((guid, rec))
+
+        if not enrolled:
+            print("No enrolled fingerprints found.")
+        else:
+            print(f"Enrolled fingerprints ({len(enrolled)}):")
+            for guid, rec in enrolled:
+                print(f"  {guid.hex()}  data={rec.hex()}")
+
+        return enrolled
 
 
 # ---------------------------------------------------------------------------
@@ -779,7 +835,7 @@ def main():
         sys.exit(1)
 
     print("Connecting to sensor...")
-    sensor = Sensor()
+    sensor = BiometricSensor()
     sensor.find_device()
 
     print("Running init phases...")
@@ -791,33 +847,32 @@ def main():
 
     # ----- PairingData -----
     print("Loading PairingData...")
-    tlvs    = load_pairing_data()
-    pair    = get_pairing_fields(tlvs) if tlvs else None
+    tlvs = load_pairing_data()
+    pair = get_pairing_fields(tlvs) if tlvs else None
 
     if pair:
         host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le = pair
-        eck2_be      = eck2_le[::-1]
+        eck2_be       = eck2_le[::-1]
         cert_data_398 = cert_data
         print(f"  host_142: {host_142[:8].hex()}...")
         _log(f"  eck2_le:  {eck2_le[:8].hex()}...")
         _log(f"  dev_x_be: {dev_x_be[:8].hex()}...")
     else:
         print("  No PairingData -- generating fresh ECS2 key pair")
-        eck2_be_raw  = _rand(32)
-        eck2_be      = eck2_be_raw
-        eck2_pub     = ecdh_pubkey(eck2_be)
-        eck2_pub_le  = eck2_pub[:32][::-1]
-        host_142     = HOST_142_FALLBACK
+        eck2_be       = _rand(32)
+        eck2_pub      = ecdh_pubkey(eck2_be)
+        eck2_pub_le   = eck2_pub[:32][::-1]
+        host_142      = HOST_142_FALLBACK
         cert_data_398 = None
         dev_x_be, dev_y_be = DEV_X_BE, DEV_Y_BE
 
     # ----- TLS handshake -----
     print("TLS handshake...")
-    state = do_tls_handshake(sensor, host_142, eck2_be, eck2_pub_le,
-                             cert_data_398, dev_x_be, dev_y_be)
+    sensor.connect(host_142, eck2_be, eck2_pub_le,
+                   cert_data_398, dev_x_be, dev_y_be)
     print("  TLS OK")
 
-    # ----- Save PairingData if fresh keys -----
+    # ----- Save PairingData if we used fresh keys -----
     if pair is None and not os.path.exists(PAIRING_FILE):
         host_x_le = bytes(reversed(dev_x_be))
         host_y_le = bytes(reversed(dev_y_be))
@@ -828,10 +883,10 @@ def main():
               + pub_key + b'\x00' * 220)
         _save_pairing_tlv({1: cb, 2: bytes(reversed(eck2_be)), 3: host_cert})
 
-    # ----- App commands -----
+    # ----- Biometric commands -----
     if sys.argv[1] == 'list-db':
         print("list-db...")
-        do_list_db(sensor, state)
+        sensor.list_enrolled()
 
     print("Done.")
 
