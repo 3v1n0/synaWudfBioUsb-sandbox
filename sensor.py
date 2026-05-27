@@ -22,17 +22,18 @@ Key derivation (confirmed from native Wine trace):
   AAD = seq_num(8) + content_type(1) + TLS_VER(2) + plain_len(2)
   verify_data = PRF_SHA384(master, "client finished", hs_hash_sha256, 12)
 
-Certificate body (400 bytes total):
+Certificate body (402 bytes total):
   [0:2]    run_marker = cli_rand[4:6]
-  [2:144]  HOST_142 from PairingData tag=1 blob[0:142]
-  [144:148] header bytes: 00 02 20 00
-  [148:180] pub_key32 (ECS2 public key X, LE) from PairingData tag=1
-  [180:400] zero padding
+  [2:402]  PairingData tag=1 verbatim (400 bytes):
+             [0:142]   HOST_142
+             [142:146] header 00 02 20 00
+             [146:178] pub_key32 (ECS2 public key X, LE)
+             [178:400] zero padding
 
 PairingData (local file or Wine registry):
-  tag=1: 398-byte host cert body (HOST_142 + header + pub_key + zeros)
+  tag=1: 400-byte host cert body (HOST_142 + header + pub_key + zeros)
   tag=2: 32-byte ECS2 private key D (LE)
-  tag=3: 142-byte device cert body (DEV_142)
+  tag=3: 400-byte device cert body
 
 USB wValue map (confirmed from b.exe trace):
   Init cmds (plain):  OUT value=1 / IN value=0 (init2/init3: IN value=0x8000)
@@ -330,10 +331,10 @@ def get_pairing_fields(tlvs):
         return None
     host_142    = cert_data[:142]
     eck2_le     = tlvs.get(2, b'\x00' * 32)
-    # Public key X coord (LE) at cert_data[146:178]
-    # (after HOST_142[0:142] + header[142:146])
-    eck2_pub_le = (cert_data[146:178]
-                   if len(cert_data) >= 178 else b'\x00' * 32)
+    # Tag 1 layout: HOST_142[0:142] + zeros[142:140] + header[140:144](00 02 20 00)
+    # + pub_key32[144:176](ECS2 public key X, LE) + zeros[176:400]
+    eck2_pub_le = (cert_data[144:176]
+                   if len(cert_data) >= 176 else b'\x00' * 32)
     # Device ECDH static key from Tag 3 (host cert), fallback to constants
     dev_x_be, dev_y_be = DEV_X_BE, DEV_Y_BE
     host_cert = tlvs.get(3)
@@ -568,7 +569,7 @@ class SensorTLS(Sensor):
           host_142      -- 142-byte host EC key blob (PairingData tag=1[0:142])
           eck2_be       -- 32-byte ECS2 private key D (BE) for CertVerify
           eck2_pub_le   -- 32-byte ECS2 public key X coord (LE) for cert
-          cert_data_398 -- 398-byte stored cert body (tag=1); None = fresh
+          cert_data_398 -- 400-byte stored cert body (tag=1); None = fresh
           dev_x_be      -- 32-byte device ECDH static pub X (BE)
           dev_y_be      -- 32-byte device ECDH static pub Y (BE)
         """
@@ -583,19 +584,22 @@ class SensorTLS(Sensor):
         _log(f"eph_x={eph_x.hex()}")
 
         # ----- ClientHello -----
-        # Extension format from b.exe trace: ext_len=0x000a covers 10 bytes
-        # (two ext type+len+data), with ec_point_formats data and 4 trailing
-        # zeros placed outside (native quirk).
+        # Extensions: ext_len=0x000c (12 bytes) covering two extensions.
+        # supported_groups(0x0004)+ec_point_formats(0x000b).
+        # CH HS body = 71 bytes, total CH = 84 bytes (matched to b.exe trace).
         sess_id   = b'\x07' + b'\x00' * 7
         suites    = (b'\xc0\x05' + CIPHER_SUITE
                      + b'\x00\x3d\x00\x8d\x00\xa8\x00\xa9')
-        ext_block = b'\x00\x04\x00\x02\x00\x17\x00\x0b\x00\x02'  # 10 bytes
+        # Extensions: ext_len=0x000a (10) is a device quirk -- it covers
+        # supported_groups (6B) + ec_point_formats type+len (4B) only.
+        # The ec_point_formats data (\x01\x00) sits outside ext_len field.
+        # CH HS body = 71 bytes, total CH = 84 bytes (matched to b.exe trace).
+        ext_inner = b'\x00\x04\x00\x02\x00\x17\x00\x0b\x00\x02'  # 10B
         ch_body = (TLS_VER + cli_rand + sess_id
                    + struct.pack('>H', len(suites)) + suites
-                   + b'\x00'                         # compression: length=0
-                   + struct.pack('>H', len(ext_block)) + ext_block
-                   + b'\x01\x00'                     # ec_point_formats data
-                   + b'\x00\x00\x00\x00')            # trailing zeros (native)
+                   + b'\x00'                          # compression: length=0
+                   + struct.pack('>H', len(ext_inner)) + ext_inner
+                   + b'\x01\x00')                     # ec_point_formats data
         ch_hs  = make_hs_message(0x01, ch_body)
         ch_rec = make_tls_record(TLS_HANDSHAKE, ch_hs)
         state.feed_hs(ch_hs)
@@ -644,15 +648,19 @@ class SensorTLS(Sensor):
         _hexdump("master secret", master)
 
         # ----- Client Certificate -----
+        # cert_body = run_marker(2) + tag1_full(400) = 402 bytes total.
+        # The two inner length prefixes (000190 000190) are device-specific
+        # constants and do not follow standard TLS cert list encoding;
+        # the receiver uses the outer hs length field.
         run_marker = cli_rand[4:6]
         if cert_data_398 is not None:
-            cert_body = run_marker + cert_data_398[:398]
+            cert_body = run_marker + cert_data_398   # full tag1, no truncation
         else:
             pub_key   = eck2_pub_le or b'\x00' * 32
             cert_body = (run_marker + host_142
                          + struct.pack('>HB', 2, 32) + b'\x00'
-                         + pub_key + b'\x00' * 220)
-        assert len(cert_body) == 400, f"cert_body len={len(cert_body)}"
+                         + pub_key + b'\x00' * 222)  # 2+142+4+32+222 = 402
+        assert len(cert_body) == 402, f"cert_body len={len(cert_body)}"
 
         cert_hs = make_hs_message(0x0b,
                       b'\x00\x01\x90' + b'\x00\x01\x90' + cert_body)
@@ -683,11 +691,15 @@ class SensorTLS(Sensor):
         state.client_seq = 1   # next encrypted record is seq=1
         fin_rec = make_tls_record(TLS_HANDSHAKE, fin_cipher)
 
-        # Send bundle: value=0 (confirmed b.exe trace)
+        # Send bundle: value=0 per b.exe trace (wVal=0x0000 confirmed)
         burst = b'\x44\x00\x00\x00' + hs_rec + ccs_rec + fin_rec
         _hexdump("bundle", burst)
         self.ctrl_out(REQ_CMD, value=0, data=burst,
                       label="TLS_OUT(BUNDLE)")
+        # Device processes bundle asynchronously (TLS crypto); wait briefly
+        # before polling to avoid repeated 10s timeout waits.
+        import time
+        time.sleep(2.0)
         raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
 
         # ----- Server CCS + Finished -----
