@@ -362,8 +362,6 @@ class Sensor:
             t(f"TLS ALERT: {resp.hex()}"); return
         self.seq_out += 1
 
-        print("GOT resp", resp)
-
         # 2. Parse ServerHello + CertReq + SHellDone
         sh_total = self.parse_sh(resp)
         self.hs_update(resp[5:sh_total])
@@ -626,7 +624,7 @@ class Sensor:
         return None
 
     def app_get_record_count(self):
-        plain = b'\x82' + b'\x00' * 7 + b'\x02\x07'
+        plain = b'\x82' + b'\x00' * 6 + b'\x02\x07'
         t("--- GET_RECORD_COUNT ---")
         data = self.app_send(6, plain, 128, label="GET_RECORD_COUNT")
         if data and len(data) >= 12:
