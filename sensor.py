@@ -434,14 +434,14 @@ class Sensor:
                 self.app_storage_query_init(2)
                 guids = self.app_storage_query_all()
                 if guids:
-                    filled = 0
-                    for idx, g in enumerate(guids):
+                    enrolled = []
+                    for g in guids:
                         rec = self.app_fetch_record(g)
                         if rec and rec != b'\x00\x00\x00\x00':
-                            t(f"Record {idx} ({g.hex()}): {rec.hex()}")
-                            filled += 1
-                    if filled == 0:
-                        t("No enrolled templates found on device")
+                            t(f"  Enrolled: {g.hex()}: {rec.hex()}")
+                            enrolled.append((g, rec))
+                    if not enrolled:
+                        t("  (no enrolled templates)")
 
         if self._dry:
             t("[DRY] App commands not executed")
@@ -655,12 +655,10 @@ class Sensor:
             while off + 16 <= len(data):
                 guids.append(data[off:off+16])
                 off += 16
-            t(f"Query all returned {len(guids)} GUIDS ({count} claimed)")
-            for i, g in enumerate(guids):
-                t(f"  GUID[{i}] = {g.hex()}")
+            t(f"Storage says {len(guids)} slots ({count} claimed)")
             return guids
         hexdump("Raw query all response", data or b'')
-        return None
+        return []
 
     def app_fetch_record(self, guid):
         plain = b'\x9f\x03\x00\x00\x00' + guid
