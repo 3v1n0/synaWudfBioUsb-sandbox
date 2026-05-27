@@ -4,3 +4,4 @@ codeGetExtractPath/
 *.x[pe]fwext
 *.exe
 !a.exe
+pairing.dat

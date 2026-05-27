@@ -65,9 +65,35 @@ def fmt_setup(bm, req, val, idx, ln):
     return f"{bm:02x}{req:02x}{val:04x}{idx:04x}{ln:04x}"
 
 
-# ── Wine DPAPI decryption (PairingData) ─────────────────────────────────
+# ── PairingData store (local file, fallback to Wine registry) ──────────
+
+PAIRING_FILE = os.environ.get("PAIRING_FILE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "pairing.dat")
 
 WINE_DPAPI_SECRET = b"I'm hunting wabbits"
+
+def save_pairing_data_tlv(tlvs):
+    """Save TLV dict {tag: value} to local file."""
+    data = b''
+    for tag in sorted(tlvs):
+        val = tlvs[tag]
+        data += struct.pack('<HI', tag, len(val)) + val
+    try:
+        with open(PAIRING_FILE, 'wb') as f:
+            f.write(data)
+        t(f"Saved PairingData to {PAIRING_FILE}")
+        return True
+    except OSError as e:
+        t(f"WARN: could not save {PAIRING_FILE}: {e}")
+        return False
+
+def load_pairing_data_from_file():
+    """Load TLV data from local file, returns TLV dict or None."""
+    try:
+        data = open(PAIRING_FILE, 'rb').read()
+    except OSError:
+        return None
+    return parse_pairing_tlv(data)
 
 def load_pairing_blob_from_registry(reg_path=None):
     path = reg_path or os.environ.get("PAIRING_REG") or os.path.expanduser("~/winelatestprefix/user.reg")
@@ -176,14 +202,19 @@ def parse_pairing_tlv(plain):
     return results
 
 def get_cert_pairingdata():
-    """Returns (host_142, eck2_le, full_cert_body, host_x, host_y) from PairingData."""
-    blob = load_pairing_blob_from_registry()
-    if not blob:
+    """Returns (host_142, eck2_le, full_cert_body, host_x, host_y, eck2_pub_le)
+    from PairingData. Tries local file first, then Wine registry."""
+    tlvs = load_pairing_data_from_file()
+    if tlvs is None:
+        blob = load_pairing_blob_from_registry()
+        if blob:
+            plain = decrypt_pairing_data(blob)
+            if plain:
+                tlvs = parse_pairing_tlv(plain)
+                if tlvs:
+                    save_pairing_data_tlv(tlvs)
+    if tlvs is None:
         return None
-    plain = decrypt_pairing_data(blob)
-    if not plain:
-        return None
-    tlvs = parse_pairing_tlv(plain)
     cert_data = tlvs.get(1)
     if not cert_data or len(cert_data) < 142:
         return None
@@ -191,6 +222,8 @@ def get_cert_pairingdata():
         return None
     host_142 = cert_data[:142]
     eck2_le = tlvs.get(2, b'\x00' * 32)
+    # Extract ECS2 public key from cert body at offset 148 (2+142+4)
+    eck2_pub_le = cert_data[148:180] if len(cert_data) >= 180 else b'\x00' * 32
     # Extract device ECDH static key from Tag 3 (host cert)
     host_cert = tlvs.get(3)
     host_x_be = DEV_X_BE; host_y_be = DEV_Y_BE
@@ -204,7 +237,7 @@ def get_cert_pairingdata():
             host_x_be = x_le[::-1]
             host_y_be = y_le[::-1]
             t(f"Host ECDH key from Tag3: X={host_x_be.hex()} Y={host_y_be.hex()}")
-    return (host_142, eck2_le, cert_data, host_x_be, host_y_be)
+    return (host_142, eck2_le, cert_data, host_x_be, host_y_be, eck2_pub_le)
 
 
 class Sensor:
@@ -222,6 +255,7 @@ class Sensor:
         self._pairing_host142 = None
         self._pairing_eck2_le = None
         self._pairing_eck2_be = None
+        self._pairing_eck2_pub_le = None  # ECS2 public key X coord (LE) for cert
         self._pairing_cert_data = None
         self._dev_ecdh_x = DEV_X_BE
         self._dev_ecdh_y = DEV_Y_BE
@@ -333,7 +367,7 @@ class Sensor:
 
         self.derive_dev_key()
 
-        # Try to load device key from PairingData (more reliable than init4)
+        # Try to load device key from PairingData (local file or Wine registry)
         pair = get_cert_pairingdata()
         if pair:
             self._pairing_host142 = pair[0]
@@ -342,13 +376,15 @@ class Sensor:
             self._pairing_cert_data = pair[2]
             self._dev_ecdh_x = pair[3]
             self._dev_ecdh_y = pair[4]
+            self._pairing_eck2_pub_le = pair[5]  # public key X coord LE from cert
             t(f"HOST_142 from PairingData: {pair[0][:60].hex()}...")
             t(f"ECS2 LE from PairingData: {pair[1][:32].hex()}...")
         else:
-            t("ERROR: No PairingData found. Run b.exe enroll+commit first.")
-            t("  Set PAIRING_REG env var to point to your user.reg")
-            t("  (PairingData is stored by b.exe as Software\\Synaptics\\PairingData)")
-            return
+            t("No PairingData found, generating fresh keys...")
+            self._generate_ecs2_key()
+            # Build HOST_142 from device key (init4 or hardcoded)
+            self._pairing_host142 = self.build_host142()
+            t(f"Fresh HOST_142: {self._pairing_host142[:60].hex()}...")
 
         ready = self.ctrl_in(REQ_READY, 2, req_label="REQ_READY")
         t(f"REQ_READY = {ready.hex()}")
@@ -427,6 +463,11 @@ class Sensor:
                 fin_dec = self.decrypt_server(fin_enc[5:])
                 if fin_dec:
                     hexdump("Server Finished", fin_dec)
+                    # Save PairingData if we generated fresh keys
+                    if self._pairing_eck2_be is not None and \
+                       self._pairing_host142 is not None and \
+                       not os.path.exists(PAIRING_FILE):
+                        self._save_pairing_data()
         else:
             t("[DRY] Bundle NOT sent to device")
 
@@ -503,16 +544,42 @@ class Sensor:
             return b'\x3f\x5f\x17\x00' + x_le + b'\x00' * 20 + y_le + b'\x00' * 54
         return HOST_142
 
+    def _generate_ecs2_key(self):
+        """Generate fresh ECS2 key pair when no PairingData exists."""
+        d_be = det_rand(32)
+        self._pairing_eck2_be = d_be
+        self._pairing_eck2_le = d_be[::-1]
+        pub = ecdh_pubkey(d_be)
+        pub_x_be = pub[:32]
+        self._pairing_eck2_pub_le = pub_x_be[::-1]
+        self._pairing_cert_data = None
+        t(f"Fresh ECS2 key: D={d_be.hex()} pub_x={pub_x_be.hex()}")
+
+    def _save_pairing_data(self):
+        """Save current session keys to local pairing.dat."""
+        if self._pairing_eck2_le is None:
+            return
+        host_x_be = self._dev_ecdh_x
+        host_y_be = self._dev_ecdh_y
+        x_le = host_x_be[::-1]
+        y_le = host_y_be[::-1]
+        host_cert = b'\x3f\x5f\x17\x00' + x_le + b'\x00' * 20 + y_le + b'\x00' * 54
+        # Build full 400-byte cert body with correct ECS2 pub key
+        eck2_pub = self._pairing_eck2_pub_le or b'\x00' * 32
+        cert_body = self._pairing_host142 + struct.pack('>HB', 2, 32) + b'\x00' + eck2_pub + b'\x00' * 220
+        tlvs = {
+            1: cert_body,
+            2: self._pairing_eck2_le,
+            3: host_cert,
+        }
+        save_pairing_data_tlv(tlvs)
+
     def build_cert(self):
         run_marker = self.cli_rand[4:6]
-        if self._pairing_cert_data is not None:
-            cert_data = run_marker + self._pairing_cert_data[:398]
-            assert len(cert_data) == 400, f"pair cert_data={len(cert_data)}"
-        else:
-            host_142 = self.build_host142()
-            eck2 = self._pairing_eck2_le or b'\x00' * 32
-            cert_data = run_marker + host_142 + struct.pack('<HB', 0x0002, 32) + b'\x00' + eck2 + b'\x00' * 220
-            assert len(cert_data) == 400, f"manual cert_data={len(cert_data)}"
+        host_142 = self.build_host142()
+        eck2_pub = self._pairing_eck2_pub_le or b'\x00' * 32
+        cert_data = run_marker + host_142 + struct.pack('>HB', 2, 32) + b'\x00' + eck2_pub + b'\x00' * 220
+        assert len(cert_data) == 400, f"cert_data={len(cert_data)}"
 
         list_len = struct.pack('>I', 400)[1:4]
         body = list_len + list_len + cert_data + b'\x00\x00'
