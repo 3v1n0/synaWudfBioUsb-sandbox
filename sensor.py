@@ -70,7 +70,7 @@ def fmt_setup(bm, req, val, idx, ln):
 WINE_DPAPI_SECRET = b"I'm hunting wabbits"
 
 def load_pairing_blob_from_registry(reg_path=None):
-    path = reg_path or os.path.expanduser("~/winelatestprefix/user.reg")
+    path = reg_path or os.environ.get("PAIRING_REG") or os.path.expanduser("~/winelatestprefix/user.reg")
     try:
         lines = open(path, "r", encoding="utf-8", errors="ignore").read().splitlines()
     except OSError:
@@ -344,6 +344,11 @@ class Sensor:
             self._dev_ecdh_y = pair[4]
             t(f"HOST_142 from PairingData: {pair[0][:60].hex()}...")
             t(f"ECS2 LE from PairingData: {pair[1][:32].hex()}...")
+        else:
+            t("ERROR: No PairingData found. Run b.exe enroll+commit first.")
+            t("  Set PAIRING_REG env var to point to your user.reg")
+            t("  (PairingData is stored by b.exe as Software\\Synaptics\\PairingData)")
+            return
 
         ready = self.ctrl_in(REQ_READY, 2, req_label="REQ_READY")
         t(f"REQ_READY = {ready.hex()}")
