@@ -101,11 +101,12 @@ def _rand(n):
 # USB request codes
 # ---------------------------------------------------------------------------
 
-REQ_START = 0x19   # OUT -- phase 1 init signal
-REQ_ACK   = 0x1a   # IN  -- phase 1 ack
-REQ_CMD   = 0x16   # OUT -- send command
-REQ_RESP  = 0x17   # IN  -- read response
-REQ_READY = 0x14   # IN  -- ready check
+REQ_START    = 0x19   # OUT -- phase 1 init signal
+REQ_ACK      = 0x1a   # IN  -- phase 1 ack
+REQ_CMD      = 0x16   # OUT -- send command
+REQ_RESP     = 0x17   # IN  -- read response
+REQ_READY    = 0x14   # IN  -- ready check
+REQ_SHUTDOWN = 0x1b   # OUT -- vendor reset/shutdown (seen from b.exe)
 BM_OUT, BM_IN = 0x40, 0xc0
 
 # ---------------------------------------------------------------------------
@@ -417,10 +418,22 @@ def ecdh_shared(priv_be, peer_x_be, peer_y_be):
 
 
 def sign_ecdsa_sha256(priv_d_be, digest32):
-    """Sign digest32 with P-256 private key. Returns DER signature."""
+    """Sign digest32 with P-256 private key. Returns DER signature.
+
+    The device requires the bundle to be exactly 616 bytes.  The bundle
+    contains the ECDSA signature as part of the handshake TLS record; its
+    DER-encoded size varies (70-72 bytes) depending on whether r and/or s
+    need a leading 0x00 padding byte.  Only a 71-byte signature yields the
+    required 616-byte bundle.  We re-try with fresh nonces until we get
+    the right length (expected ~1-2 attempts, P(71B) ≈ 0.5).
+    """
     priv = ec.derive_private_key(int.from_bytes(priv_d_be, 'big'),
                                  ec.SECP256R1(), default_backend())
-    return priv.sign(digest32, ec.ECDSA(ec_utils.Prehashed(hashes.SHA256())))
+    for _ in range(50):
+        sig = priv.sign(digest32, ec.ECDSA(ec_utils.Prehashed(hashes.SHA256())))
+        if len(sig) == 71:
+            return sig
+    return sig
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +527,7 @@ class Sensor:
     def init_phase(self, n):
         """
         One init round: REQ_START + 4 plain commands.
+        Returns the init1 response (for TLS-stale detection).
         init2/init3 IN use wValue=0x8000 and request 4096 bytes (native).
         """
         self.ctrl_out(REQ_START, value=1, label=f"REQ_START(r{n})")
@@ -525,8 +539,8 @@ class Sensor:
             return self.ctrl_in(REQ_RESP, resp_len,
                                 value=resp_value, label=lbl)
 
-        cmd(bytes.fromhex('0100000000000000'),
-            0x26, f"init1(r{n})")
+        init1_resp = cmd(bytes.fromhex('0100000000000000'),
+                         0x26, f"init1(r{n})")
         cmd(bytes.fromhex(
             '8e0900020000000000000000000000000000000000000000'),
             4096, f"init2(r{n})", resp_value=0x8000)
@@ -535,11 +549,20 @@ class Sensor:
             4096, f"init3(r{n})", resp_value=0x8000)
         cmd(bytes.fromhex('1900000000000000'),
             0x44, f"init4(r{n})")
+        return init1_resp
 
     def init_phases(self):
-        """Run 3 init rounds as native b.exe does."""
-        for i in range(3):
-            self.init_phase(i)
+        """
+        Run 3 init rounds, plus extra if device was left in TLS state
+        from a previous session (init1 returns TLS record data instead
+        of plain device info).
+        """
+        for i in range(9):
+            init1_resp = self.init_phase(i)
+            # Check if init1 looks like TLS record (0x15=CCS, 0x16=HS, 0x17=AppData)
+            if i >= 2 and (init1_resp and len(init1_resp) >= 1
+                           and init1_resp[0] not in (0x15, 0x16, 0x17)):
+                break
         _log("Init phases done")
 
     def req_ready(self):
@@ -696,10 +719,7 @@ class SensorTLS(Sensor):
         _hexdump("bundle", burst)
         self.ctrl_out(REQ_CMD, value=0, data=burst,
                       label="TLS_OUT(BUNDLE)")
-        # Device processes bundle asynchronously (TLS crypto); wait briefly
-        # before polling to avoid repeated 10s timeout waits.
-        import time
-        time.sleep(2.0)
+        # Device should respond immediately (b.exe does no delay)
         raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
 
         # ----- Server CCS + Finished -----
@@ -748,6 +768,15 @@ class SensorTLS(Sensor):
         except Exception as exc:
             _log(f"  TLS({label}) decrypt failed: {exc}")
             return None
+
+    def close(self):
+        """Send vendor shutdown command and release TLS state."""
+        try:
+            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
+                                   timeout=1000)
+        except Exception:
+            pass
+        self.tls = None
 
 
 # ---------------------------------------------------------------------------
@@ -900,6 +929,8 @@ def main():
         print("list-db...")
         sensor.list_enrolled()
 
+    # ----- Cleanup: close TLS session gracefully -----
+    sensor.close()
     print("Done.")
 
 
