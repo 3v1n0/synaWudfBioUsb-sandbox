@@ -981,14 +981,14 @@ class BiometricSensor(SensorTLS):
     # -- Commit / finalization protocol ---
 
     ENROLL_TEMPLATE_FIXED = bytes.fromhex(
-        '39f4010000f4010000077f002000000000'
-        '7f7f000000000000000000000000002000'
-        '0000000000000000000000f4010000007f'
-        '0020000000000000000000000000000000'
-        '0000002000000000000000000000000000'
-        '0000000000000000000000000000000000'
-        '0000000000000000000000000000000000'
-        '0000000000000000')
+        '39f4010000f4010000077f0020000000'
+        '007f7f00000000000000000000000000'
+        '20000000000000000000000000f40100'
+        '00007f00200000000000000000000000'
+        '00000000000000002000000000000000'
+        '00000000000000000000000000000000'
+        '00000000000000000000000000000000'
+        '00000000000000000000000000')
 
     COMMIT_HEADER = bytes.fromhex(
         '9603000000000000007d0000000000100000')
@@ -1189,15 +1189,15 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
-        for i in range(1, 999):
-            ok, guid = self._enroll_one_sample(i, 999)
+        for i in range(1, 20):
+            ok, guid = self._enroll_one_sample(i, 20)
             if not ok:
                 return False
             if guid is not None:
                 return self._commit_enrollment(
                     guid=guid, label="FP1-00000000-0-00000000-none")
 
-        print("  Enrollment aborted after 999 samples")
+        print("  Enrollment aborted after 20 samples")
         return False
 
 
