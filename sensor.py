@@ -760,6 +760,7 @@ class SensorTLS(Sensor):
     def tls_send(self, plain, value, label=""):
         """Encrypt plain as TLS ApplicationData, send, decrypt response."""
         assert self.tls is not None, "call connect() first"
+        _log(f"  tx seq={self.tls.client_seq} plain_len={len(plain)}")
         body = self.tls.encrypt(TLS_APP_DATA, plain)
         rec  = make_tls_record(TLS_APP_DATA, body)
         # Pad to 8-byte alignment (native format)
@@ -1058,7 +1059,7 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('0001'),
             value=7, label="CLOSE_NOTIFY")
 
-    def _commit_enrollment(self, guid, label="FP1-00000000-0-00000000-none"):
+    def _commit_enrollment(self, guid, label="FP1"):
         """
         Full commit finalization sequence (5 steps + close).
         Must be called after 5 successful enrollment samples.
@@ -1078,10 +1079,14 @@ class BiometricSensor(SensorTLS):
         # Step 3: Build + send commit payload
         sid = _rand(16)
         payload = self._build_commit_payload(guid, sid, label)
-        print(f"  Sending commit ({len(payload)}B)...")
+        _hexdump(f"Commit plain ({len(payload)}B)", payload)
+        print(f"  Sending commit ({len(payload)}B) as label '{label}'...")
         resp = self.enroll_commit(payload)
         if resp is None:
-            print("  ENROLL_COMMIT failed")
+            print("  ENROLL_COMMIT failed (TLS Alert)")
+            # Try to log TLS state for debugging
+            if self.tls:
+                _log(f"  client_seq={self.tls.client_seq} server_seq={self.tls.server_seq}")
             return False
         print(f"  Commit response: {resp.hex()}")
 
@@ -1128,8 +1133,9 @@ class BiometricSensor(SensorTLS):
 
         Interrupts: 01=ready, 02=data-captured.
         Two interrupts per sample: before queries and between CHECK/STATUS0.
-        Returns (ok, guid) where guid is 16B from 9602 iff enrollment
-        is complete (None otherwise).
+        Returns (ok, guid, error_type) where guid is 16B from 9602 iff
+        enrollment is complete (None otherwise). error_type is a short
+        string describing the failure, or None.
         """
         print(f"\n--- Sample {sample_num}/{max_samples} ---")
         print("  Touch and hold the sensor...")
@@ -1137,33 +1143,44 @@ class BiometricSensor(SensorTLS):
         cap = self.capture_data()
         if cap is None:
             print("  CAPTURE_DATA failed")
-            return False, None
+            return False, None, "CAPTURE_FAILED"
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
-        self.read_interrupt(timeout=60000)
+        i1 = self.read_interrupt(timeout=60000)
+        if i1 is None:
+            print("  No finger detected (interrupt timeout)")
+            return False, None, "NO_FINGER"
 
         # Pre-capture queries (finger is being placed/held during these)
         self.get_sensor_status(ctx)
         self.query_status_ext(4)
         r = self.query_enrollment_needs()
         if r is None:
-            return False, None
+            return False, None, "NEEDS_FAILED"
         ext1 = self.query_status_ext(1)
-        qual = ext1[-2:] if ext1 else None
-        print(f"  Progress: {struct.unpack('<H', qual)[0] if (qual and len(qual)==2) else '?'}")
+        if ext1 is None:
+            print("  STATUS_EXT(1) failed (finger read error)")
+            return False, None, "FINGER_READ_ERROR"
+        qual = ext1[-2:]
+        print(f"  Progress: {struct.unpack('<H', qual)[0]}")
+
         self.update_enrollment_check()
 
         # Interrupt 2: finger data captured (02)
-        self.read_interrupt(timeout=60000)
+        i2 = self.read_interrupt(timeout=60000)
+        if i2 is None:
+            print("  Finger removed before capture complete")
+            return False, None, "FINGER_REMOVED"
 
         # Post-capture queries
         self.get_sensor_status(0)
         self.query_enrollment_simple()
         ext2 = self.query_status_ext(4)
-        qual2 = ext2[-2:] if ext2 else None
-        _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0] if (qual2 and len(qual2)==2) else 0}")
+        if ext2 is not None:
+            qual2 = ext2[-2:]
+            _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0]}")
         self.update_enrollment_ack()
 
         # 9602 enrollment status
@@ -1172,15 +1189,16 @@ class BiometricSensor(SensorTLS):
         if self._has_guid(r9602):
             guid = r9602[2:18]
             print(f"  GUID: {guid.hex()}")
-            return True, guid
+            return True, guid, None
 
         print(f"  Sample {sample_num} OK")
-        return True, None
+        return True, None, None
 
     def enroll(self):
         """
         Full enrollment flow (interactive).
         Retries captures until a GUID is returned by the device.
+        Tracks finger-read errors.
         """
         print("\n--- Enrollment ---")
         r = self.enroll_begin()
@@ -1189,13 +1207,24 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
+        errors = {"NO_FINGER": 0, "FINGER_READ_ERROR": 0,
+                  "FINGER_REMOVED": 0, "CAPTURE_FAILED": 0,
+                  "NEEDS_FAILED": 0}
+
         for i in range(1, 20):
-            ok, guid = self._enroll_one_sample(i, 20)
-            if not ok:
-                return False
+            ok, guid, err = self._enroll_one_sample(i, 20)
+            if err:
+                errors[err] = errors.get(err, 0) + 1
+                print(f"  Error: {err} (total: {errors})")
+                continue
             if guid is not None:
-                return self._commit_enrollment(
-                    guid=guid, label="FP1-00000000-0-00000000-none")
+                print(f"\n  Error summary: {errors}")
+                for attempt in range(3):
+                    if self._commit_enrollment(guid=guid, label="FP1"):
+                        return True
+                    print(f"  Commit attempt {attempt + 1} failed, retrying...")
+                print("  All commit attempts failed")
+                return False
 
         print("  Enrollment aborted after 20 samples")
         return False
