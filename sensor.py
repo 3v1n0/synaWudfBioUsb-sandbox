@@ -527,28 +527,46 @@ class Sensor:
     HID_EP = 0x81        # HID interrupt IN endpoint (intf 0)
     HID_IF = 0           # HID interface number
 
-    def _ensure_hid_claimed(self):
-        """Claim HID interface (intf 0) if not already claimed."""
-        if getattr(self, '_hid_claimed', False):
-            return
-        cfg = self.dev.get_active_configuration()
-        for inf in cfg:
-            try:
-                if self.dev.is_kernel_driver_active(inf.bInterfaceNumber):
-                    self.dev.detach_kernel_driver(inf.bInterfaceNumber)
-            except:
-                pass
+    def _open_hid_handle(self):
+        """Open a second USB handle for HID (intf 0) to avoid
+        disrupting the main control/intf-1 handle.
+
+        Returns the HID device handle, or None on failure.
+        The caller must release intf 0 and close the handle when done.
+        """
+        vid, pid = [int(x, 16) for x in USB_ID.split(':')]
+        hid_dev = usb.core.find(idVendor=vid, idProduct=pid)
+        if hid_dev is None:
+            _log("HID: could not find device")
+            return None
         try:
-            usb.util.claim_interface(self.dev, self.HID_IF)
+            hid_dev.set_configuration()
+        except usb.core.USBError:
+            pass
+        try:
+            if hid_dev.is_kernel_driver_active(0):
+                hid_dev.detach_kernel_driver(0)
+        except:
+            pass
+        try:
+            usb.util.claim_interface(hid_dev, 0)
         except usb.core.USBError as exc:
-            _log(f"HID claim: {exc}")
-        self._hid_claimed = True
+            _log(f"HID: claim intf 0 failed: {exc}")
+            return None
+        return hid_dev
 
     def read_hid_report(self, timeout=3000):
-        """Read a HID input report from EP 0x81. Returns bytes or None."""
-        self._ensure_hid_claimed()
+        """Read a HID input report from EP 0x81 via separate handle.
+
+        Opens a dedicated handle, reads once, and closes it
+        to avoid interfering with the main device handle.
+        Returns bytes or None.
+        """
+        hid_dev = self._open_hid_handle()
+        if hid_dev is None:
+            return None
         try:
-            resp = bytes(self.dev.read(self.HID_EP, 64, timeout=timeout))
+            resp = bytes(hid_dev.read(self.HID_EP, 64, timeout=timeout))
             _log(f"HID ({len(resp)}B): {resp.hex()}")
             return resp
         except usb.core.USBError as exc:
@@ -556,6 +574,15 @@ class Sensor:
                 _log("HID read timeout")
                 return None
             raise
+        finally:
+            try:
+                usb.util.release_interface(hid_dev, 0)
+            except:
+                pass
+            try:
+                usb.util.dispose_resources(hid_dev)
+            except:
+                pass
 
     @staticmethod
     def parse_hid_quality(report):
@@ -1032,15 +1059,8 @@ class BiometricSensor(SensorTLS):
         assert len(payload) == 37
         resp = self.tls_send(payload, value=2, label="CAPTURE_DATA")
         ss, rd = self._parse_capture_response(resp)
-        if ss == 1:
-            print("  Finger ON")
-        else:
-            detail_map = {7: "WINBIO_FP_POOR_QUALITY"}
-            detail_name = detail_map.get(rd, f"0x{rd:x}")
-            print(f"  Finger OFF -- Capture rejected: SensorStatus={ss} "
-                  f"RejectDetail=0x{rd:x} ({detail_name})")
-            if resp is not None and len(resp) == 66:
-                _log(f"  CAPTURE_DATA resp: {resp.hex()}")
+        if resp is not None and len(resp) == 66:
+            _log(f"  CAPTURE_DATA resp: {resp.hex()}")
         return resp, ss, rd
 
     def get_sensor_status(self, ctx=0):
@@ -1321,23 +1341,30 @@ class BiometricSensor(SensorTLS):
             print("  CAPTURE_DATA failed")
             cap = b''
         elif sensor_status != 1:
-            print(f"  CAPTURE rejected (status={sensor_status})")
-            # No finger or hardware rejection -- outer loop will
-            # prompt user to touch again.
+            print("  No finger detected")
             return False, None
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
         # Read HID report for quality bitmask.  The sensor sends
         # 0x12-prefixed reports via EP 0x81 after each capture.
-        hid = self.read_hid_report(timeout=500)
+        hid = None
+        try:
+            hid = self.read_hid_report(timeout=500)
+        except Exception as exc:
+            _log(f"HID read error: {exc}")
         if hid is not None:
             rd, raw = self.parse_hid_quality(hid)
             if rd != 0:
-                print(f"  HID quality reject: detail={rd}"
-                      f" (raw bitmask=0x{raw:016x})")
+                detail_names = {3: "TOO_LEFT", 4: "TOO_RIGHT",
+                                5: "TOO_FAST", 6: "TOO_SLOW",
+                                7: "POOR_QUALITY", 8: "TOO_SKEWED",
+                                9: "TOO_SHORT"}
+                name = detail_names.get(rd, f"0x{rd:x}")
+                print(f"  Capture rejected: {name}"
+                      f" (detail={rd}, bitmask=0x{raw:016x})")
                 return False, None
-            _log(f"  HID quality OK (bitmask=0x{raw:016x})")
+        print("  Finger ON")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
         i1 = self.read_interrupt(timeout=60000)
