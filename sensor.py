@@ -816,10 +816,32 @@ class BiometricSensor(SensorTLS):
     """
 
     def get_record_count(self):
-        """Send GET_RECORD_COUNT, return raw response."""
-        return self.tls_send(
+        """
+        Send GET_RECORD_COUNT (8200...).
+        Returns status from response[0:2] (0x0000 = OK).
+        The raw 34-byte response is a fixed status block,
+        NOT the actual count.  Use get_storage_count() for
+        the real number of records.
+        """
+        resp = self.tls_send(
             bytes.fromhex('820000000000000207'),
             value=6, label="GET_RECORD_COUNT")
+        if resp is None or len(resp) < 2:
+            return 0x800703e5  # WINBIO_E_INVALID_DEVICE_STATE
+        return struct.unpack('<H', resp[:2])[0]
+
+    def get_storage_count(self):
+        """
+        Full storage query sequence to obtain the actual record count.
+        Returns (status, count, guids) where count = len(guids).
+        """
+        status = self.get_record_count()
+        if status != 0:
+            return status, 0, []
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        guids = self.storage_query_all()
+        return 0, len(guids), guids
 
     def storage_query_init(self, n):
         """Send STORAGE_QUERY_INIT (call twice before QUERY_ALL)."""
@@ -861,12 +883,8 @@ class BiometricSensor(SensorTLS):
         Full list-db sequence. Returns list of (guid, record_data) for
         all non-empty slots. Prints results to stdout.
         """
-        self.get_record_count()
-
-        self.storage_query_init(1)
-        self.storage_query_init(2)
-
-        guids = self.storage_query_all()
+        status, count, guids = self.get_storage_count()
+        _log(f"Storage count: status=0x{status:04x} count={count}")
         if not guids:
             print("No storage slots found.")
             return []
@@ -895,10 +913,28 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('96010000000000000000000000'),
             value=2, label="ENROLL_BEGIN")
 
+    @staticmethod
+    def _parse_capture_response(resp):
+        """
+        Parse 66-byte CAPTURE_DATA device response.
+        Returns (sensor_status, reject_detail) per WINBIO:
+          sensor_status=0 -> ready/ok
+          sensor_status=2 -> reject (WINBIO_SENSOR_REJECT)
+          reject_detail=7  -> WINBIO_FP_POOR_QUALITY
+        Fields confirmed from decompiled OnCaptureData:
+          bVar1 = *(byte *)(resp + 4)    # SensorStatus
+          bVar2 = *(byte *)(resp + 0x1c) # RejectDetail
+        """
+        if resp is None or len(resp) < 0x1d:
+            return 3, 0  # WINBIO_SENSOR_FAILURE
+        ss = resp[4]       # byte at offset 4 = SensorStatus
+        rd = resp[0x1c]    # byte at offset 28 = RejectDetail
+        return ss, rd
+
     def capture_data(self, subfactor=6):
         """
         Send CAPTURE_DATA (value=0x0002).
-        Returns 66-byte response; finger interrupt follows.
+        Returns (resp, sensor_status, reject_detail).
         37-byte payload: 86 <subf> 00*15 <subf> 00*19
         """
         payload = (bytes([0x86, subfactor])
@@ -906,7 +942,14 @@ class BiometricSensor(SensorTLS):
                    + bytes([subfactor])
                    + b'\x00' * 19)
         assert len(payload) == 37
-        return self.tls_send(payload, value=2, label="CAPTURE_DATA")
+        resp = self.tls_send(payload, value=2, label="CAPTURE_DATA")
+        ss, rd = self._parse_capture_response(resp)
+        if ss != 0:
+            detail_map = {7: "WINBIO_FP_POOR_QUALITY"}
+            detail_name = detail_map.get(rd, f"0x{rd:x}")
+            print(f"  Capture rejected: SensorStatus={ss} "
+                  f"RejectDetail=0x{rd:x} ({detail_name})")
+        return resp, ss, rd
 
     def get_sensor_status(self, ctx=0):
         """
@@ -1076,9 +1119,20 @@ class BiometricSensor(SensorTLS):
         resp = self.tls_send(self.ENROLL_TEMPLATE_FIXED,
                              value=2, label="ENROLL_TEMPLATE")
         if resp is None:
-            print("  ENROLL_TEMPLATE failed")
+            print("  ENROLL_TEMPLATE failed (TLS error)")
+            return False
+        ts, pc, rd = self._parse_template_status(resp)
+        if ts != 0:
+            err_map = {0x80098018: "WINBIO_E_DATABASE_FULL",
+                       0x800703e5: "WINBIO_E_INVALID_DEVICE_STATE",
+                       0x80067ff5: "WINBIO_E_INCORRECT_SESSION"}
+            err_name = err_map.get(ts, f"0x{ts:08x}")
+            print(f"  ENROLL_TEMPLATE rejected: "
+                  f"TemplateStatus={err_name} "
+                  f"PercentComplete={pc} RejectDetail=0x{rd:x}")
             return False
         print(f"  Template response: {resp.hex()}")
+        _log(f"  TemplateStatus={ts:#x} PC={pc} RD=0x{rd:x}")
 
         # Step 3: Build + send commit payload
         sid = _rand(16)
@@ -1132,6 +1186,30 @@ class BiometricSensor(SensorTLS):
         """True if a 9602 response contains a valid GUID at [2:18]."""
         return resp is not None and len(resp) >= 18 and resp[2:18] != b'\x00' * 16
 
+    @staticmethod
+    def _parse_template_status(resp):
+        """
+        Parse 66-byte ENROLL_TEMPLATE (39f4) response.
+        Returns (template_status_hr, percent_complete, reject_detail).
+        template_status_hr == 0 means success.
+        Offsets from decompiled OnUpdateEnrollment / EIS parsing:
+          [2:6]  - TemplateStatus (HRESULT, LE u32, offset 2)
+                 - 0x0006 = continuation/success marker
+          [12:16] - PercentComplete (ULONG, LE u32, offset 12)
+          [8:12]  - RejectDetail (ULONG, LE u32, offset 8)
+        """
+        if resp is None or len(resp) < 16:
+            return 0x800703e5, 0, 0
+        # At offset 2: value 0x00000006 = "in progress ok", value 0 = done?
+        ts_raw = struct.unpack('<I', resp[2:6])[0]
+        if ts_raw == 0 or ts_raw == 6:
+            ts = 0
+        else:
+            ts = ts_raw
+        pc = struct.unpack('<I', resp[12:16])[0]
+        rd = struct.unpack('<I', resp[8:12])[0]
+        return ts, pc, rd
+
     def _enroll_one_sample(self, sample_num, max_samples):
         """One enrollment sample, matching b.exe trace exactly.
 
@@ -1144,10 +1222,13 @@ class BiometricSensor(SensorTLS):
         print(f"\n--- Sample {sample_num}/{max_samples} ---")
         print("  Touch and hold the sensor...")
 
-        cap = self.capture_data()
-        ok = cap is not None
-        if not ok:
+        cap, sensor_status, reject_detail = self.capture_data()
+        ok = cap is not None and sensor_status == 0
+        if cap is None:
             print("  CAPTURE_DATA failed")
+            cap = b''
+        elif sensor_status != 0:
+            print(f"  CAPTURE rejected (status={sensor_status})")
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
@@ -1206,10 +1287,20 @@ class BiometricSensor(SensorTLS):
     def enroll(self):
         """
         Full enrollment flow (interactive).
-        Completes each sample fully to keep device protocol in sync.
+        Checks DB capacity first, then completes each sample fully.
         Errors (no finger, bad scan) are skipped without counting.
         """
         print("\n--- Enrollment ---")
+
+        # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
+        status, count, _ = self.get_storage_count()
+        print(f"  DB records: {count}")
+        if status != 0:
+            print(f"  Storage query status=0x{status:04x}")
+        if count >= 10:
+            print("  Database is full! Cannot enroll more fingerprints.")
+            return False
+
         r = self.enroll_begin()
         if r is None:
             print("  ENROLL_BEGIN failed")
