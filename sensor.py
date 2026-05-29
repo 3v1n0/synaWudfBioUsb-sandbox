@@ -891,7 +891,7 @@ class BiometricSensor(SensorTLS):
     def capture_data(self, subfactor=6):
         """
         Send CAPTURE_DATA (value=0x0002).
-        Device responds immediately; finger interrupt follows later.
+        Returns 66-byte response; finger interrupt follows.
         37-byte payload: 86 <subf> 00*15 <subf> 00*19
         """
         payload = (bytes([0x86, subfactor])
@@ -901,17 +901,20 @@ class BiometricSensor(SensorTLS):
         assert len(payload) == 37
         return self.tls_send(payload, value=2, label="CAPTURE_DATA")
 
-    def get_sensor_status(self):
-        """Query sensor status (value=0x0006). Returns 18-byte response."""
-        return self.tls_send(
-            bytes.fromhex('870400200001000000'),
-            value=6, label="GET_SENSOR_STATUS")
+    def get_sensor_status(self, ctx=0):
+        """
+        Query sensor status (value=0x0006, 9 bytes).
+        ctx is the enrollment context byte extracted from CAPTURE_DATA
+        response[-2:] (LE u16).  Returns 18-byte response.
+        """
+        payload = bytes([0x87, ctx]) + bytes.fromhex('00200001000000')
+        return self.tls_send(payload, value=6,
+                             label=f"SENSOR_STATUS(ctx={ctx})")
 
     def update_enrollment_check(self):
         """
         Send UPDATE_ENROLLMENT check (value=0x0006).
         17-byte payload: 800c + zeros + flags + subfactor.
-        Returns cb05 if template data needed, 0000 if ok.
         """
         payload = bytes.fromhex(
             '800c000000010000000100000801010100')
@@ -922,12 +925,6 @@ class BiometricSensor(SensorTLS):
         return self.tls_send(
             bytes.fromhex('81'),
             value=6, label="UPDATE_ENROLL_ACK")
-
-    def update_enrollment_submit(self, template_data):
-        """Submit enrollment template data (value=0x0002, 125 bytes)."""
-        assert len(template_data) == 125
-        return self.tls_send(template_data, value=2,
-                             label="UPDATE_ENROLL_SUBMIT")
 
     def query_enrollment_needs(self):
         """
@@ -950,18 +947,18 @@ class BiometricSensor(SensorTLS):
         """
         Extended status query (value=0x0002, 37 bytes).
         86 00 <00*15> <param> <00*19>
-        b.exe sends param=04 after first capture, param=01 after second.
+        param=04 for initial capture, param=01 for quality check.
         """
         payload = (bytes([0x86, 0]) + b'\x00' * 15
                    + bytes([param]) + b'\x00' * 19)
         assert len(payload) == 37
-        return self.tls_send(payload, value=2, label="QUERY_STATUS_EXT")
+        return self.tls_send(payload, value=2,
+                             label=f"STATUS_EXT(param={param})")
 
     def query_enrollment_simple(self):
         """
         Simplified enrollment query (value=0x0002, 125 bytes).
-        39 00 00 00 ... (all zeros except periodic 0x20).
-        Used in trace after 2nd finger.
+        39 00 ... (zeros with periodic 0x20 pattern).
         """
         return self.tls_send(
             bytes.fromhex(
@@ -1055,18 +1052,12 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('0001'),
             value=7, label="CLOSE_NOTIFY")
 
-    def _commit_enrollment(self, label="FP1-00000000-0-00000000-none"):
+    def _commit_enrollment(self, guid, label="FP1-00000000-0-00000000-none"):
         """
         Full commit finalization sequence (5 steps + close).
         Must be called after 5 successful enrollment samples.
         """
         print("\n--- Commit enrollment ---")
-
-        # Step 1: Get GUID
-        guid = self.enroll_get_guid()
-        if guid is None or len(guid) != 16:
-            print(f"  ENROLL_GET_GUID failed: got {guid.hex() if guid else None}")
-            return False
         print(f"  GUID: {guid.hex()}")
 
         # Step 2: Submit fixed template
@@ -1114,80 +1105,107 @@ class BiometricSensor(SensorTLS):
         print("  Commit done!")
         return True
 
-    def _capture_done(self, cap_resp):
-        """Check last bytes of CAPTURE_DATA response: 00* means no data."""
-        return cap_resp[-4:] != b'\x00\x00\x00\x00'
+    @staticmethod
+    def _extract_ctx(cap_resp):
+        """Extract enrollment context from CAPTURE_DATA response[-2:] as LE u16."""
+        if cap_resp is None or len(cap_resp) < 2:
+            return 0
+        return struct.unpack('<H', cap_resp[-2:])[0]
+
+    @staticmethod
+    def _has_guid(resp):
+        """True if a 9602 response contains a valid GUID at [2:18]."""
+        return resp is not None and len(resp) >= 18 and resp[2:18] != b'\x00' * 16
+
+    def _enroll_one_sample(self, sample_num, max_samples):
+        """One enrollment sample: capture, process, query, ack.
+
+        Follows the exact sequence from b.exe successful trace:
+        CAPTURE -> interrupt -> STATUS -> EXT4 -> NEEDS -> EXT1
+        -> CHECK -> STATUS0 -> SIMPLE -> EXT4 -> ACK -> 9602.
+        Returns (ok, guid) where guid is the 16B value from 9602 iff
+        enrollment is complete (None otherwise).
+        """
+        print(f"\n--- Sample {sample_num}/{max_samples} ---")
+        print("  Place and HOLD finger on sensor...")
+
+        cap = self.capture_data()
+        if cap is None:
+            print("  CAPTURE_DATA failed")
+            return False, None
+        ctx = self._extract_ctx(cap)
+        _log(f"  ctx={ctx}")
+
+        intr = self.read_interrupt(timeout=60000)
+        if intr is None:
+            print("  No finger (timeout)")
+            return False, None
+        print(f"  Finger detected")
+
+        # Step A: sensor status with capture context
+        self.get_sensor_status(ctx)
+        # Step B: extended status (param=4)
+        self.query_status_ext(4)
+        # Step C: query enrollment needs
+        r = self.query_enrollment_needs()
+        if r is None:
+            return False, None
+        # Step D: extended status (param=1) -- quality/progress
+        ext1 = self.query_status_ext(1)
+        qual = ext1[-2:] if ext1 else b'??'
+        print(f"  Progress: {struct.unpack('<H', qual)[0] if len(qual)==2 else 0}")
+        # Step E: update enrollment check
+        self.update_enrollment_check()
+        # Step F: sensor status (ctx=0)
+        self.get_sensor_status(0)
+        # Step G: simple enrollment query
+        self.query_enrollment_simple()
+        # Step H: extended status (param=4) -- second quality/progress
+        ext2 = self.query_status_ext(4)
+        qual2 = ext2[-2:] if ext2 else b'??'
+        _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0] if len(qual2)==2 else 0}")
+        # Step I: enrollment ack
+        self.update_enrollment_ack()
+
+        # Step J: 9602 enrollment status query
+        r9602 = self.tls_send(bytes.fromhex('9602000000'),
+                               value=2, label="ENROLL_STATUS")
+        if self._has_guid(r9602):
+            guid = r9602[2:18]
+            print(f"  GUID: {guid.hex()}")
+            return True, guid
+
+        print(f"  Sample {sample_num} OK")
+        return True, None
 
     def enroll(self):
         """
         Full enrollment flow (interactive).
-        User is prompted to touch and hold the sensor for each sample.
+        After 5 touches the device returns a GUID and we finalize.
         """
         print("\n--- Enrollment ---")
-        resp = self.enroll_begin()
-        if resp is None:
-            print("  ENROLL_BEGIN failed (no response)")
+        r = self.enroll_begin()
+        if r is None:
+            print("  ENROLL_BEGIN failed")
             return False
-        print(f"  ENROLL_BEGIN => {resp.hex()}")
+        print(f"  ENROLL_BEGIN: {r.hex()}")
 
         max_samples = 5
-        sample_num = 0
-
-        while sample_num < max_samples:
-            sample_num += 1
-            print(f"\n--- Sample {sample_num}/{max_samples} ---")
-            print("  Place and HOLD finger on sensor...")
-
-            resp = self.capture_data()
-            if resp is None:
-                print("  CAPTURE_DATA failed")
+        guid = None
+        for i in range(1, max_samples + 1):
+            ok, g = self._enroll_one_sample(i, max_samples)
+            if not ok:
                 return False
-            print(f"  CAPTURE_DATA => ...{resp[-4:].hex()}")
+            if g is not None:
+                guid = g
+                break
 
-            intr = self.read_interrupt(timeout=60000)
-            if intr is None:
-                print("  No finger (timeout)")
-                return False
-            print(f"  Finger interrupt: {intr.hex()}")
+        if guid is None:
+            print("\n  Enrollment did not complete (no GUID after 5 samples)")
+            return False
 
-            status = self.get_sensor_status()
-            if status is None:
-                print("  GET_SENSOR_STATUS failed")
-                return False
-            print(f"  Sensor status: {status.hex()}")
-
-            # Query enrollment needs
-            needs = self.query_enrollment_needs()
-            if needs is None:
-                return False
-            print(f"  Needs {needs[0]} samples" if len(needs) >= 2
-                  else f"  ENROLL_NEEDS => {needs.hex()}")
-
-            # Extended status query -- last 4 bytes encode capture quality
-            ext = self.query_status_ext(0x04 if sample_num == 1 else 0x01)
-            if ext is None:
-                return False
-            qual = ext[-4:]
-            print(f"  Capture quality: {qual.hex()}")
-
-            # Check if we actually got capture data: quality should be 0400 or higher
-            # 0100/0200 = finger removed too fast
-            if qual[2] < 4:
-                print(f"  Quality {qual[2]} < 4 -- retrying (hold finger longer)")
-                sample_num -= 1
-                continue
-
-            # Enrollment update sequence
-            self.update_enrollment_check()
-            self.update_enrollment_ack()
-            self.update_enrollment_check()
-
-            print(f"  Sample {sample_num} OK")
-
-        print("\n  All samples captured!")
-        result = self._commit_enrollment(
-            label="FP1-00000000-0-00000000-none")
-        return result
+        return self._commit_enrollment(
+            guid=guid, label="FP1-00000000-0-00000000-none")
 
 
 # ---------------------------------------------------------------------------
