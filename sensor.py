@@ -1035,15 +1035,6 @@ class BiometricSensor(SensorTLS):
                 return False
             print(f"  Sensor status: {status.hex()}")
 
-            # Check whether capture actually got data
-            if status == b'\x00' * 12:
-                print("  No capture data (finger removed too fast?)")
-                # Still query needs so device knows we're alive
-                self.query_enrollment_needs()
-                self.query_status_ext(0x04)
-                sample_num -= 1  # retry
-                continue
-
             # Query enrollment needs
             needs = self.query_enrollment_needs()
             if needs is None:
@@ -1051,24 +1042,24 @@ class BiometricSensor(SensorTLS):
             print(f"  Needs {needs[0]} samples" if len(needs) >= 2
                   else f"  ENROLL_NEEDS => {needs.hex()}")
 
-            # Extended status query
+            # Extended status query -- last 4 bytes encode capture quality
             ext = self.query_status_ext(0x04 if sample_num == 1 else 0x01)
             if ext is None:
                 return False
-            cap_bytes = ext[-4:]
-            print(f"  Capture quality: {cap_bytes.hex()}")
+            qual = ext[-4:]
+            print(f"  Capture quality: {qual.hex()}")
+
+            # Check if we actually got capture data: quality should be 0400 or higher
+            # 0100/0200 = finger removed too fast
+            if qual[2] < 4:
+                print(f"  Quality {qual[2]} < 4 -- retrying (hold finger longer)")
+                sample_num -= 1
+                continue
 
             # Enrollment update sequence
             self.update_enrollment_check()
             self.update_enrollment_ack()
             self.update_enrollment_check()
-
-            # After 2nd+ sample, send simple enrollment query
-            if sample_num >= 2:
-                simp = self.query_enrollment_simple()
-                if simp is None:
-                    # Non-fatal if this fails (session-specific)
-                    print("  (simple query skipped)")
 
             print(f"  Sample {sample_num} OK")
 
