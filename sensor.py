@@ -1021,15 +1021,8 @@ class BiometricSensor(SensorTLS):
         assert len(payload) == 37
         resp = self.tls_send(payload, value=2, label="CAPTURE_DATA")
         ss, rd = self._parse_capture_response(resp)
-        if ss == 1:
-            print("  Finger ON")
-        else:
-            detail_map = {7: "WINBIO_FP_POOR_QUALITY"}
-            detail_name = detail_map.get(rd, f"0x{rd:x}")
-            print(f"  Finger OFF -- Capture rejected: SensorStatus={ss} "
-                  f"RejectDetail=0x{rd:x} ({detail_name})")
-            if resp is not None and len(resp) == 66:
-                _log(f"  CAPTURE_DATA resp: {resp.hex()}")
+        if resp is not None and len(resp) == 66:
+            _log(f"  CAPTURE_DATA resp: {resp.hex()}")
         return resp, ss, rd
 
     def get_sensor_status(self, ctx=0):
@@ -1315,22 +1308,28 @@ class BiometricSensor(SensorTLS):
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
-        # HID quality check (non-blocking, 500ms timeout).
-        hid = None
-        try:
-            hid = self.read_hid_report(timeout=500)
-        except Exception as exc:
-            _log(f"HID error: {exc}")
-        if hid is not None:
-            rd, raw = self.parse_hid_quality(hid)
-            if rd != 0:
-                detail_names = {3: "TOO_LEFT", 4: "TOO_RIGHT",
-                                5: "TOO_FAST", 6: "TOO_SLOW",
-                                7: "POOR_QUALITY", 8: "TOO_SKEWED",
-                                9: "TOO_SHORT"}
-                print(f"  Capture rejected: {detail_names.get(rd, f'0x{rd:x}')}"
-                      f" (detail={rd})")
-                return False, None
+        # HID quality check: the decompiled driver reads a 0x12-prefixed
+        # 7-byte bitmask from EP 0x81 after each capture.  The bitmask
+        # is mapped through FUN_18000d054 to WINBIO reject values.
+        if os.environ.get("HID_QUALITY", "1") != "0":
+            hid = None
+            try:
+                hid = self.read_hid_report(timeout=200)
+            except Exception as exc:
+                _log(f"HID error: {exc}")
+            if hid is not None:
+                _log(f"HID report: {hid.hex()}")
+                rd, raw = self.parse_hid_quality(hid)
+                if rd != 0:
+                    detail_names = {3: "TOO_LEFT", 4: "TOO_RIGHT",
+                                    5: "TOO_FAST", 6: "TOO_SLOW",
+                                    7: "POOR_QUALITY", 8: "TOO_SKEWED",
+                                    9: "TOO_SHORT"}
+                    print(f"  Capture rejected: {detail_names.get(rd, f'0x{rd:x}')}"
+                          f" (detail={rd})")
+                    return False, None
+            else:
+                _log("HID: no report")
         print("  Finger ON")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
