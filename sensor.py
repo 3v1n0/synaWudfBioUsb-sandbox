@@ -957,10 +957,12 @@ class BiometricSensor(SensorTLS):
         assert len(payload) == 37
         resp = self.tls_send(payload, value=2, label="CAPTURE_DATA")
         ss, rd = self._parse_capture_response(resp)
-        if ss != 1:
+        if ss == 1:
+            print("  Finger ON")
+        else:
             detail_map = {7: "WINBIO_FP_POOR_QUALITY"}
             detail_name = detail_map.get(rd, f"0x{rd:x}")
-            print(f"  Capture rejected: SensorStatus={ss} "
+            print(f"  Finger OFF -- Capture rejected: SensorStatus={ss} "
                   f"RejectDetail=0x{rd:x} ({detail_name})")
             if resp is not None and len(resp) == 66:
                 _log(f"  CAPTURE_DATA resp: {resp.hex()}")
@@ -1256,6 +1258,9 @@ class BiometricSensor(SensorTLS):
         if i1 is None:
             print("  No finger detected (interrupt timeout)")
             return False, None
+        i1_type = i1[0] if len(i1) > 0 else 0
+        print(f"  Interrupt: type=0x{i1_type:02x}"
+              f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})")
 
         # Pre-capture queries (finger is being placed/held)
         self.get_sensor_status(ctx)
@@ -1279,6 +1284,10 @@ class BiometricSensor(SensorTLS):
         if i2 is None:
             print("  Finger removed before capture complete")
             ok = False
+        else:
+            i2_type = i2[0] if len(i2) > 0 else 0
+            print(f"  Interrupt: type=0x{i2_type:02x}"
+                  f" ({'capture armed' if i2_type==1 else 'data captured' if i2_type==2 else 'unknown'})")
 
         # Post-capture queries
         self.get_sensor_status(0)
