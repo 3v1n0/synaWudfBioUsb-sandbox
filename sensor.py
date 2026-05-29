@@ -929,90 +929,157 @@ class BiometricSensor(SensorTLS):
         return self.tls_send(template_data, value=2,
                              label="UPDATE_ENROLL_SUBMIT")
 
-    def _query_template_data(self):
+    def query_enrollment_needs(self):
         """
-        Build the 125-byte template update payload.
-        This is the '39...' format seen in trace after 2nd finger detection.
+        Query device's enrollment requirements (value=0x0002).
+        125-byte payload: 39 00 71 02 00 ff ff ...
         """
-        return bytes.fromhex(
-            '39e8030000f4010000077f00207f7f'
-            '000000000000000000000020000000'
-            '00000000000000000000f401000000'
-            '7f0020000000000000000000000000'
-            '000000000020000000000000000000'
-            '000000000000000000000000000000'
-            '000000000000000000000000000000'
-            '000000000000000000000000')
+        return self.tls_send(
+            bytes.fromhex(
+                '3900710200ffff0000057f00200000'
+                '00007f7f000000000000ffff000005'
+                '7f0020000000007f7f000000000000'
+                'ffff0000057f0020000000007f7f00'
+                '000000000000000000000000000000'
+                '000000000000000000000000000000'
+                '000000000000000000000000000000'
+                '000000000000000000000000'),
+            value=2, label="QUERY_ENROLL_NEEDS")
+
+    def query_status_ext(self, param=0):
+        """
+        Extended status query (value=0x0002, 37 bytes).
+        86 00 <00*15> <param> <00*19>
+        b.exe sends param=04 after first capture, param=01 after second.
+        """
+        payload = (bytes([0x86, 0]) + b'\x00' * 15
+                   + bytes([param]) + b'\x00' * 19)
+        assert len(payload) == 37
+        return self.tls_send(payload, value=2, label="QUERY_STATUS_EXT")
+
+    def query_enrollment_simple(self):
+        """
+        Simplified enrollment query (value=0x0002, 125 bytes).
+        39 00 00 00 ... (all zeros except periodic 0x20).
+        Used in trace after 2nd finger.
+        """
+        return self.tls_send(
+            bytes.fromhex(
+                '39000000000000000000000020000000'
+                '00000000000000000000000000000000'
+                '20000000000000000000000000000000'
+                '00000020000000000000000000000000'
+                '00000000000020000000000000000000'
+                '00000000000000000020000000000000'
+                '00000000000000000000002000000000'
+                '000000000000000000000000'),
+            value=2, label="QUERY_ENROLL_SIMPLE")
+
+    def submit_template(self):
+        """
+        Submit enrollment template (value=0x0002, 125 bytes).
+        This is session-specific but the format is known from trace.
+        Returns response.
+        """
+        return self.tls_send(
+            bytes.fromhex(
+                '39e8030000f4010000077f00207f7f'
+                '00000000000000000000000000000000'
+                '00200000000000000000000000f40100'
+                '00007f00200000000000000000000000'
+                '00000000000020000000000000000000'
+                '00000000000000000000000000000000'
+                '00000000000000000000000000000000'
+                '0000000000000000000000000000'),
+            value=2, label="SUBMIT_TEMPLATE")
+
+    def _capture_done(self, cap_resp):
+        """Check last bytes of CAPTURE_DATA response: 00* means no data."""
+        return cap_resp[-4:] != b'\x00\x00\x00\x00'
 
     def enroll(self):
         """
         Full enrollment flow (interactive).
-        User is prompted to touch the sensor for each sample.
+        User is prompted to touch and hold the sensor for each sample.
         """
         print("\n--- Enrollment ---")
-
-        # 1. Begin enrollment
-        print("Starting enrollment session...")
         resp = self.enroll_begin()
         if resp is None:
             print("  ENROLL_BEGIN failed (no response)")
             return False
         print(f"  ENROLL_BEGIN => {resp.hex()}")
 
-        sample_num = 0
         max_samples = 5
+        sample_num = 0
 
         while sample_num < max_samples:
             sample_num += 1
             print(f"\n--- Sample {sample_num}/{max_samples} ---")
-            print("Please touch the sensor now...")
+            print("  Place and HOLD finger on sensor...")
 
-            # 2. Capture data - this returns immediately, device waits for finger
             resp = self.capture_data()
             if resp is None:
-                print("  CAPTURE_DATA failed (no response)")
+                print("  CAPTURE_DATA failed")
                 return False
-            print(f"  CAPTURE_DATA => {resp[:32].hex()}...")
+            print(f"  CAPTURE_DATA => ...{resp[-4:].hex()}")
 
-            # 3. Wait for finger interrupt (blocking up to 60s)
-            print("  Waiting for finger (60s timeout)...")
             intr = self.read_interrupt(timeout=60000)
             if intr is None:
-                print("  No finger detected (timeout)")
+                print("  No finger (timeout)")
                 return False
             print(f"  Finger interrupt: {intr.hex()}")
 
-            # 4. Query sensor status
             status = self.get_sensor_status()
             if status is None:
                 print("  GET_SENSOR_STATUS failed")
                 return False
             print(f"  Sensor status: {status.hex()}")
 
-            # 5. Update enrollment
-            if sample_num == 1:
-                resp = self.update_enrollment_check()
-                if resp is None:
-                    return False
-                print(f"  UPDATE_ENROLL_CHECK => {resp.hex()}")
-                if resp == bytes.fromhex('cb05'):
-                    resp = self.update_enrollment_ack()
-                    if resp is None:
-                        return False
-                    print(f"  UPDATE_ENROLL_ACK => {resp.hex()}")
-                    resp = self.update_enrollment_check()
-                    if resp is None:
-                        return False
-                    print(f"  UPDATE_ENROLL_CHECK2 => {resp.hex()}")
+            # Check whether capture actually got data
+            if status == b'\x00' * 12:
+                print("  No capture data (finger removed too fast?)")
+                # Still query needs so device knows we're alive
+                self.query_enrollment_needs()
+                self.query_status_ext(0x04)
+                sample_num -= 1  # retry
+                continue
 
-            # 6. Submit template data
-            tmpl = self._query_template_data()
-            resp = self.update_enrollment_submit(tmpl)
-            if resp is None:
+            # Query enrollment needs
+            needs = self.query_enrollment_needs()
+            if needs is None:
                 return False
-            print(f"  UPDATE_ENROLL_SUBMIT => {resp.hex()}")
+            print(f"  Needs {needs[0]} samples" if len(needs) >= 2
+                  else f"  ENROLL_NEEDS => {needs.hex()}")
 
-        print("\nEnrollment flow complete")
+            # Extended status query
+            ext = self.query_status_ext(0x04 if sample_num == 1 else 0x01)
+            if ext is None:
+                return False
+            cap_bytes = ext[-4:]
+            print(f"  Capture quality: {cap_bytes.hex()}")
+
+            # Enrollment update sequence
+            self.update_enrollment_check()
+            self.update_enrollment_ack()
+            self.update_enrollment_check()
+
+            # After 2nd+ sample, send simple enrollment query
+            if sample_num >= 2:
+                simp = self.query_enrollment_simple()
+                if simp is None:
+                    # Non-fatal if this fails (session-specific)
+                    print("  (simple query skipped)")
+
+            print(f"  Sample {sample_num} OK")
+
+        print("\n  All samples captured, submitting template...")
+        resp = self.submit_template()
+        if resp is None:
+            print("  SUBMIT_TEMPLATE failed")
+            return False
+        print(f"  SUBMIT_TEMPLATE => {resp.hex()}")
+
+        print("\nEnrollment complete!")
         return True
 
 
