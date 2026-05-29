@@ -914,6 +914,12 @@ class BiometricSensor(SensorTLS):
             value=2, label="ENROLL_BEGIN")
 
     @staticmethod
+    def _has_marker(resp):
+        """True if the 66-byte response has the 0x06 'sensor-ok' marker at [2:6]."""
+        return (resp is not None and len(resp) >= 6
+                and struct.unpack('<I', resp[2:6])[0] == 6)
+
+    @staticmethod
     def _parse_capture_response(resp):
         """
         Parse 66-byte CAPTURE_DATA device response.
@@ -924,19 +930,18 @@ class BiometricSensor(SensorTLS):
 
         The 66-byte USB response has a "sensor-ready" marker at
         [2:6] (LE u32): value 6 = WINBIO_I_MORE_DATA means the
-        sensor accepted; value 0 means rejected.  The decompiled
-        OnCaptureData reads from the IOCTL output buffer where
-        the driver stores the decoded values at offset 4 and 0x1c,
-        NOT from the raw USB response.  We detect rejection by the
-        missing 0x06 marker.
+        sensor accepted the physical capture; value 0 means the
+        hardware rejected it (no finger, bad placement, etc.).
+
+        NOTE: the 0x06 marker only appears in CAPTURE_DATA
+        responses, NOT in STATUS_EXT responses.  The driver's
+        algorithm-level quality rejection (WINBIO_FP_POOR_QUALITY)
+        cannot be reliably detected from raw USB data alone.
         """
         if resp is None or len(resp) < 6:
             return 3, 0  # WINBIO_SENSOR_FAILURE
-        marker = struct.unpack('<I', resp[2:6])[0]
-        if marker == 6:
+        if BiometricSensor._has_marker(resp):
             return 1, 0   # sensor_status=1 (ok), no reject
-        # Rejected — sensor_status=2, reject_detail depends on response
-        # (only WINBIO_FP_POOR_QUALITY = 7 seen so far)
         return 2, 7
 
     def capture_data(self, subfactor=6):
@@ -1231,6 +1236,7 @@ class BiometricSensor(SensorTLS):
         """
         print(f"\n--- Sample {sample_num}/{max_samples} ---")
         print("  Touch and hold the sensor...")
+        _log(f"  _enroll_one_sample started")
 
         cap, sensor_status, reject_detail = self.capture_data()
         ok = cap is not None and sensor_status == 1
@@ -1239,6 +1245,9 @@ class BiometricSensor(SensorTLS):
             cap = b''
         elif sensor_status != 1:
             print(f"  CAPTURE rejected (status={sensor_status})")
+            # No finger or hardware rejection -- outer loop will
+            # prompt user to touch again.
+            return False, None
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
@@ -1246,9 +1255,9 @@ class BiometricSensor(SensorTLS):
         i1 = self.read_interrupt(timeout=60000)
         if i1 is None:
             print("  No finger detected (interrupt timeout)")
-            ok = False
+            return False, None
 
-        # Pre-capture queries (finger is being placed/held during these)
+        # Pre-capture queries (finger is being placed/held)
         self.get_sensor_status(ctx)
         self.query_status_ext(4)
         r = self.query_enrollment_needs()
@@ -1274,9 +1283,9 @@ class BiometricSensor(SensorTLS):
         # Post-capture queries
         self.get_sensor_status(0)
         self.query_enrollment_simple()
-        ext2 = self.query_status_ext(4)
-        if ext2 is not None:
-            qual2 = ext2[-2:]
+        ext4b = self.query_status_ext(4)
+        if ext4b is not None:
+            qual2 = ext4b[-2:]
             _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0]}")
         self.update_enrollment_ack()
 
