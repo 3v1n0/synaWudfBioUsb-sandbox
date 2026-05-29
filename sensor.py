@@ -1135,20 +1135,19 @@ class BiometricSensor(SensorTLS):
     def _enroll_one_sample(self, sample_num, max_samples):
         """One enrollment sample, matching b.exe trace exactly.
 
-        Completes the full 11-command sequence even if some commands
-        return errors, to keep device protocol state consistent.
-        Interrupts: 01=ready, 02=data-captured.
-        Two interrupts per sample: before queries and between CHECK/STATUS0.
-        Returns (ok, guid) where guid is 16B from 9602 iff enrollment
-        is complete (None otherwise).
+        Always completes the full 11-command sequence, even on errors,
+        to keep device protocol state consistent.  Returns:
+          (True, guid)  -- enrollment complete, commit now
+          (True, None)  -- good sample, keep going
+          (False, None) -- error (no finger, bad scan, etc.), skip
         """
         print(f"\n--- Sample {sample_num}/{max_samples} ---")
         print("  Touch and hold the sensor...")
 
         cap = self.capture_data()
-        if cap is None:
+        ok = cap is not None
+        if not ok:
             print("  CAPTURE_DATA failed")
-            return True, None
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
@@ -1156,9 +1155,7 @@ class BiometricSensor(SensorTLS):
         i1 = self.read_interrupt(timeout=60000)
         if i1 is None:
             print("  No finger detected (interrupt timeout)")
-            # Still run the full query sequence to keep device in sync
-        else:
-            _log(f"  Interrupt 1: {i1.hex()}")
+            ok = False
 
         # Pre-capture queries (finger is being placed/held during these)
         self.get_sensor_status(ctx)
@@ -1173,13 +1170,15 @@ class BiometricSensor(SensorTLS):
             print(f"  Progress: {struct.unpack('<H', qual)[0]}")
         else:
             print("  STATUS_EXT(1) failed (finger read error)")
+            ok = False
 
         self.update_enrollment_check()
 
         # Interrupt 2: finger data captured (02)
         i2 = self.read_interrupt(timeout=60000)
-        if i2 is not None:
-            _log(f"  Interrupt 2: {i2.hex()}")
+        if i2 is None:
+            print("  Finger removed before capture complete")
+            ok = False
 
         # Post-capture queries
         self.get_sensor_status(0)
@@ -1198,13 +1197,17 @@ class BiometricSensor(SensorTLS):
             print(f"  GUID: {guid.hex()}")
             return True, guid
 
-        print(f"  Sample {sample_num} OK")
-        return True, None
+        if ok:
+            print(f"  Sample {sample_num} OK")
+        else:
+            print(f"  Sample {sample_num} had errors -- not counted")
+        return ok, None
 
     def enroll(self):
         """
         Full enrollment flow (interactive).
         Completes each sample fully to keep device protocol in sync.
+        Errors (no finger, bad scan) are skipped without counting.
         """
         print("\n--- Enrollment ---")
         r = self.enroll_begin()
@@ -1213,15 +1216,18 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
-        for i in range(1, 20):
-            ok, guid = self._enroll_one_sample(i, 20)
+        valid = 0
+        for i in range(1, 100):
+            ok, guid = self._enroll_one_sample(i, 100)
             if not ok:
-                return False
+                continue            # error -- wait for next touch
+            valid += 1
+            print(f"  Valid samples: {valid}")
             if guid is not None:
                 return self._commit_enrollment(
                     guid=guid, label="FP1")
 
-        print("  Enrollment aborted after 20 samples")
+        print("  Enrollment aborted after 100 attempts")
         return False
 
 
