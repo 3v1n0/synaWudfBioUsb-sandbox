@@ -769,12 +769,18 @@ class SensorTLS(Sensor):
         raw = self.ctrl_in(REQ_RESP, 256, label=f"TLS_IN({label})")
         if not raw:
             return None
+        if len(raw) < 5:
+            _log(f"  TLS({label}) short response ({len(raw)}B): {raw.hex()}")
+            return None
         if raw[0] == TLS_ALERT:
             _log(f"  TLS ALERT: {raw.hex()}")
             return None
         rtype = raw[0]
         rlen  = struct.unpack('>H', raw[3:5])[0]
         rbody = raw[5: 5 + rlen]
+        if len(rbody) < rlen:
+            _log(f"  TLS({label}) truncated body: need {rlen} got {len(rbody)}")
+            return None
         try:
             pt = self.tls.decrypt(rtype, rbody)
             _log(f"  TLS({label}) resp: {pt.hex()}")
@@ -929,18 +935,18 @@ class BiometricSensor(SensorTLS):
     def query_enrollment_needs(self):
         """
         Query device's enrollment requirements (value=0x0002).
-        125-byte payload: 39 00 71 02 00 ff ff ...
+        125-byte payload: 39 00 71 02 ...
         """
         return self.tls_send(
             bytes.fromhex(
-                '3900710200ffff0000057f00200000'
-                '00007f7f000000000000ffff000005'
-                '7f0020000000007f7f000000000000'
-                'ffff0000057f0020000000007f7f00'
-                '000000000000000000000000000000'
-                '000000000000000000000000000000'
-                '000000000000000000000000000000'
-                '000000000000000000000000'),
+                '3900710200ffff0000057f0020000000'
+                '007f7f000000000000ffff0000057f00'
+                '20000000007f7f000000000000ffff00'
+                '00057f0020000000007f7f0000000000'
+                '00000000000000000000000000000000'
+                '00000000000000000000000000000000'
+                '00000000000000000000000000000000'
+                '00000000000000000000000000'),
             value=2, label="QUERY_ENROLL_NEEDS")
 
     def query_status_ext(self, param=0):
@@ -965,11 +971,11 @@ class BiometricSensor(SensorTLS):
                 '39000000000000000000000020000000'
                 '00000000000000000000000000000000'
                 '20000000000000000000000000000000'
-                '00000020000000000000000000000000'
-                '00000000000020000000000000000000'
-                '00000000000000000020000000000000'
-                '00000000000000000000002000000000'
-                '000000000000000000000000'),
+                '00000000200000000000000000000000'
+                '00000000000000002000000000000000'
+                '00000000000000000000000020000000'
+                '00000000000000000000000000000000'
+                '20000000000000000000000000'),
             value=2, label="QUERY_ENROLL_SIMPLE")
 
     # -- Commit / finalization protocol ---
@@ -1174,7 +1180,7 @@ class BiometricSensor(SensorTLS):
     def enroll(self):
         """
         Full enrollment flow (interactive).
-        After 5 touches the device returns a GUID and we finalize.
+        After 10 touches the device returns a GUID and we finalize.
         """
         print("\n--- Enrollment ---")
         r = self.enroll_begin()
@@ -1183,7 +1189,7 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
-        max_samples = 5
+        max_samples = 10
         guid = None
         for i in range(1, max_samples + 1):
             ok, g = self._enroll_one_sample(i, max_samples)

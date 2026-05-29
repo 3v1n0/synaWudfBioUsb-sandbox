@@ -2069,6 +2069,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
 
         params.PayloadSize = sizeof(params);
         params.Purpose = WINBIO_PURPOSE_ENROLL_FOR_IDENTIFICATION;
+        // params.Purpose = WINBIO_PURPOSE_ENROLL;
         configure_capture_format(&params);
         params.Flags = WINBIO_DATA_FLAG_PROCESSED;
 
