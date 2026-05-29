@@ -500,6 +500,9 @@ class Sensor:
             self.dev.set_configuration()
         except usb.core.USBError:
             pass
+        # Claim both HID (intf 0) and vendor (intf 1) upfront so the
+        # device expects both interfaces active from the start.
+        self._claim_both_interfaces()
 
     def ctrl_out(self, req, value=0, data=b'', label=""):
         _log(f">>> {label} {BM_OUT:02x}{req:02x}{value:04x} "
@@ -522,7 +525,67 @@ class Sensor:
             _log(f"  ERROR: {exc}")
             raise
 
-    INTERRUPT_EP = 0x83  # interrupt IN endpoint
+    INTERRUPT_EP = 0x83  # interrupt IN endpoint (intf 1, vendor)
+    HID_EP = 0x81        # HID interrupt IN endpoint (intf 0)
+
+    def _claim_both_interfaces(self):
+        """Claim intf 0 (HID) and intf 1 (vendor) so both endpoints
+        are usable on the main handle.  Must be called before any
+        TLS commands -- claiming mid-stream breaks the device."""
+        import usb.util
+        for ifnum in (0, 1):
+            try:
+                if self.dev.is_kernel_driver_active(ifnum):
+                    self.dev.detach_kernel_driver(ifnum)
+            except:
+                pass
+            try:
+                usb.util.claim_interface(self.dev, ifnum)
+                _log(f"claimed intf {ifnum}")
+            except usb.core.USBError as exc:
+                _log(f"claim intf {ifnum}: {exc}")
+
+    def read_hid_report(self, timeout=3000):
+        """Read a HID input report from EP 0x81. Returns bytes or None."""
+        try:
+            resp = bytes(self.dev.read(self.HID_EP, 64, timeout=timeout))
+            _log(f"HID ({len(resp)}B): {resp.hex()}")
+            return resp
+        except usb.core.USBError as exc:
+            if exc.errno == 110:
+                return None
+            raise
+
+    @staticmethod
+    def parse_hid_quality(report):
+        """
+        Parse quality/status from a HID report (0x12-prefixed).
+        Maps sensor bitmask to WINBIO reject detail using same logic
+        as FUN_18000d054 in the decompiled driver.
+
+        Expected format: first byte = 0x12, followed by 7 status bytes.
+        Returns (reject_detail, raw_bitmask) or (0, 0) if no rejection.
+        """
+        if report is None or len(report) < 8 or report[0] != 0x12:
+            return 0, 0
+        raw = struct.unpack('<Q', report[1:8] + b'\x00')[0]
+        if raw == 0:
+            return 0, 0
+        if raw & 0x20000:
+            return 3, raw  # TOO_LEFT
+        if raw & 0x40000:
+            return 4, raw  # TOO_RIGHT
+        if raw & 0x02:
+            return 5, raw  # TOO_FAST
+        if raw & 0x10:
+            return 6, raw  # TOO_SLOW
+        if raw & 0x8000:
+            return 8, raw  # TOO_SKEWED
+        if raw & 0x04:
+            return 9, raw  # TOO_SHORT
+        if raw & 0x80000000:
+            return 7, raw  # POOR_QUALITY
+        return 0, raw
 
     def read_interrupt(self, timeout=60000):
         """Read from interrupt endpoint (blocking). Returns bytes or None."""
@@ -934,9 +997,10 @@ class BiometricSensor(SensorTLS):
         hardware rejected it (no finger, bad placement, etc.).
 
         NOTE: the 0x06 marker only appears in CAPTURE_DATA
-        responses, NOT in STATUS_EXT responses.  The driver's
-        algorithm-level quality rejection (WINBIO_FP_POOR_QUALITY)
-        cannot be reliably detected from raw USB data alone.
+        responses, NOT in STATUS_EXT responses.  Hardware acceptance
+        (marker==6) means the sensor detected a finger.  Algorithm-
+        level quality rejection (POOR_QUALITY etc.) comes from a
+        separate HID report (EP 0x81, 0x12-prefixed bitmask).
         """
         if resp is None or len(resp) < 6:
             return 3, 0  # WINBIO_SENSOR_FAILURE
@@ -1246,17 +1310,33 @@ class BiometricSensor(SensorTLS):
             print("  CAPTURE_DATA failed")
             cap = b''
         elif sensor_status != 1:
-            print(f"  CAPTURE rejected (status={sensor_status})")
-            # No finger or hardware rejection -- outer loop will
-            # prompt user to touch again.
+            print("  No finger detected")
             return False, None
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
+        # HID quality check (non-blocking, 500ms timeout).
+        hid = None
+        try:
+            hid = self.read_hid_report(timeout=500)
+        except Exception as exc:
+            _log(f"HID error: {exc}")
+        if hid is not None:
+            rd, raw = self.parse_hid_quality(hid)
+            if rd != 0:
+                detail_names = {3: "TOO_LEFT", 4: "TOO_RIGHT",
+                                5: "TOO_FAST", 6: "TOO_SLOW",
+                                7: "POOR_QUALITY", 8: "TOO_SKEWED",
+                                9: "TOO_SHORT"}
+                print(f"  Capture rejected: {detail_names.get(rd, f'0x{rd:x}')}"
+                      f" (detail={rd})")
+                return False, None
+        print("  Finger ON")
+
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
         i1 = self.read_interrupt(timeout=60000)
         if i1 is None:
-            print("  No finger detected (interrupt timeout)")
+            print("  Finger removed before capture complete")
             return False, None
         i1_type = i1[0] if len(i1) > 0 else 0
         print(f"  Interrupt: type=0x{i1_type:02x}"
