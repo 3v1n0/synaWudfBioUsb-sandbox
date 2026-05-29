@@ -1278,6 +1278,14 @@ class BiometricSensor(SensorTLS):
             print(f"  GUID: {guid.hex()}")
             return True, guid
 
+        # 2-byte 9602 response = status code (not GUID)
+        if r9602 is not None and len(r9602) == 2:
+            status_le = struct.unpack('<H', r9602)[0]
+            if r9602 != b'\x00\x00':
+                print(f"  9602 error: status=0x{status_le:04x}")
+                return False, status_le  # terminal; caller aborts
+            # 0x0000 = "not done yet, keep going" (normal)
+
         if ok:
             print(f"  Sample {sample_num} OK")
         else:
@@ -1315,7 +1323,15 @@ class BiometricSensor(SensorTLS):
         for i in range(1, max_attempts + 1):
             ok, guid = self._enroll_one_sample(i, max_attempts)
             if not ok:
-                continue            # error -- wait for next touch
+                if isinstance(guid, int):
+                    # Terminal error (e.g. 9602 returned error code)
+                    print(f"  9602 returned error code=0x{guid:04x}")
+                    _, cnt, _ = self.get_storage_count()
+                    if cnt >= 10:
+                        print(f"  Database has {cnt} records "
+                              "(likely full). Clear some and retry.")
+                    return False
+                continue            # transient error -- wait for next touch
             valid += 1
             print(f"  Valid samples: {valid}")
             if guid is not None:
