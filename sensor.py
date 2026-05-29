@@ -957,6 +957,8 @@ class BiometricSensor(SensorTLS):
             detail_name = detail_map.get(rd, f"0x{rd:x}")
             print(f"  Capture rejected: SensorStatus={ss} "
                   f"RejectDetail=0x{rd:x} ({detail_name})")
+            if resp is not None and len(resp) == 66:
+                _log(f"  CAPTURE_DATA resp: {resp.hex()}")
         return resp, ss, rd
 
     def get_sensor_status(self, ctx=0):
