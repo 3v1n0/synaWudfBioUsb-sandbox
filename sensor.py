@@ -1180,7 +1180,7 @@ class BiometricSensor(SensorTLS):
     def enroll(self):
         """
         Full enrollment flow (interactive).
-        After 10 touches the device returns a GUID and we finalize.
+        Retries captures until a GUID is returned by the device.
         """
         print("\n--- Enrollment ---")
         r = self.enroll_begin()
@@ -1189,22 +1189,16 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
-        max_samples = 10
-        guid = None
-        for i in range(1, max_samples + 1):
-            ok, g = self._enroll_one_sample(i, max_samples)
+        for i in range(1, 999):
+            ok, guid = self._enroll_one_sample(i, 999)
             if not ok:
                 return False
-            if g is not None:
-                guid = g
-                break
+            if guid is not None:
+                return self._commit_enrollment(
+                    guid=guid, label="FP1-00000000-0-00000000-none")
 
-        if guid is None:
-            print("\n  Enrollment did not complete (no GUID after 5 samples)")
-            return False
-
-        return self._commit_enrollment(
-            guid=guid, label="FP1-00000000-0-00000000-none")
+        print("  Enrollment aborted after 999 samples")
+        return False
 
 
 # ---------------------------------------------------------------------------
