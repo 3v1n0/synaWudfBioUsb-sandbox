@@ -545,33 +545,6 @@ class Sensor:
             except usb.core.USBError as exc:
                 _log(f"claim intf {ifnum}: {exc}")
 
-    @staticmethod
-    def _quality_bitmask_to_reject(bitmask):
-        """
-        Map quality bitmask to WINBIO reject detail using same logic
-        as FUN_18000d054 in the decompiled driver.
-
-        The bitmask comes from the CAPTURE_DATA or STATUS_EXT response
-        at offset 0x10 (LE u32).  Returns WINBIO reject code (0 = OK).
-        """
-        if bitmask == 0:
-            return 0
-        if bitmask & 0x20000:
-            return 3   # WINBIO_FP_TOO_LEFT
-        if bitmask & 0x40000:
-            return 4   # WINBIO_FP_TOO_RIGHT
-        if bitmask & 0x02:
-            return 5   # WINBIO_FP_TOO_FAST
-        if bitmask & 0x10:
-            return 6   # WINBIO_FP_TOO_SLOW
-        if bitmask & 0x8000:
-            return 8   # WINBIO_FP_TOO_SKEWED
-        if bitmask & 0x04:
-            return 9   # WINBIO_FP_TOO_SHORT
-        if bitmask & 0x80000000:
-            return 7   # WINBIO_FP_POOR_QUALITY
-        return 0
-
     def read_interrupt(self, timeout=60000):
         """Read from interrupt endpoint (blocking). Returns bytes or None."""
         try:
@@ -965,27 +938,21 @@ class BiometricSensor(SensorTLS):
     def _parse_capture_response(resp):
         """
         Parse 66-byte CAPTURE_DATA device response.
-        Returns (sensor_status, reject_detail, quality_bitmask).
+        Returns (sensor_status, reject_detail).
 
-        The 66-byte USB response structure:
-          [0:2]   unknown/header
-          [2:6]   marker (LE u32: 6=WINBIO_I_MORE_DATA, 0=rejected)
-          [6:8]   unknown
-          [8:12]  WINBIO sensor_status (LE u32: 1=ok, 2=reject)
-          [12:16] WINBIO reject_detail (LE u32)
-          [16:20] quality bitmask (LE u32, for _quality_bitmask_to_reject)
-          [20:66] other data
+        The marker at [2:6] (LE u32) tells if a finger was detected:
+          6 = WINBIO_I_MORE_DATA = finger detected
+          0 = no finger / hardware rejected
 
-        Quality and rejection info comes directly from the response
-        fields, not from a separate HID report.  The quality bitmask
-        maps to WINBIO_FP_* codes via _quality_bitmask_to_reject.
+        ss/rd at [8:12]/[12:16] provide additional status info but
+        the marker is the primary finger-detection signal.
         """
-        if resp is None or len(resp) < 20:
-            return 3, 0, 0
-        ss = struct.unpack_from('<I', resp, 0x08)[0]
-        rd = struct.unpack_from('<I', resp, 0x0C)[0]
-        bm = struct.unpack_from('<I', resp, 0x10)[0]
-        return ss, rd, bm
+        if resp is None or len(resp) < 6:
+            return 3, 0
+        marker = struct.unpack_from('<I', resp, 2)[0]
+        if marker == 6:
+            return 1, 0   # finger detected
+        return 2, 7       # no finger
 
     def capture_data(self, subfactor=6):
         """
@@ -999,11 +966,10 @@ class BiometricSensor(SensorTLS):
                    + b'\x00' * 19)
         assert len(payload) == 37
         resp = self.tls_send(payload, value=2, label="CAPTURE_DATA")
-        ss, rd, bm = self._parse_capture_response(resp)
+        ss, rd = self._parse_capture_response(resp)
         if resp is not None and len(resp) == 66:
-            _log(f"  CAPTURE_DATA resp: {resp.hex()}"
-                 f" ss={ss} rd={rd} bm=0x{bm:08x}")
-        return resp, ss, rd, bm
+            _log(f"  CAPTURE_DATA resp: {resp.hex()}")
+        return resp, ss, rd
 
     def get_sensor_status(self, ctx=0):
         """
@@ -1277,22 +1243,12 @@ class BiometricSensor(SensorTLS):
         print("  Touch and hold the sensor...")
         _log(f"  _enroll_one_sample started")
 
-        cap, sensor_status, reject_detail, qual_bm = self.capture_data()
+        cap, sensor_status, reject_detail = self.capture_data()
         ok = cap is not None and sensor_status == 1
         if cap is None:
             print("  CAPTURE_DATA failed")
             cap = b''
         elif sensor_status != 1:
-            # sensor_status=2 means hardware rejected (no finger)
-            rd = self._quality_bitmask_to_reject(qual_bm)
-            if rd != 0:
-                detail_names = {3: "TOO_LEFT", 4: "TOO_RIGHT",
-                                5: "TOO_FAST", 6: "TOO_SLOW",
-                                7: "POOR_QUALITY", 8: "TOO_SKEWED",
-                                9: "TOO_SHORT"}
-                print(f"  Capture rejected: {detail_names.get(rd, f'0x{rd:x}')}"
-                      f" (detail={rd})")
-                return False, None
             print("  No finger detected")
             return False, None
         ctx = self._extract_ctx(cap)
@@ -1319,18 +1275,6 @@ class BiometricSensor(SensorTLS):
         if ext1 is not None:
             qual = ext1[-2:]
             print(f"  Progress: {struct.unpack('<H', qual)[0]}")
-            if len(ext1) >= 20:
-                bm1 = struct.unpack_from('<I', ext1, 0x10)[0]
-                if bm1 != 0:
-                    rd1 = self._quality_bitmask_to_reject(bm1)
-                    detail_names = {3: "TOO_LEFT", 4: "TOO_RIGHT",
-                                    5: "TOO_FAST", 6: "TOO_SLOW",
-                                    7: "POOR_QUALITY", 8: "TOO_SKEWED",
-                                    9: "TOO_SHORT"}
-                    print(f"  Quality: {detail_names.get(rd1, f'0x{rd1:x}')}"
-                          f" (bm=0x{bm1:08x})")
-                    if rd1 != 0:
-                        ok = False
         else:
             print("  STATUS_EXT(1) failed (finger read error)")
             ok = False
@@ -1354,10 +1298,6 @@ class BiometricSensor(SensorTLS):
         if ext4b is not None:
             qual2 = ext4b[-2:]
             _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0]}")
-            if len(ext4b) >= 20:
-                bm4 = struct.unpack_from('<I', ext4b, 0x10)[0]
-                if bm4 != 0:
-                    _log(f"  Ext4 quality_bm: 0x{bm4:08x}")
         self.update_enrollment_ack()
 
         # 9602 enrollment status
