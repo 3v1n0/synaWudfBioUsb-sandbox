@@ -1309,18 +1309,33 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
+        max_valid = 12
+        max_attempts = 50
         valid = 0
-        for i in range(1, 100):
-            ok, guid = self._enroll_one_sample(i, 100)
+        for i in range(1, max_attempts + 1):
+            ok, guid = self._enroll_one_sample(i, max_attempts)
             if not ok:
                 continue            # error -- wait for next touch
             valid += 1
             print(f"  Valid samples: {valid}")
             if guid is not None:
-                return self._commit_enrollment(
-                    guid=guid, label="FP1")
+                ok2 = self._commit_enrollment(guid=guid, label="FP1")
+                if not ok2:
+                    # If commit failed (e.g. DB full), check storage
+                    _, cnt, _ = self.get_storage_count()
+                    print(f"  DB records after failed commit: {cnt}")
+                return ok2
+            if valid >= max_valid:
+                # Enough samples but no GUID -- likely DB full
+                _, cnt, _ = self.get_storage_count()
+                print(f"  Stopping: {valid} samples collected, "
+                      f"no GUID (DB has {cnt} records).")
+                if cnt >= 10:
+                    print("  Database appears full. "
+                          "Clear some records and retry.")
+                return False
 
-        print("  Enrollment aborted after 100 attempts")
+        print("  Enrollment aborted after 50 attempts")
         return False
 
 
