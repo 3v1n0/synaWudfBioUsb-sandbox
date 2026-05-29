@@ -2076,6 +2076,8 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
         HostMem in((UCHAR*)&params, sizeof(params)), out(obuf, sizeof(obuf));
         HostRequest req(WdfRequestOther, IOCTL_BIOMETRIC_CAPTURE_DATA, &out, &in);
 
+        // FIXME: We should find a way to get the finger-on-sensor info from the capture data.
+
         HLOG_USER("about to IOCTL_BIOMETRIC_CAPTURE_DATA\r\n");
         hostQueue->ioctl->OnDeviceIoControl(hostQueue, &req, IOCTL_BIOMETRIC_CAPTURE_DATA, 0, 0);
         while(!req.complete)
