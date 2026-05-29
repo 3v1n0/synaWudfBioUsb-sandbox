@@ -918,18 +918,26 @@ class BiometricSensor(SensorTLS):
         """
         Parse 66-byte CAPTURE_DATA device response.
         Returns (sensor_status, reject_detail) per WINBIO:
-          sensor_status=0 -> ready/ok
+          sensor_status=1 -> ready/ok
           sensor_status=2 -> reject (WINBIO_SENSOR_REJECT)
           reject_detail=7  -> WINBIO_FP_POOR_QUALITY
-        Fields confirmed from decompiled OnCaptureData:
-          bVar1 = *(byte *)(resp + 4)    # SensorStatus
-          bVar2 = *(byte *)(resp + 0x1c) # RejectDetail
+
+        The 66-byte USB response has a "sensor-ready" marker at
+        [2:6] (LE u32): value 6 = WINBIO_I_MORE_DATA means the
+        sensor accepted; value 0 means rejected.  The decompiled
+        OnCaptureData reads from the IOCTL output buffer where
+        the driver stores the decoded values at offset 4 and 0x1c,
+        NOT from the raw USB response.  We detect rejection by the
+        missing 0x06 marker.
         """
-        if resp is None or len(resp) < 0x1d:
+        if resp is None or len(resp) < 6:
             return 3, 0  # WINBIO_SENSOR_FAILURE
-        ss = resp[4]       # byte at offset 4 = SensorStatus
-        rd = resp[0x1c]    # byte at offset 28 = RejectDetail
-        return ss, rd
+        marker = struct.unpack('<I', resp[2:6])[0]
+        if marker == 6:
+            return 1, 0   # sensor_status=1 (ok), no reject
+        # Rejected — sensor_status=2, reject_detail depends on response
+        # (only WINBIO_FP_POOR_QUALITY = 7 seen so far)
+        return 2, 7
 
     def capture_data(self, subfactor=6):
         """
@@ -944,7 +952,7 @@ class BiometricSensor(SensorTLS):
         assert len(payload) == 37
         resp = self.tls_send(payload, value=2, label="CAPTURE_DATA")
         ss, rd = self._parse_capture_response(resp)
-        if ss != 0:
+        if ss != 1:
             detail_map = {7: "WINBIO_FP_POOR_QUALITY"}
             detail_name = detail_map.get(rd, f"0x{rd:x}")
             print(f"  Capture rejected: SensorStatus={ss} "
@@ -1223,11 +1231,11 @@ class BiometricSensor(SensorTLS):
         print("  Touch and hold the sensor...")
 
         cap, sensor_status, reject_detail = self.capture_data()
-        ok = cap is not None and sensor_status == 0
+        ok = cap is not None and sensor_status == 1
         if cap is None:
             print("  CAPTURE_DATA failed")
             cap = b''
-        elif sensor_status != 0:
+        elif sensor_status != 1:
             print(f"  CAPTURE rejected (status={sensor_status})")
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
