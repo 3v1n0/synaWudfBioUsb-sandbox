@@ -2166,6 +2166,8 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
                 reject_detail_to_string(rejectDetail));
             if(templateStatus != WINBIO_I_MORE_DATA)
                 break;
+
+            // FIXME: If templateStatus is another error, then we should just return with failure without try committing.
         }
         Sleep(100);
     }

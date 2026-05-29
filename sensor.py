@@ -1298,8 +1298,10 @@ class BiometricSensor(SensorTLS):
         if status != 0:
             print(f"  Storage query status=0x{status:04x}")
         if count >= 10:
-            print("  Database is full! Cannot enroll more fingerprints.")
-            return False
+            ans = input("  Database is full! Try anyway? [y/N] ").strip().lower()
+            if ans != 'y':
+                print("  Enrollment cancelled.")
+                return False
 
         r = self.enroll_begin()
         if r is None:
