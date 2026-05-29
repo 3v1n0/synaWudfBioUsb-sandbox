@@ -1118,16 +1118,15 @@ class BiometricSensor(SensorTLS):
         return resp is not None and len(resp) >= 18 and resp[2:18] != b'\x00' * 16
 
     def _enroll_one_sample(self, sample_num, max_samples):
-        """One enrollment sample: capture, process, query, ack.
+        """One enrollment sample, matching b.exe trace exactly.
 
-        Follows the exact sequence from b.exe successful trace:
-        CAPTURE -> interrupt -> STATUS -> EXT4 -> NEEDS -> EXT1
-        -> CHECK -> STATUS0 -> SIMPLE -> EXT4 -> ACK -> 9602.
-        Returns (ok, guid) where guid is the 16B value from 9602 iff
-        enrollment is complete (None otherwise).
+        Interrupts: 01=ready, 02=data-captured.
+        Two interrupts per sample: before queries and between CHECK/STATUS0.
+        Returns (ok, guid) where guid is 16B from 9602 iff enrollment
+        is complete (None otherwise).
         """
         print(f"\n--- Sample {sample_num}/{max_samples} ---")
-        print("  Place and HOLD finger on sensor...")
+        print("  Touch and hold the sensor...")
 
         cap = self.capture_data()
         if cap is None:
@@ -1136,38 +1135,32 @@ class BiometricSensor(SensorTLS):
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
 
-        intr = self.read_interrupt(timeout=60000)
-        if intr is None:
-            print("  No finger (timeout)")
-            return False, None
-        print(f"  Finger detected")
+        # Interrupt 1: capture armed (01) -- immediate after CAPTURE
+        self.read_interrupt(timeout=60000)
 
-        # Step A: sensor status with capture context
+        # Pre-capture queries (finger is being placed/held during these)
         self.get_sensor_status(ctx)
-        # Step B: extended status (param=4)
         self.query_status_ext(4)
-        # Step C: query enrollment needs
         r = self.query_enrollment_needs()
         if r is None:
             return False, None
-        # Step D: extended status (param=1) -- quality/progress
         ext1 = self.query_status_ext(1)
-        qual = ext1[-2:] if ext1 else b'??'
-        print(f"  Progress: {struct.unpack('<H', qual)[0] if len(qual)==2 else 0}")
-        # Step E: update enrollment check
+        qual = ext1[-2:] if ext1 else None
+        print(f"  Progress: {struct.unpack('<H', qual)[0] if (qual and len(qual)==2) else '?'}")
         self.update_enrollment_check()
-        # Step F: sensor status (ctx=0)
+
+        # Interrupt 2: finger data captured (02)
+        self.read_interrupt(timeout=60000)
+
+        # Post-capture queries
         self.get_sensor_status(0)
-        # Step G: simple enrollment query
         self.query_enrollment_simple()
-        # Step H: extended status (param=4) -- second quality/progress
         ext2 = self.query_status_ext(4)
-        qual2 = ext2[-2:] if ext2 else b'??'
-        _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0] if len(qual2)==2 else 0}")
-        # Step I: enrollment ack
+        qual2 = ext2[-2:] if ext2 else None
+        _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0] if (qual2 and len(qual2)==2) else 0}")
         self.update_enrollment_ack()
 
-        # Step J: 9602 enrollment status query
+        # 9602 enrollment status
         r9602 = self.tls_send(bytes.fromhex('9602000000'),
                                value=2, label="ENROLL_STATUS")
         if self._has_guid(r9602):
