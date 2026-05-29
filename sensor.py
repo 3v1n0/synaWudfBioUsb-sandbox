@@ -975,23 +975,144 @@ class BiometricSensor(SensorTLS):
                 '000000000000000000000000'),
             value=2, label="QUERY_ENROLL_SIMPLE")
 
-    def submit_template(self):
+    # -- Commit / finalization protocol ---
+
+    ENROLL_TEMPLATE_FIXED = bytes.fromhex(
+        '39f4010000f4010000077f002000000000'
+        '7f7f000000000000000000000000002000'
+        '0000000000000000000000f4010000007f'
+        '0020000000000000000000000000000000'
+        '0000002000000000000000000000000000'
+        '0000000000000000000000000000000000'
+        '0000000000000000000000000000000000'
+        '0000000000000000')
+
+    COMMIT_HEADER = bytes.fromhex(
+        '9603000000000000007d0000000000100000')
+
+    COMMIT_IDENTITY_PREFIX = bytes.fromhex(
+        '01004c00000002000000')
+
+    COMMIT_PAD = bytes.fromhex(
+        '0000000000000000')
+
+    COMMIT_TLV1 = bytes.fromhex(
+        '020001000000')
+
+    def _enroll_label_bytes(self, label_str="FP1-00000000-0-00000000-none"):
+        """Build label TLV: tag 0x0302 + LE length + null-terminated utf-8."""
+        raw = label_str.encode("utf-8", errors="replace") + b"\x00"
+        return bytes.fromhex('020300') + struct.pack('<I', len(raw)) + raw
+
+    def _build_commit_payload(self, guid, sid, label):
         """
-        Submit enrollment template (value=0x0002, 125 bytes).
-        This is session-specific but the format is known from trace.
-        Returns response.
+        Build 138-byte commit payload.
+        guid  -- 16 bytes from 9602 response
+        sid   -- 16 bytes (generated)
+        label -- string for identity label
+        """
+        return (self.COMMIT_HEADER
+                + b'\x00' + guid
+                + self.COMMIT_IDENTITY_PREFIX
+                + sid
+                + b'\x00' * 48
+                + self.COMMIT_PAD
+                + self.COMMIT_TLV1
+                + self._enroll_label_bytes(label))
+
+    def enroll_get_guid(self):
+        """
+        Send 9602 to get GUID after all samples captured.
+        Returns 16-byte GUID or None.
+        """
+        resp = self.tls_send(
+            bytes.fromhex('9602000000'),
+            value=2, label="ENROLL_GET_GUID")
+        if resp is None or len(resp) < 18:
+            return None
+        # GUID at [2:18] in 82-byte response
+        return resp[2:18]
+
+    def enroll_commit(self, payload):
+        """
+        Send 9603 commit payload (138 bytes, value=7).
+        Returns response bytes or None.
+        """
+        return self.tls_send(payload, value=7, label="ENROLL_COMMIT")
+
+    def enroll_commit_ack(self):
+        """
+        Send 9604 commit ack (5 bytes, value=2).
+        Returns response bytes or None.
         """
         return self.tls_send(
-            bytes.fromhex(
-                '39e8030000f4010000077f00207f7f'
-                '00000000000000000000000000000000'
-                '00200000000000000000000000f40100'
-                '00007f00200000000000000000000000'
-                '00000000000020000000000000000000'
-                '00000000000000000000000000000000'
-                '00000000000000000000000000000000'
-                '0000000000000000000000000000'),
-            value=2, label="SUBMIT_TEMPLATE")
+            bytes.fromhex('9604000000'),
+            value=2, label="ENROLL_COMMIT_ACK")
+
+    def close_notify(self):
+        """Send TLS close_notify (value=7). Returns response."""
+        return self.tls_send(
+            bytes.fromhex('0001'),
+            value=7, label="CLOSE_NOTIFY")
+
+    def _commit_enrollment(self, label="FP1-00000000-0-00000000-none"):
+        """
+        Full commit finalization sequence (5 steps + close).
+        Must be called after 5 successful enrollment samples.
+        """
+        print("\n--- Commit enrollment ---")
+
+        # Step 1: Get GUID
+        guid = self.enroll_get_guid()
+        if guid is None or len(guid) != 16:
+            print(f"  ENROLL_GET_GUID failed: got {guid.hex() if guid else None}")
+            return False
+        print(f"  GUID: {guid.hex()}")
+
+        # Step 2: Submit fixed template
+        print("  Sending enrollment template...")
+        resp = self.tls_send(self.ENROLL_TEMPLATE_FIXED,
+                             value=2, label="ENROLL_TEMPLATE")
+        if resp is None:
+            print("  ENROLL_TEMPLATE failed")
+            return False
+        print(f"  Template response: {resp.hex()}")
+
+        # Step 3: Build + send commit payload
+        sid = _rand(16)
+        payload = self._build_commit_payload(guid, sid, label)
+        print(f"  Sending commit ({len(payload)}B)...")
+        resp = self.enroll_commit(payload)
+        if resp is None:
+            print("  ENROLL_COMMIT failed")
+            return False
+        print(f"  Commit response: {resp.hex()}")
+
+        # Step 4: Storage query init
+        print("  Storage query...")
+        resp = self.tls_send(
+            bytes.fromhex('9e01'),
+            value=7, label="COMMIT_STORAGE_QUERY")
+        if resp is None:
+            print("  Storage query failed")
+            return False
+        print(f"  Storage query resp ({len(resp)}B): {resp[:16].hex()}...")
+
+        # Step 5: Commit ack
+        print("  Commit ack...")
+        resp = self.enroll_commit_ack()
+        if resp is None:
+            print("  ENROLL_COMMIT_ACK failed")
+            return False
+        print(f"  Ack response: {resp.hex()}")
+
+        # Step 6: Close notify
+        print("  Close notify...")
+        resp = self.close_notify()
+        print(f"  Close: {resp.hex() if resp else None}")
+
+        print("  Commit done!")
+        return True
 
     def _capture_done(self, cap_resp):
         """Check last bytes of CAPTURE_DATA response: 00* means no data."""
@@ -1063,15 +1184,10 @@ class BiometricSensor(SensorTLS):
 
             print(f"  Sample {sample_num} OK")
 
-        print("\n  All samples captured, submitting template...")
-        resp = self.submit_template()
-        if resp is None:
-            print("  SUBMIT_TEMPLATE failed")
-            return False
-        print(f"  SUBMIT_TEMPLATE => {resp.hex()}")
-
-        print("\nEnrollment complete!")
-        return True
+        print("\n  All samples captured!")
+        result = self._commit_enrollment(
+            label="FP1-00000000-0-00000000-none")
+        return result
 
 
 # ---------------------------------------------------------------------------
