@@ -522,6 +522,20 @@ class Sensor:
             _log(f"  ERROR: {exc}")
             raise
 
+    INTERRUPT_EP = 0x83  # interrupt IN endpoint
+
+    def read_interrupt(self, timeout=60000):
+        """Read from interrupt endpoint (blocking). Returns bytes or None."""
+        try:
+            resp = bytes(self.dev.read(self.INTERRUPT_EP, 64, timeout=timeout))
+            _log(f"INTERRUPT ({len(resp)}B): {resp.hex()}")
+            return resp
+        except usb.core.USBError as exc:
+            if exc.errno == 110:  # timeout
+                _log("INTERRUPT timeout")
+                return None
+            raise
+
     # --- Init protocol ---
 
     def init_phase(self, n):
@@ -866,13 +880,149 @@ class BiometricSensor(SensorTLS):
         return enrolled
 
 
+    # --- Enroll protocol ---
+
+    def enroll_begin(self):
+        """Begin enrollment (value=0x0002). Returns raw response."""
+        return self.tls_send(
+            bytes.fromhex('96010000000000000000000000'),
+            value=2, label="ENROLL_BEGIN")
+
+    def capture_data(self, subfactor=6):
+        """
+        Send CAPTURE_DATA (value=0x0002).
+        Device responds immediately; finger interrupt follows later.
+        37-byte payload: 86 <subf> 00*15 <subf> 00*19
+        """
+        payload = (bytes([0x86, subfactor])
+                   + b'\x00' * 15
+                   + bytes([subfactor])
+                   + b'\x00' * 19)
+        assert len(payload) == 37
+        return self.tls_send(payload, value=2, label="CAPTURE_DATA")
+
+    def get_sensor_status(self):
+        """Query sensor status (value=0x0006). Returns 18-byte response."""
+        return self.tls_send(
+            bytes.fromhex('870400200001000000'),
+            value=6, label="GET_SENSOR_STATUS")
+
+    def update_enrollment_check(self):
+        """
+        Send UPDATE_ENROLLMENT check (value=0x0006).
+        17-byte payload: 800c + zeros + flags + subfactor.
+        Returns cb05 if template data needed, 0000 if ok.
+        """
+        payload = bytes.fromhex(
+            '800c000000010000000100000801010100')
+        return self.tls_send(payload, value=6, label="UPDATE_ENROLL_CHECK")
+
+    def update_enrollment_ack(self):
+        """Send ack byte (81) after enrollment update (value=0x0006)."""
+        return self.tls_send(
+            bytes.fromhex('81'),
+            value=6, label="UPDATE_ENROLL_ACK")
+
+    def update_enrollment_submit(self, template_data):
+        """Submit enrollment template data (value=0x0002, 125 bytes)."""
+        assert len(template_data) == 125
+        return self.tls_send(template_data, value=2,
+                             label="UPDATE_ENROLL_SUBMIT")
+
+    def _query_template_data(self):
+        """
+        Build the 125-byte template update payload.
+        This is the '39...' format seen in trace after 2nd finger detection.
+        """
+        return bytes.fromhex(
+            '39e8030000f4010000077f00207f7f'
+            '000000000000000000000020000000'
+            '00000000000000000000f401000000'
+            '7f0020000000000000000000000000'
+            '000000000020000000000000000000'
+            '000000000000000000000000000000'
+            '000000000000000000000000000000'
+            '000000000000000000000000')
+
+    def enroll(self):
+        """
+        Full enrollment flow (interactive).
+        User is prompted to touch the sensor for each sample.
+        """
+        print("\n--- Enrollment ---")
+
+        # 1. Begin enrollment
+        print("Starting enrollment session...")
+        resp = self.enroll_begin()
+        if resp is None:
+            print("  ENROLL_BEGIN failed (no response)")
+            return False
+        print(f"  ENROLL_BEGIN => {resp.hex()}")
+
+        sample_num = 0
+        max_samples = 5
+
+        while sample_num < max_samples:
+            sample_num += 1
+            print(f"\n--- Sample {sample_num}/{max_samples} ---")
+            print("Please touch the sensor now...")
+
+            # 2. Capture data - this returns immediately, device waits for finger
+            resp = self.capture_data()
+            if resp is None:
+                print("  CAPTURE_DATA failed (no response)")
+                return False
+            print(f"  CAPTURE_DATA => {resp[:32].hex()}...")
+
+            # 3. Wait for finger interrupt (blocking up to 60s)
+            print("  Waiting for finger (60s timeout)...")
+            intr = self.read_interrupt(timeout=60000)
+            if intr is None:
+                print("  No finger detected (timeout)")
+                return False
+            print(f"  Finger interrupt: {intr.hex()}")
+
+            # 4. Query sensor status
+            status = self.get_sensor_status()
+            if status is None:
+                print("  GET_SENSOR_STATUS failed")
+                return False
+            print(f"  Sensor status: {status.hex()}")
+
+            # 5. Update enrollment
+            if sample_num == 1:
+                resp = self.update_enrollment_check()
+                if resp is None:
+                    return False
+                print(f"  UPDATE_ENROLL_CHECK => {resp.hex()}")
+                if resp == bytes.fromhex('cb05'):
+                    resp = self.update_enrollment_ack()
+                    if resp is None:
+                        return False
+                    print(f"  UPDATE_ENROLL_ACK => {resp.hex()}")
+                    resp = self.update_enrollment_check()
+                    if resp is None:
+                        return False
+                    print(f"  UPDATE_ENROLL_CHECK2 => {resp.hex()}")
+
+            # 6. Submit template data
+            tmpl = self._query_template_data()
+            resp = self.update_enrollment_submit(tmpl)
+            if resp is None:
+                return False
+            print(f"  UPDATE_ENROLL_SUBMIT => {resp.hex()}")
+
+        print("\nEnrollment flow complete")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db',):
-        print("Usage: sensor.py list-db")
+    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll'):
+        print("Usage: sensor.py list-db|enroll")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -928,6 +1078,8 @@ def main():
     if sys.argv[1] == 'list-db':
         print("list-db...")
         sensor.list_enrolled()
+    elif sys.argv[1] == 'enroll':
+        sensor.enroll()
 
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
