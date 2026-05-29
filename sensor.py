@@ -62,6 +62,7 @@ from cryptography.hazmat.backends import default_backend
 
 try:
     import usb.core
+    import usb.util
 except ImportError:
     print("Install pyusb: pip install pyusb")
     sys.exit(1)
@@ -522,7 +523,81 @@ class Sensor:
             _log(f"  ERROR: {exc}")
             raise
 
-    INTERRUPT_EP = 0x83  # interrupt IN endpoint
+    INTERRUPT_EP = 0x83  # interrupt IN endpoint (intf 1, vendor)
+    HID_EP = 0x81        # HID interrupt IN endpoint (intf 0)
+    HID_IF = 0           # HID interface number
+
+    def _ensure_hid_claimed(self):
+        """Claim HID interface (intf 0) if not already claimed."""
+        if getattr(self, '_hid_claimed', False):
+            return
+        cfg = self.dev.get_active_configuration()
+        for inf in cfg:
+            try:
+                if self.dev.is_kernel_driver_active(inf.bInterfaceNumber):
+                    self.dev.detach_kernel_driver(inf.bInterfaceNumber)
+            except:
+                pass
+        try:
+            usb.util.claim_interface(self.dev, self.HID_IF)
+        except usb.core.USBError as exc:
+            _log(f"HID claim: {exc}")
+        self._hid_claimed = True
+
+    def read_hid_report(self, timeout=3000):
+        """Read a HID input report from EP 0x81. Returns bytes or None."""
+        self._ensure_hid_claimed()
+        try:
+            resp = bytes(self.dev.read(self.HID_EP, 64, timeout=timeout))
+            _log(f"HID ({len(resp)}B): {resp.hex()}")
+            return resp
+        except usb.core.USBError as exc:
+            if exc.errno == 110:
+                _log("HID read timeout")
+                return None
+            raise
+
+    @staticmethod
+    def parse_hid_quality(report):
+        """
+        Parse quality/status from a HID report (0x12-prefixed).
+        Maps sensor bitmask to WINBIO reject detail using same logic
+        as FUN_18000d054 in the decompiled driver.
+
+        Expected format: first byte = 0x12, followed by 7 status bytes.
+        The 7 status bytes form a LE u64 bitmask (only low bytes used).
+        Returns (reject_detail, raw_bitmask) or (0, 0) if no rejection.
+        """
+        if report is None or len(report) < 8 or report[0] != 0x12:
+            return 0, 0
+        # 7 bytes of status after the 0x12 prefix, as LE u64
+        raw = struct.unpack('<Q', report[1:8] + b'\x00')[0]
+        if raw == 0:
+            return 0, 0
+
+        # Bitmask to WINBIO values (FUN_18000d054 logic):
+        # bit 17 (0x20000)   -> 3  TOO_LEFT
+        # bit 18 (0x40000)   -> 4  TOO_RIGHT
+        # bit 1  (0x02)      -> 5  TOO_FAST
+        # bit 4  (0x10)      -> 6  TOO_SLOW
+        # bit 15 (0x8000)    -> 8  TOO_SKEWED
+        # bit 2  (0x04)      -> 9  TOO_SHORT
+        # sign bit (0x80000000) -> 7 POOR_QUALITY
+        if raw & 0x20000:
+            return 3, raw
+        if raw & 0x40000:
+            return 4, raw
+        if raw & 0x02:
+            return 5, raw
+        if raw & 0x10:
+            return 6, raw
+        if raw & 0x8000:
+            return 8, raw
+        if raw & 0x04:
+            return 9, raw
+        if raw & 0x80000000:
+            return 7, raw
+        return 0, raw
 
     def read_interrupt(self, timeout=60000):
         """Read from interrupt endpoint (blocking). Returns bytes or None."""
@@ -934,9 +1009,9 @@ class BiometricSensor(SensorTLS):
         hardware rejected it (no finger, bad placement, etc.).
 
         NOTE: the 0x06 marker only appears in CAPTURE_DATA
-        responses, NOT in STATUS_EXT responses.  The driver's
-        algorithm-level quality rejection (WINBIO_FP_POOR_QUALITY)
-        cannot be reliably detected from raw USB data alone.
+        responses, NOT in STATUS_EXT responses.  Algorithm-level
+        quality rejection (POOR_QUALITY etc.) is detected from a
+        separate HID report (EP 0x81, 0x12-prefixed bitmask).
         """
         if resp is None or len(resp) < 6:
             return 3, 0  # WINBIO_SENSOR_FAILURE
@@ -1252,6 +1327,17 @@ class BiometricSensor(SensorTLS):
             return False, None
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
+
+        # Read HID report for quality bitmask.  The sensor sends
+        # 0x12-prefixed reports via EP 0x81 after each capture.
+        hid = self.read_hid_report(timeout=500)
+        if hid is not None:
+            rd, raw = self.parse_hid_quality(hid)
+            if rd != 0:
+                print(f"  HID quality reject: detail={rd}"
+                      f" (raw bitmask=0x{raw:016x})")
+                return False, None
+            _log(f"  HID quality OK (bitmask=0x{raw:016x})")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
         i1 = self.read_interrupt(timeout=60000)
