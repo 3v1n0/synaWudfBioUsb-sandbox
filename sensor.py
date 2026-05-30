@@ -526,7 +526,6 @@ class Sensor:
             raise
 
     INTERRUPT_EP = 0x83  # interrupt IN endpoint (intf 1, vendor)
-    HID_EP = 0x81        # HID interrupt IN endpoint (intf 0, HID)
 
     def _claim_both_interfaces(self):
         """Claim intf 0 (HID) and intf 1 (vendor) so both endpoints
@@ -556,42 +555,6 @@ class Sensor:
                 _log("INTERRUPT timeout")
                 return None
             raise
-
-    def read_hid_report(self, timeout=3000):
-        """Read a HID input report from EP 0x81. Returns bytes or None."""
-        try:
-            resp = bytes(self.dev.read(self.HID_EP, 64, timeout=timeout))
-            _log(f"HID ({len(resp)}B): {resp.hex()}")
-            return resp
-        except usb.core.USBError as exc:
-            if exc.errno == 110:
-                return None
-            raise
-
-    @staticmethod
-    def _quality_bitmask_to_reject(bitmask):
-        """
-        Map quality bitmask to WINBIO reject detail using same logic
-        as FUN_18000d054 in the decompiled driver.
-        Returns WINBIO reject code (0 = OK).
-        """
-        if bitmask == 0:
-            return 0
-        if bitmask & 0x20000:
-            return 3   # WINBIO_FP_TOO_LEFT
-        if bitmask & 0x40000:
-            return 4   # WINBIO_FP_TOO_RIGHT
-        if bitmask & 0x02:
-            return 5   # WINBIO_FP_TOO_FAST
-        if bitmask & 0x10:
-            return 6   # WINBIO_FP_TOO_SLOW
-        if bitmask & 0x8000:
-            return 8   # WINBIO_FP_TOO_SKEWED
-        if bitmask & 0x04:
-            return 9   # WINBIO_FP_TOO_SHORT
-        if bitmask & 0x80000000:
-            return 7   # WINBIO_FP_POOR_QUALITY
-        return 0
 
     # --- Init protocol ---
 
@@ -1291,34 +1254,16 @@ class BiometricSensor(SensorTLS):
         _log(f"  ctx={ctx}")
         print("  Finger ON")
 
-        # HID quality check: the Windows driver reads a HID report from
-        # EP 0x81 after each capture for fine-grained quality/guidance.
-        # On Kensington (0x047d:0x00f2) this endpoint is available,
-        # but may only send reports during active capture.
-        hid = self.read_hid_report(timeout=2000)
-        if hid is not None and len(hid) >= 8 and hid[0] == 0x12:
-            _log(f"  HID report: {hid.hex()}")
-            raw = struct.unpack('<Q', hid[1:8] + b'\x00')[0]
-            rd = self._quality_bitmask_to_reject(raw)
-            if rd != 0:
-                detail_names = {3: "TOO_LEFT", 4: "TOO_RIGHT",
-                                5: "TOO_FAST", 6: "TOO_SLOW",
-                                7: "POOR_QUALITY", 8: "TOO_SKEWED",
-                                9: "TOO_SHORT"}
-                print(f"  Capture rejected: {detail_names.get(rd, f'0x{rd:x}')}"
-                      f" (detail={rd})")
-                return False, None
-        else:
-            _log("HID: no report")
-
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
         i1 = self.read_interrupt(timeout=60000)
         if i1 is None:
             print("  Finger removed before capture complete")
             return False, None
         i1_type = i1[0] if len(i1) > 0 else 0
+        i1_qual = i1[6] if len(i1) > 6 else 0
         print(f"  Interrupt: type=0x{i1_type:02x}"
-              f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})")
+              f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})"
+              f" qual=0x{i1_qual:02x}")
 
         # Pre-capture queries (finger is being placed/held)
         self.get_sensor_status(ctx)
@@ -1344,8 +1289,13 @@ class BiometricSensor(SensorTLS):
             ok = False
         else:
             i2_type = i2[0] if len(i2) > 0 else 0
+            i2_qual = i2[6] if len(i2) > 6 else 0
             print(f"  Interrupt: type=0x{i2_type:02x}"
-                  f" ({'capture armed' if i2_type==1 else 'data captured' if i2_type==2 else 'unknown'})")
+                  f" ({'capture armed' if i2_type==1 else 'data captured' if i2_type==2 else 'unknown'})"
+                  f" qual=0x{i2_qual:02x}")
+            if i2_type == 2 and i2_qual != 0:
+                print(f"  Capture rejected (device quality=0x{i2_qual:02x})")
+                ok = False
 
         # Post-capture queries
         self.get_sensor_status(0)
