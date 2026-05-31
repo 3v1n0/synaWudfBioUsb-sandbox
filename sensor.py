@@ -1181,66 +1181,59 @@ class BiometricSensor(SensorTLS):
         b.exe:
           1. Lists records (get_storage_count)
           2. For each record: FETCH_RECORD (9f03) + a003 + a103
-             (these authorise/validate the record for deletion)
-          3. FETCH_FIRST (9f01) to get the erase-cursor entries
-          4. Tries a001...ENTRY on each until one returns the
-             12-byte response with 01000000 at bytes [8:12]
+          3. FETCH_FIRST (9f01) for erase-cursor entries
+          4. a001...ENTRY until one returns 01000000 at [8:12]
+          5. IOCTL returns immediately; OnReleaseHardware commits.
+
+        After a001 succeeds we issue NO further USB commands --
+        close() sends REQ_SHUTDOWN which serves as our
+        OnReleaseHardware-equivalent commit.
         """
         _, count, guids = self.get_storage_count()
         print(f"  Records found: {count}")
 
         if count == 0:
             print("  No records to delete")
-        else:
-            for guid in guids:
-                # Fetch record metadata
-                resp = self.tls_send(
-                    bytes.fromhex('9f03' + '00' * 3) + guid,
-                    value=2, label="FETCH_RECORD")
-                if resp is None or len(resp) < 20:
-                    print(f"  FETCH_RECORD({guid[:8].hex()}) failed")
-                    return False
-                rec_data = resp[4:20]
-                # a003 must precede a103 (both use record data)
-                for cmd in ('a003', 'a103'):
-                    resp = self.tls_send(
-                        bytes.fromhex(cmd + '000000') + rec_data,
-                        value=2, label=f"{cmd}_VALIDATE")
-                    if resp is None:
-                        print(f"  {cmd} failed")
-                        return False
-            # Erase-cursor entries from 9f01
+            return True
+
+        for guid in guids:
             resp = self.tls_send(
-                bytes.fromhex('9f01' + '00' * 19),
-                value=2, label="FETCH_FIRST")
-            if resp is None or len(resp) < 4:
-                print("  FETCH_FIRST failed or empty")
+                bytes.fromhex('9f03' + '00' * 3) + guid,
+                value=2, label="FETCH_RECORD")
+            if resp is None or len(resp) < 20:
+                print(f"  FETCH_RECORD({guid[:8].hex()}) failed")
                 return False
-            nentries = struct.unpack('<H', resp[2:4])[0]
-            entries = [resp[4 + i*16 : 4 + (i+1)*16]
-                       for i in range(min(nentries, (len(resp)-4)//16))]
-            erased = False
-            for ent in entries:
+            rec_data = resp[4:20]
+            for cmd in ('a003', 'a103'):
                 resp = self.tls_send(
-                    bytes.fromhex('a001000000') + ent,
-                    value=2, label="SELECT_ERASE")
+                    bytes.fromhex(cmd + '000000') + rec_data,
+                    value=2, label=f"{cmd}_VALIDATE")
                 if resp is None:
-                    continue
-                if len(resp) >= 12 and resp[8:12] == b'\x01\x00\x00\x00':
-                    print(f"  Erased via entry {entries.index(ent) + 1}/{len(entries)}")
-                    erased = True
-                    break
-            if not erased:
-                print("  No erasable entry found")
+                    print(f"  {cmd} failed")
+                    return False
 
-        _, remaining, _ = self.get_storage_count()
-        if remaining:
-            print(f"  WARNING: {remaining} records still present")
-
-        resp = self.close_notify()
-        ok = resp == b'\x01\x00'
-        print(f"  CLOSE_NOTIFY: {resp.hex()} {'OK' if ok else 'UNEXPECTED'}")
-        return ok
+        resp = self.tls_send(
+            bytes.fromhex('9f01' + '00' * 19),
+            value=2, label="FETCH_FIRST")
+        if resp is None or len(resp) < 4:
+            print("  FETCH_FIRST failed or empty")
+            return False
+        nentries = struct.unpack('<H', resp[2:4])[0]
+        entries = [resp[4 + i*16 : 4 + (i+1)*16]
+                   for i in range(min(nentries, (len(resp)-4)//16))]
+        erased = False
+        for ent in entries:
+            resp = self.tls_send(
+                bytes.fromhex('a001000000') + ent,
+                value=2, label="SELECT_ERASE")
+            if resp is None:
+                continue
+            if len(resp) >= 12 and resp[8:12] == b'\x01\x00\x00\x00':
+                erased = True
+                break
+        if not erased:
+            print("  No erasable entry found")
+        return erased
 
     def _commit_enrollment(self, guid, label="FP1"):
         """
