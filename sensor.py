@@ -1175,33 +1175,49 @@ class BiometricSensor(SensorTLS):
 
     def erase_database(self):
         """
-        Delete all enrolled records.  Iterates over the GUIDs
-        returned by get_storage_count, selects each with a001,
-        then runs the a4-phase delete (which wipes the lot).
-        Closes with close_notify.
+        Delete all enrolled records matching the exact b.exe
+        clear-db sequence from IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE.
+
+        b.exe does NOT use a401/a402/a403.  Instead it:
+          1. Lists records (same as list-db)
+          2. Calls 9f01...0000 to get erase-cursor entries
+          3. Tries a001...ENTRY on each; the first entry that
+             returns the 12-byte response with 01000000 at
+             bytes [8:12] triggers the erase.
+
+        The select/de-dup loop iterates because 9f01 can return
+        stale/partial entries (00000000 marker) before the real
+        enrolled record.
         """
-        _, count, guids = self.get_storage_count()
+        _, count, _ = self.get_storage_count()
         print(f"  Records found: {count}")
 
         if count == 0:
             print("  No records to delete")
         else:
-            for guid in guids:
-                print(f"  Selecting {guid.hex()}")
+            resp = self.tls_send(
+                bytes.fromhex('9f01' + '00' * 19),
+                value=2, label="FETCH_FIRST")
+            if resp is None or len(resp) < 4:
+                print("  FETCH_FIRST failed or empty")
+                return False
+            nentries = struct.unpack('<H', resp[2:4])[0]
+            entries = [resp[4 + i*16 : 4 + (i+1)*16]
+                       for i in range(min(nentries, (len(resp)-4)//16))]
+            erased = False
+            for ent in entries:
                 resp = self.tls_send(
-                    bytes.fromhex('a001000000') + guid,
-                    value=2, label="SELECT_DELETE")
+                    bytes.fromhex('a001000000') + ent,
+                    value=2, label="SELECT_ERASE")
                 if resp is None:
-                    print("  SELECT_DELETE failed")
-                    return False
-            for cmd, label in [('a401', 'DELETE_PHASE1'),
-                               ('a402', 'DELETE_PHASE2'),
-                               ('a403', 'DELETE_FINALIZE')]:
-                resp = self.tls_send(bytes.fromhex(cmd),
-                                     value=7, label=label)
-                if resp is None:
-                    print(f"  {label} failed")
-                    return False
+                    continue
+                # Marker 01000000 at [8:12] = "1 record erased"
+                if len(resp) >= 12 and resp[8:12] == b'\x01\x00\x00\x00':
+                    print(f"  Erased via entry {entries.index(ent) + 1}/{len(entries)}")
+                    erased = True
+                    break
+            if not erased:
+                print("  No erasable entry found")
 
         _, remaining, _ = self.get_storage_count()
         if remaining:
