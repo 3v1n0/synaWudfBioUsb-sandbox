@@ -339,14 +339,18 @@ def load_pairing_data():
     tlvs = _load_pairing_from_file()
     if tlvs is not None:
         return tlvs
-    # blob = _load_pairing_blob_from_registry()
-    # if blob:
-    #     plain = _decrypt_pairing_data(blob)
-    #     if plain:
-    #         tlvs = _parse_pairing_tlv(plain)
-    #         if tlvs:
-    #             _save_pairing_tlv(tlvs)
-    #             return tlvs
+
+    if "USE_WINE_PAIRING_DATA" not in os.environ:
+        return None
+
+    blob = _load_pairing_blob_from_registry()
+    if blob:
+        plain = _decrypt_pairing_data(blob)
+        if plain:
+            tlvs = _parse_pairing_tlv(plain)
+            if tlvs:
+                _save_pairing_tlv(tlvs)
+                return tlvs
     return None
 
 
