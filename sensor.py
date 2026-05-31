@@ -549,6 +549,7 @@ class Sensor:
         try:
             resp = bytes(self.dev.read(self.INTERRUPT_EP, 64, timeout=timeout))
             _log(f"INTERRUPT ({len(resp)}B): {resp.hex()}")
+            print("Interrupt", resp.hex())
             return resp
         except usb.core.USBError as exc:
             if exc.errno == 110:  # timeout
@@ -933,6 +934,33 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('96010000000000000000000000'),
             value=2, label="ENROLL_BEGIN")
 
+    # Quality bitmask → WINBIO_SENSOR_STATUS mapping
+    # (from decompiled FUN_18000d054 at line 8331)
+    QUALITY_MAP = {
+        0x00:       (0, 0),     # WINBIO_SENSOR_ACCEPT
+        0x02:       (5, 0x07),  # WINBIO_SENSOR_REJECT
+        0x04:       (9, 0x07),
+        0x10:       (6, 0x07),
+        0x8000:     (8, 0x07),
+        0x20000:    (3, 0x07),  # DRY finger
+        0x40000:    (4, 0x07),  # WET finger
+        0x80000000: (7, 0x07),  # BAD capture
+    }
+
+    @staticmethod
+    def _quality_to_status(quality):
+        """Map quality bitmask to (sensor_status, reject_detail).
+
+        The quality bitmask is the first DWORD of the image data header.
+        Multiple bits may be set; we return the first matching entry.
+        """
+        if quality == 0:
+            return 1, 0  # ACCEPT
+        for bit, (ss, rd) in sorted(BiometricSensor.QUALITY_MAP.items()):
+            if bit and quality & bit:
+                return ss, rd
+        return 2, 7  # generic reject
+
     @staticmethod
     def _parse_capture_response(resp):
         """
@@ -1260,10 +1288,9 @@ class BiometricSensor(SensorTLS):
             print("  Finger removed before capture complete")
             return False, None
         i1_type = i1[0] if len(i1) > 0 else 0
-        i1_qual = i1[6] if len(i1) > 6 else 0
+        _log(f"  Interrupt raw: {i1.hex()}")
         print(f"  Interrupt: type=0x{i1_type:02x}"
-              f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})"
-              f" qual=0x{i1_qual:02x}")
+              f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})")
 
         # Pre-capture queries (finger is being placed/held)
         self.get_sensor_status(ctx)
@@ -1289,13 +1316,9 @@ class BiometricSensor(SensorTLS):
             ok = False
         else:
             i2_type = i2[0] if len(i2) > 0 else 0
-            i2_qual = i2[6] if len(i2) > 6 else 0
+            _log(f"  Interrupt raw: {i2.hex()}")
             print(f"  Interrupt: type=0x{i2_type:02x}"
-                  f" ({'capture armed' if i2_type==1 else 'data captured' if i2_type==2 else 'unknown'})"
-                  f" qual=0x{i2_qual:02x}")
-            if i2_type == 2 and i2_qual != 0:
-                print(f"  Capture rejected (device quality=0x{i2_qual:02x})")
-                ok = False
+                  f" ({'capture armed' if i2_type==1 else 'data captured' if i2_type==2 else 'unknown'})")
 
         # Post-capture queries
         self.get_sensor_status(0)
