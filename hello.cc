@@ -3432,9 +3432,9 @@ main(int argc, char *argv[])
     }
 
     // Validate arguments early before touching hardware
-    if(strcasecmp(argv[1], "set-led") == 0) {
+    if(strcasecmp(argv[1], "set-led") == 0 || strcasecmp(argv[1], "set-indicator") == 0) {
         if(argc < 3 || (strcasecmp(argv[2], "on") != 0 && strcasecmp(argv[2], "off") != 0)) {
-            printf("Usage: %s set-led <on|off>\n", argv[0]);
+            printf("Usage: %s %s <on|off>\n", argv[0], argv[1]);
             return 3;
         }
         ledState = (strcasecmp(argv[2], "on") == 0) ? WINBIO_INDICATOR_ON : WINBIO_INDICATOR_OFF;
@@ -3631,6 +3631,9 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "set-led") == 0) {
         setLed(ledState);
+    }
+    else if(strcasecmp(argv[1], "set-indicator") == 0) {
+        setIndicator(ledState);
     }
     else if(strcasecmp(argv[1], "delete-record") == 0) {
         deleteRecord((WINBIO_BIOMETRIC_SUBTYPE) atoi(argv[2]));

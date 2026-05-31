@@ -36,7 +36,7 @@ PairingData (local file or Wine registry):
   tag=3: 400-byte device cert body
 
 USB wValue map (confirmed from b.exe trace):
-  Init cmds (plain):  OUT value=1 / IN value=0 (init2/init3: IN value=0x8000)
+  Init cmds (plain):  OUT value=1 / IN value=0 (cert-section reads: IN value=0x8000)
   ClientHello:        OUT value=4 / IN value=0
   Bundle:             OUT value=0 / IN value=0
   GET_RECORD_COUNT:   OUT value=6 / IN value=0
@@ -558,44 +558,55 @@ class Sensor:
 
     # --- Init protocol ---
 
-    def init_phase(self, n):
+    def _cmd_device_info(self, n):
+        """Send device info query (01...) -> 38B response."""
+        self.ctrl_out(REQ_CMD, value=1,
+                      data=bytes.fromhex('0100000000000000'),
+                      label=f"DEV_INFO(r{n})")
+        return self.ctrl_in(REQ_RESP, 0x26, label=f"DEV_INFO(r{n})")
+
+    def _cmd_cert_section(self, n, section):
+        """Read certificate section (8e <section> 00 02 ...)."""
+        data = bytes([0x8e, section, 0, 2]) + b'\x00' * 20
+        self.ctrl_out(REQ_CMD, value=1, data=data,
+                      label=f"CERT_SECT_{section:02x}(r{n})")
+        return self.ctrl_in(REQ_RESP, 4096, value=0x8000,
+                            label=f"CERT_SECT_{section:02x}(r{n})")
+
+    def _cmd_bootstrap_status(self, n):
+        """Send bootstrap status query (19...) -> 68B response."""
+        self.ctrl_out(REQ_CMD, value=1,
+                      data=bytes.fromhex('1900000000000000'),
+                      label=f"BOOT_STATUS(r{n})")
+        return self.ctrl_in(REQ_RESP, 0x44, label=f"BOOT_STATUS(r{n})")
+
+    def _init_round(self, n):
         """
         One init round: REQ_START + 4 plain commands.
-        Returns the init1 response (for TLS-stale detection).
-        init2/init3 IN use wValue=0x8000 and request 4096 bytes (native).
+        Returns the device-info response (for TLS-stale detection).
+        Cert-section reads use wValue=0x8000 and request 4096 bytes
+        (native format).
         """
         self.ctrl_out(REQ_START, value=1, label=f"REQ_START(r{n})")
         ack = self.ctrl_in(REQ_ACK, 1, label=f"REQ_ACK(r{n})")
         assert ack == b'\x01', f"ACK={ack.hex()}"
 
-        def cmd(data, resp_len, lbl, resp_value=0):
-            self.ctrl_out(REQ_CMD, value=1, data=data, label=lbl)
-            return self.ctrl_in(REQ_RESP, resp_len,
-                                value=resp_value, label=lbl)
+        info_resp = self._cmd_device_info(n)
+        self._cmd_cert_section(n, 0x09)
+        self._cmd_cert_section(n, 0x1a)
+        self._cmd_bootstrap_status(n)
+        return info_resp
 
-        init1_resp = cmd(bytes.fromhex('0100000000000000'),
-                         0x26, f"init1(r{n})")
-        cmd(bytes.fromhex(
-            '8e0900020000000000000000000000000000000000000000'),
-            4096, f"init2(r{n})", resp_value=0x8000)
-        cmd(bytes.fromhex(
-            '8e1a00020000000000000000000000000000000000000000'),
-            4096, f"init3(r{n})", resp_value=0x8000)
-        cmd(bytes.fromhex('1900000000000000'),
-            0x44, f"init4(r{n})")
-        return init1_resp
-
-    def init_phases(self):
+    def init_device(self):
         """
-        Run 3 init rounds, plus extra if device was left in TLS state
-        from a previous session (init1 returns TLS record data instead
-        of plain device info).
+        Run init rounds until the device responds with non-TLS data,
+        indicating it has left TLS state from a previous session.
         """
         for i in range(9):
-            init1_resp = self.init_phase(i)
-            # Check if init1 looks like TLS record (0x15=CCS, 0x16=HS, 0x17=AppData)
-            if i >= 2 and (init1_resp and len(init1_resp) >= 1
-                           and init1_resp[0] not in (0x15, 0x16, 0x17)):
+            info_resp = self._init_round(i)
+            # If info_resp is not a TLS record, device is in plain mode
+            if (i >= 2 and info_resp and len(info_resp) >= 1
+                    and info_resp[0] not in (0x15, 0x16, 0x17)):
                 break
         _log("Init phases done")
 
@@ -913,7 +924,7 @@ class BiometricSensor(SensorTLS):
         all non-empty slots. Prints results to stdout.
         """
         status, count, guids = self.get_storage_count()
-        _log(f"Storage count: status=0x{status:04x} count={count}")
+        print(f"Storage count: status=0x{status:04x} count={count}")
         if not guids:
             print("No storage slots found.")
             return []
@@ -1735,7 +1746,7 @@ def main():
     sensor.find_device()
 
     print("Running init phases...")
-    sensor.init_phases()
+    sensor.init_device()
 
     print("REQ_READY...")
     ready = sensor.req_ready()
