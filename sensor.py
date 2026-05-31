@@ -66,6 +66,34 @@ except ImportError:
     print("Install pyusb: pip install pyusb")
     sys.exit(1)
 
+
+# ---------------------------------------------------------------------------
+# TLS Alert error
+# ---------------------------------------------------------------------------
+
+class TlsAlertError(RuntimeError):
+    """Device returned a TLS alert during handshake or encrypted session."""
+    ALERTS = {
+        0x2a: "bad_certificate",
+        0x2e: "decode_error",
+        0x28: "handshake_failure",
+        0x2f: "decrypt_error",
+        0x30: "protocol_version",
+        0x15: "certificate_unknown",
+    }
+
+    def __init__(self, level, code, extra=""):
+        name = self.ALERTS.get(code, f"unknown(0x{code:02x})")
+        msg = f"TLS Alert: level={level:#04x} code={name}"
+        if extra:
+            msg += f" {extra}"
+        super().__init__(msg)
+        self.level = level
+        self.code = code
+
+
+# ---------------------------------------------------------------------------
+# Configuration
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -311,14 +339,14 @@ def load_pairing_data():
     tlvs = _load_pairing_from_file()
     if tlvs is not None:
         return tlvs
-    blob = _load_pairing_blob_from_registry()
-    if blob:
-        plain = _decrypt_pairing_data(blob)
-        if plain:
-            tlvs = _parse_pairing_tlv(plain)
-            if tlvs:
-                _save_pairing_tlv(tlvs)
-                return tlvs
+    # blob = _load_pairing_blob_from_registry()
+    # if blob:
+    #     plain = _decrypt_pairing_data(blob)
+    #     if plain:
+    #         tlvs = _parse_pairing_tlv(plain)
+    #         if tlvs:
+    #             _save_pairing_tlv(tlvs)
+    #             return tlvs
     return None
 
 
@@ -351,6 +379,25 @@ def get_pairing_fields(tlvs):
             dev_x_be = x_le[::-1]
             dev_y_be = host_cert[off:off + 32][::-1]
     return host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le
+
+
+def dev_key_from_tag3(tag3):
+    """
+    Extract device ECDH static key (x_be, y_be) from a 400-byte Tag3 blob.
+    Tag3 layout matches Tag1: header(4) + X_LE(32) + Y_LE(32) + padding.
+    """
+    if not tag3 or len(tag3) < 142 or tag3[:4] != b'\x3f\x5f\x17\x00':
+        return DEV_X_BE, DEV_Y_BE
+    x_le = tag3[4:36]
+    off  = 36
+    while off < 142 and tag3[off] == 0:
+        off += 1
+    y_le = tag3[off:off + 32] if off < 142 else b'\x00' * 32
+    if len(x_le) < 32:
+        x_le = x_le + b'\x00' * (32 - len(x_le))
+    if len(y_le) < 32:
+        y_le = y_le + b'\x00' * (32 - len(y_le))
+    return x_le[::-1], y_le[::-1]
 
 
 # ---------------------------------------------------------------------------
@@ -615,6 +662,35 @@ class Sensor:
     def req_ready(self):
         return self.ctrl_in(REQ_READY, 2, label="REQ_READY")
 
+    def send_challenge(self, host_142, eck2_be):
+        """
+        Send 408-byte pairing challenge when REQ_READY returns non-zero.
+
+        The challenge proves ownership of the host ECS2 signing key.
+        Device responds with 802 bytes: status(2) + Tag1(400) + Tag3(400).
+        Returns (tag1, tag3) on success, raises on failure.
+        """
+        sig = sign_ecdsa_sha256(eck2_be, hashlib.sha256(host_142).digest())
+        challenge = b'\x93' + host_142 + b'\x47\x00' + sig
+        challenge += b'\x00' * (408 - len(challenge))
+        assert len(challenge) == 408
+        _hexdump("Challenge", challenge)
+        self.ctrl_out(REQ_CMD, value=1, data=challenge,
+                      label="CHALLENGE")
+        resp = self.ctrl_in(REQ_RESP, 802, label="CHALLENGE_RESP")
+        if resp is None or len(resp) < 402:
+            raise RuntimeError(
+                f"Challenge response too short: {len(resp) if resp else 0}B")
+        status = struct.unpack('<H', resp[:2])[0]
+        if status != 0:
+            raise RuntimeError(f"Challenge rejected: status=0x{status:04x}")
+        tag1 = resp[2:402]
+        tag3 = resp[402:802] if len(resp) >= 802 else None
+        _log(f"Challenge accepted, tag1={tag1[:8].hex()}...")
+        if tag3:
+            _log(f"  tag3={tag3[:8].hex()}...")
+        return tag1, tag3
+
 
 # ---------------------------------------------------------------------------
 # SensorTLS -- extends Sensor with TLS 1.2 handshake
@@ -681,7 +757,8 @@ class SensorTLS(Sensor):
                       label="TLS_OUT(CH)")
         raw_sh = self.ctrl_in(REQ_RESP, 0x400, label="TLS_IN(CH)")
         if raw_sh and raw_sh[0] == TLS_ALERT:
-            raise RuntimeError(f"TLS Alert on ClientHello: {raw_sh.hex()}")
+            raise TlsAlertError(raw_sh[1], raw_sh[2],
+                                f"ClientHello rejected: {raw_sh.hex()}")
 
         # ----- Parse ServerHello + CertReq + ServerHelloDone -----
         srv_rand = None
@@ -778,8 +855,8 @@ class SensorTLS(Sensor):
             sbody = raw_sfin[off + 5: off + 5 + slen]
             off  += 5 + slen
             if stype == TLS_ALERT:
-                raise RuntimeError(
-                    f"TLS Alert from server: {sbody.hex()}")
+                raise TlsAlertError(sbody[0], sbody[1] if len(sbody) > 1 else 0,
+                                    f"Bundle response: {sbody.hex()}")
             if stype == TLS_HANDSHAKE:
                 try:
                     srv_fin = state.decrypt(TLS_HANDSHAKE, sbody)
@@ -1212,6 +1289,33 @@ class BiometricSensor(SensorTLS):
         return self.tls_send(
             bytes.fromhex('0001'),
             value=7, label="CLOSE_NOTIFY")
+
+    def reset_ownership(self):
+        """
+        Unpair device: clear local PairingData and reset device state.
+
+        Replicates b.exe reset-ownership: sends IOCTL-equivalent to
+        device, closes TLS, REQ_SHUTDOWN, then deletes pairing.dat.
+        No USB unpair command exists on this device — it's a
+        software-only operation (registry cleanup on Windows).
+        """
+        print("\n--- Reset Ownership ---")
+        if os.path.exists(PAIRING_FILE):
+            print("  Deleting local PairingData...")
+            os.unlink(PAIRING_FILE)
+            print("  OK")
+        else:
+            print("  No local PairingData found")
+        print("  Sending REQ_SHUTDOWN...")
+        try:
+            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
+                                   timeout=1000)
+            self.dev.ctrl_transfer(BM_IN, REQ_ACK, 0, 0, 2,
+                                   timeout=1000)
+        except Exception as exc:
+            _log(f"  REQ_SHUTDOWN: {exc}")
+        print("  Device unpaired")
+        return True
 
     def _load_record_for_match(self, guid):
         """
@@ -1739,13 +1843,23 @@ class BiometricSensor(SensorTLS):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db', 'identify-all', 'identify'):
-        print("Usage: sensor.py list-db|enroll|clear-db|identify-all|identify")
+    if len(sys.argv) < 2 or sys.argv[1] not in (
+            'list-db', 'enroll', 'clear-db', 'identify-all', 'identify',
+            'reset-ownership'):
+        print("Usage: sensor.py list-db|enroll|clear-db|identify-all|identify"
+              "|reset-ownership")
         sys.exit(1)
 
     print("Connecting to sensor...")
     sensor = BiometricSensor()
     sensor.find_device()
+
+    # reset-ownership is a special case: no init, no TLS needed
+    if sys.argv[1] == 'reset-ownership':
+        sensor.reset_ownership()
+        sensor.close()
+        print("Done.")
+        return
 
     print("Running init phases...")
     sensor.init_device()
@@ -1754,7 +1868,7 @@ def main():
     ready = sensor.req_ready()
     _log(f"REQ_READY = {ready.hex()}")
 
-    # ----- PairingData -----
+    # ----- Challenge / PairingData -----
     print("Loading PairingData...")
     tlvs = load_pairing_data()
     pair = get_pairing_fields(tlvs) if tlvs else None
@@ -1766,6 +1880,14 @@ def main():
         print(f"  host_142: {host_142[:8].hex()}...")
         _log(f"  eck2_le:  {eck2_le[:8].hex()}...")
         _log(f"  dev_x_be: {dev_x_be[:8].hex()}...")
+        # Even with PairingData, check if device wants a challenge
+        if ready and int.from_bytes(ready, 'little') != 0:
+            print("  Device requests challenge (REQ_READY non-zero)")
+            print("  Sending pairing challenge...")
+            tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
+            # Tag3 has fresh device key — override stored values
+            dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
+            _log(f"  Updated dev key from challenge: {dev_x_be[:8].hex()}...")
     else:
         print("  No PairingData -- generating fresh ECS2 key pair")
         eck2_be       = _rand(32)
@@ -1774,15 +1896,30 @@ def main():
         host_142      = HOST_142_FALLBACK
         cert_data_398 = None
         dev_x_be, dev_y_be = DEV_X_BE, DEV_Y_BE
+        if ready and int.from_bytes(ready, 'little') != 0:
+            print("  Device requests challenge (REQ_READY non-zero)")
+            print("  Sending pairing challenge...")
+            tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
+            dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
 
     # ----- TLS handshake -----
     print("TLS handshake...")
-    sensor.connect(host_142, eck2_be, eck2_pub_le,
-                   cert_data_398, dev_x_be, dev_y_be)
+    try:
+        sensor.connect(host_142, eck2_be, eck2_pub_le,
+                       cert_data_398, dev_x_be, dev_y_be)
+    except TlsAlertError as exc:
+        print(f"  TLS handshake failed: {exc}")
+        if "bad_certificate" in str(exc):
+            print("")
+            print("  Device rejected our certificate. This means the device")
+            print("  still has pairing data from a previous host identity.")
+            print("  Run 'sensor.py reset-ownership' to clear it, then retry.")
+        sensor.close()
+        sys.exit(1)
     print("  TLS OK")
 
-    # ----- Save PairingData if we used fresh keys -----
-    if pair is None and not os.path.exists(PAIRING_FILE):
+    # ----- Save PairingData if we used fresh keys or got new tags -----
+    if not os.path.exists(PAIRING_FILE):
         host_x_le = bytes(reversed(dev_x_be))
         host_y_le = bytes(reversed(dev_y_be))
         host_cert = (b'\x3f\x5f\x17\x00' + host_x_le + b'\x00' * 20
