@@ -1200,20 +1200,6 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('0001'),
             value=7, label="CLOSE_NOTIFY")
 
-    def _session_init(self):
-        """Send 1400 session init challenge. Returns response or None."""
-        nonce = _rand(12)
-        return self.tls_send(
-            bytes.fromhex('1400000c') + nonce,
-            value=2, label="SESSION_INIT")
-
-    def _session_close(self):
-        """Send 1400 session close challenge."""
-        nonce = _rand(12)
-        return self.tls_send(
-            bytes.fromhex('1400000c') + nonce,
-            value=2, label="SESSION_CLOSE")
-
     def _load_record_for_match(self, guid):
         """
         Load an enrolled record into the matching engine.
