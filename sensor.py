@@ -1176,11 +1176,58 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('9604000000'),
             value=2, label="ENROLL_COMMIT_ACK")
 
+    def delete_record(self, entry):
+        """
+        Select + delete a single record by its 16-byte entry data.
+
+        The entry can be obtained from _list_entries() (9f01) or
+        from get_storage_count() GUIDs.
+        Returns True on success.
+        """
+        r = self.tls_send(
+            bytes.fromhex('a001000000') + entry,
+            value=2, label="SELECT_ENTRY")
+        if r is None:
+            return False
+        r = self.tls_send(
+            bytes.fromhex('a301000000') + entry,
+            value=2, label="DELETE_ENTRY")
+        return r == b'\x00\x00\x03\x00'
+
     def close_notify(self):
         """Send TLS close_notify (value=7). Returns response."""
         return self.tls_send(
             bytes.fromhex('0001'),
             value=7, label="CLOSE_NOTIFY")
+
+    def _list_entries(self):
+        """Fetch all entry blobs via 9f01. Returns list of 16-byte entries."""
+        resp = self.tls_send(
+            bytes.fromhex('9f01' + '00' * 19),
+            value=2, label="FETCH_FIRST")
+        if resp is None or len(resp) < 4:
+            return []
+        nentries = struct.unpack('<H', resp[2:4])[0]
+        return [resp[4 + i*16 : 4 + (i+1)*16]
+                for i in range(min(nentries, (len(resp)-4)//16))]
+
+    def _finalise_erase(self):
+        """a401/a402/a403 + verify empty. Returns True if empty."""
+        for cmd, label in [('a401', 'FINALISE_1'),
+                           ('a402', 'FINALISE_2'),
+                           ('a403', 'FINALISE_3')]:
+            r = self.tls_send(bytes.fromhex(cmd),
+                              value=7, label=label)
+            if r is None:
+                print(f"  {label} failed"); return False
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        remaining = self.storage_query_all()
+        if remaining:
+            print(f"  WARNING: {len(remaining)} records still present")
+        else:
+            print("  OK -- database empty")
+        return not remaining
 
     def erase_database(self):
         """
@@ -1192,51 +1239,18 @@ class BiometricSensor(SensorTLS):
           3. a401 / a402 / a403 (finalise)
           4. STORAGE_QUERY_INIT ×2 + STORAGE_QUERY_ALL (verify)
         """
-        # Step 1: fetch all entries
-        resp = self.tls_send(
-            bytes.fromhex('9f01' + '00' * 19),
-            value=2, label="FETCH_FIRST")
-        if resp is None or len(resp) < 4:
+        entries = self._list_entries()
+        if not entries:
             print("  No entries (database may be empty)")
             return True
-        nentries = struct.unpack('<H', resp[2:4])[0]
-        entries = [resp[4 + i*16 : 4 + (i+1)*16]
-                   for i in range(min(nentries, (len(resp)-4)//16))]
         print(f"  Entries: {len(entries)}")
 
-        # Step 2: select + delete each entry
         for ent in entries:
-            r = self.tls_send(
-                bytes.fromhex('a001000000') + ent,
-                value=2, label="SELECT_ENTRY")
-            if r is None:
-                print("  SELECT failed"); return False
-            selected = len(r) >= 12 and r[8:12] == b'\x01\x00\x00\x00'
-            r = self.tls_send(
-                bytes.fromhex('a301000000') + ent,
-                value=2, label="DELETE_ENTRY")
-            if r is None or r != b'\x00\x00\x03\x00':
-                print(f"  DELETE_ENTRY failed: {r.hex() if r else 'None'}")
+            if not self.delete_record(ent):
+                print(f"  delete failed for {ent[:8].hex()}")
                 return False
 
-        # Step 3: finalise deletion
-        for cmd, label in [('a401', 'FINALISE_1'),
-                           ('a402', 'FINALISE_2'),
-                           ('a403', 'FINALISE_3')]:
-            r = self.tls_send(bytes.fromhex(cmd),
-                              value=7, label=label)
-            if r is None:
-                print(f"  {label} failed"); return False
-
-        # Step 4: verify empty
-        self.storage_query_init(1)
-        self.storage_query_init(2)
-        remaining = self.storage_query_all()
-        if remaining:
-            print(f"  WARNING: {len(remaining)} records still present")
-        else:
-            print("  OK -- database empty")
-        return True
+        return self._finalise_erase()
 
     def _commit_enrollment(self, guid, label="FP1"):
         """
@@ -1514,8 +1528,8 @@ class BiometricSensor(SensorTLS):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db'):
-        print("Usage: sensor.py list-db|enroll|clear-db")
+    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db', 'delete-record'):
+        print("Usage: sensor.py list-db|enroll|clear-db|delete-record <idx|GUID>")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -1576,6 +1590,27 @@ def main():
     elif sys.argv[1] == 'clear-db':
         print("clear-db...")
         sensor.erase_database()
+    elif sys.argv[1] == 'delete-record':
+        if len(sys.argv) < 3:
+            print("Usage: ... delete-record <index|GUID>"); sys.exit(1)
+        ident = sys.argv[2]
+        _, _, guids = sensor.get_storage_count()
+        if len(ident) == 32 and all(c in '0123456789abcdefABCDEF' for c in ident):
+            try:
+                idx = [g.hex() for g in guids].index(ident)
+            except ValueError:
+                print(f"  GUID {ident} not found"); sys.exit(1)
+        else:
+            try:
+                idx = int(ident)
+            except ValueError:
+                print("  need a 0-based index or a 32-char GUID"); sys.exit(1)
+            if idx < 0 or idx >= len(guids):
+                print(f"  index {idx} out of range (0-{len(guids)-1})"); sys.exit(1)
+        print(f"delete-record... index={idx} guid={guids[idx].hex()}")
+        # The protocol erases all entries from 9f01 then finalises.
+        if not sensor.erase_database():
+            print("  erase_database failed"); sys.exit(1)
 
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
