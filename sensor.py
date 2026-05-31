@@ -1175,35 +1175,47 @@ class BiometricSensor(SensorTLS):
 
     def erase_database(self):
         """
-        Delete every enrolled record individually, matching the exact
-        b.exe clear-db command sequence:
+        Clear every enrolled record, matching the exact b.exe
+        clear-db sequence (no looping -- the a4 phases delete
+        all records in one shot):
 
-          9f01...0000 → FETCH_FIRST  (value=2)
-          a001...GUID → SELECT       (value=2)
-          a401 → DELETE_PHASE1       (value=7)
-          a402 → DELETE_PHASE2       (value=7)
-          a403 → DELETE_FINALIZE     (value=7)
+          9f01...0000 → FETCH_FIRST   (value=2)
+          a001...GUID → SELECT        (value=2)
+          9f01...0000 → FETCH_FIRST   (value=2)
+          a001...GUID → SELECT        (value=2)
+          a401         → DELETE_PHASE1  (value=7)
+          a402         → DELETE_PHASE2  (value=7)
+          a403         → DELETE_FINALIZE (value=7)
 
         Then verify empty, close notify.
         """
-        any_records = False
-        while True:
-            resp = self.tls_send(
-                bytes.fromhex('9f01' + '00' * 19),
-                value=2, label="FETCH_FIRST")
-            if resp is None:
-                print("  FETCH_FIRST failed")
-                return False
-            if len(resp) < 20 or resp[4:20] == b'\x00' * 16:
-                break
+        resp = self.tls_send(
+            bytes.fromhex('9f01' + '00' * 19),
+            value=2, label="FETCH_FIRST")
+        if resp is None:
+            print("  FETCH_FIRST failed")
+            return False
+        has_records = len(resp) >= 20 and resp[4:20] != b'\x00' * 16
+        if not has_records:
+            print("  No records to delete")
+        else:
             guid = resp[4:20]
-            print(f"  Deleting {guid.hex()}")
-            resp = self.tls_send(
-                bytes.fromhex('a001000000') + guid,
-                value=2, label="SELECT_DELETE")
-            if resp is None:
-                print("  SELECT_DELETE failed")
-                return False
+            # Two rounds of 9f01+a001 (matching b.exe)
+            for _ in range(2):
+                resp = self.tls_send(
+                    bytes.fromhex('a001000000') + guid,
+                    value=2, label="SELECT_DELETE")
+                if resp is None:
+                    print("  SELECT_DELETE failed")
+                    return False
+                if _ == 1:
+                    break
+                resp = self.tls_send(
+                    bytes.fromhex('9f01' + '00' * 19),
+                    value=2, label="FETCH_FIRST")
+                if resp is None:
+                    print("  FETCH_FIRST retry failed")
+                    return False
             for cmd, label in [('a401', 'DELETE_PHASE1'),
                                ('a402', 'DELETE_PHASE2'),
                                ('a403', 'DELETE_FINALIZE')]:
@@ -1212,10 +1224,6 @@ class BiometricSensor(SensorTLS):
                 if resp is None:
                     print(f"  {label} failed")
                     return False
-            any_records = True
-
-        if not any_records:
-            print("  No records to delete")
 
         self.storage_query_init(1)
         self.storage_query_init(2)
