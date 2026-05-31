@@ -777,12 +777,12 @@ class SensorTLS(Sensor):
         self.tls = state
         _log("TLS handshake complete")
 
-    def tls_send(self, plain, value, label=""):
-        """Encrypt plain as TLS ApplicationData, send, decrypt response."""
+    def tls_send(self, plain, value, label="", ctype=TLS_APP_DATA):
+        """Encrypt plain as TLS record (ctype), send, decrypt response."""
         assert self.tls is not None, "call connect() first"
         _log(f"  tx seq={self.tls.client_seq} plain_len={len(plain)}")
-        body = self.tls.encrypt(TLS_APP_DATA, plain)
-        rec  = make_tls_record(TLS_APP_DATA, body)
+        body = self.tls.encrypt(ctype, plain)
+        rec  = make_tls_record(ctype, body)
         # Pad to 8-byte alignment (native format)
         pad  = (-len(rec)) % 8
         self.ctrl_out(REQ_CMD, value=value,
@@ -811,12 +811,21 @@ class SensorTLS(Sensor):
             return None
 
     def close(self):
-        """Send vendor shutdown command and release TLS state."""
+        """Send REQ_SHUTDOWN + TLS close_notify (matches b.exe)."""
         try:
             self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
                                    timeout=1000)
+            self.dev.ctrl_transfer(BM_IN, REQ_ACK, 0, 0, 2,
+                                   timeout=1000)
         except Exception:
             pass
+        # TLS close_notify as Alert record (ctype=0x15)
+        if self.tls is not None:
+            try:
+                self.tls_send(b'\x00\x01', value=7,
+                              label="CLOSE_NOTIFY", ctype=TLS_ALERT)
+            except Exception:
+                pass
         self.tls = None
 
 
@@ -1175,65 +1184,59 @@ class BiometricSensor(SensorTLS):
 
     def erase_database(self):
         """
-        Delete all enrolled records matching the exact b.exe
-        clear-db sequence from IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE.
-
-        b.exe:
-          1. Lists records (get_storage_count)
-          2. For each record: FETCH_RECORD (9f03) + a003 + a103
-          3. FETCH_FIRST (9f01) for erase-cursor entries
-          4. a001...ENTRY until one returns 01000000 at [8:12]
-          5. IOCTL returns immediately; OnReleaseHardware commits.
-
-        After a001 succeeds we issue NO further USB commands --
-        close() sends REQ_SHUTDOWN which serves as our
-        OnReleaseHardware-equivalent commit.
+        Delete all enrolled records matching b.exe's exact
+        IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE sequence
+        (traced with PROTO_TRACE=1 on 2026-05-31):
+          1. FETCH_FIRST (9f01) → list entries
+          2. For each entry: a001 (SELECT) + a301 (DELETE)
+          3. a401 / a402 / a403 (finalise)
+          4. STORAGE_QUERY_INIT ×2 + STORAGE_QUERY_ALL (verify)
         """
-        _, count, guids = self.get_storage_count()
-        print(f"  Records found: {count}")
-
-        if count == 0:
-            print("  No records to delete")
-            return True
-
-        for guid in guids:
-            resp = self.tls_send(
-                bytes.fromhex('9f03' + '00' * 3) + guid,
-                value=2, label="FETCH_RECORD")
-            if resp is None or len(resp) < 20:
-                print(f"  FETCH_RECORD({guid[:8].hex()}) failed")
-                return False
-            rec_data = resp[4:20]
-            for cmd in ('a003', 'a103'):
-                resp = self.tls_send(
-                    bytes.fromhex(cmd + '000000') + rec_data,
-                    value=2, label=f"{cmd}_VALIDATE")
-                if resp is None:
-                    print(f"  {cmd} failed")
-                    return False
-
+        # Step 1: fetch all entries
         resp = self.tls_send(
             bytes.fromhex('9f01' + '00' * 19),
             value=2, label="FETCH_FIRST")
         if resp is None or len(resp) < 4:
-            print("  FETCH_FIRST failed or empty")
-            return False
+            print("  No entries (database may be empty)")
+            return True
         nentries = struct.unpack('<H', resp[2:4])[0]
         entries = [resp[4 + i*16 : 4 + (i+1)*16]
                    for i in range(min(nentries, (len(resp)-4)//16))]
-        erased = False
+        print(f"  Entries: {len(entries)}")
+
+        # Step 2: select + delete each entry
         for ent in entries:
-            resp = self.tls_send(
+            r = self.tls_send(
                 bytes.fromhex('a001000000') + ent,
-                value=2, label="SELECT_ERASE")
-            if resp is None:
-                continue
-            if len(resp) >= 12 and resp[8:12] == b'\x01\x00\x00\x00':
-                erased = True
-                break
-        if not erased:
-            print("  No erasable entry found")
-        return erased
+                value=2, label="SELECT_ENTRY")
+            if r is None:
+                print("  SELECT failed"); return False
+            selected = len(r) >= 12 and r[8:12] == b'\x01\x00\x00\x00'
+            r = self.tls_send(
+                bytes.fromhex('a301000000') + ent,
+                value=2, label="DELETE_ENTRY")
+            if r is None or r != b'\x00\x00\x03\x00':
+                print(f"  DELETE_ENTRY failed: {r.hex() if r else 'None'}")
+                return False
+
+        # Step 3: finalise deletion
+        for cmd, label in [('a401', 'FINALISE_1'),
+                           ('a402', 'FINALISE_2'),
+                           ('a403', 'FINALISE_3')]:
+            r = self.tls_send(bytes.fromhex(cmd),
+                              value=7, label=label)
+            if r is None:
+                print(f"  {label} failed"); return False
+
+        # Step 4: verify empty
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        remaining = self.storage_query_all()
+        if remaining:
+            print(f"  WARNING: {len(remaining)} records still present")
+        else:
+            print("  OK -- database empty")
+        return True
 
     def _commit_enrollment(self, guid, label="FP1"):
         """
