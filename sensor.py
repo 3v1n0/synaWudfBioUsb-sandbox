@@ -1000,23 +1000,23 @@ class BiometricSensor(SensorTLS):
         Parse 18-byte SENSOR_STATUS response from get_sensor_status().
 
         Structure (from trace analysis):
-          [0:2]   reserved (0x0000)
-          [2:4]   LE16 = 0x0001 (version/type?)
-          [4:6]   reserved (0x0000)
-          [6:8]   LE16 = WINBIO_SENSOR_STATUS: 1=ACCEPT, 2=REJECT
-          [8:10]  LE16 = quality level (1-4+)
-          [12:16] LE32 = WINBIO_REJECT_DETAIL
-          [16:18] padding
+          [0:2]   LE16 = 0x0000
+          [2:4]   LE16 = 0x0001 (response type?)
+          [4:6]   LE16 = 0x0000
+          [6:8]   LE16 = raw field A (varies per sensor state)
+          [8:10]  LE16 = raw field B (cumulative sample counter)
+          [10:14] LE32 = raw field C
+          [14:18] padding
 
-        Returns (sensor_status, quality_level, reject_detail).
-        sensor_status is WINBIO_SENSOR_STATUS (1=ACCEPT, 2=REJECT, etc.)
+        These fields are NOT mapped to WINBIO_SENSOR_STATUS/REJECT_DETAIL
+        at the USB level. Returns (raw_A, raw_B, raw_C).
         """
         if resp is None or len(resp) < 10:
-            return 3, 0, 0  # SENSOR_READY
-        ss = struct.unpack_from('<H', resp, 6)[0]
-        ql = struct.unpack_from('<H', resp, 8)[0]
-        rd = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
-        return ss, ql, rd
+            return 0, 0, 0
+        a = struct.unpack_from('<H', resp, 6)[0]
+        b = struct.unpack_from('<H', resp, 8)[0]
+        c = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
+        return a, b, c
 
     def get_sensor_status(self, ctx=0):
         """
@@ -1314,11 +1314,8 @@ class BiometricSensor(SensorTLS):
 
         # Pre-capture queries (finger is being placed/held)
         ss_resp = self.get_sensor_status(ctx)
-        ss, ql, rd = self._parse_sensor_status(ss_resp)
-        _log(f"  SENSOR_STATUS: ss={ss} ql={ql} rd={rd}")
-        if ok and ss != 1:
-            print(f"  Sensor rejected capture: status={ss} quality_level={ql} reject_detail={rd}")
-            ok = False
+        ss_q, ql_q, rd_q = self._parse_sensor_status(ss_resp)
+        _log(f"  SENSOR_STATUS: raw_fields=({ss_q},{ql_q},{rd_q})")
         self.query_status_ext(4)
         r = self.query_enrollment_needs()
         if r is None:
@@ -1370,6 +1367,22 @@ class BiometricSensor(SensorTLS):
                 return False, status_le  # terminal; caller aborts
             # 0x0000 = "not done yet, keep going" (normal)
 
+        # Longer response carries sample count at [20:22] LE16.
+        # If it incremented vs previous sample, the capture was accepted.
+        if r9602 is not None and len(r9602) >= 22:
+            new_cnt = struct.unpack_from('<H', r9602, 20)[0]
+            prev = getattr(self, '_prev_enroll_cnt', None)
+            self._prev_enroll_cnt = new_cnt
+            if prev is not None:
+                if new_cnt > prev:
+                    ok = True
+                    _log(f"  ENROLL count {prev}→{new_cnt}")
+                else:
+                    ok = False
+                    _log(f"  ENROLL count stuck at {new_cnt}")
+            else:
+                _log(f"  ENROLL initial count={new_cnt}")
+
         if ok:
             print(f"  Sample {sample_num} OK")
         else:
@@ -1401,6 +1414,7 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
+        self._prev_enroll_cnt = None
         max_attempts = 50
         for i in range(1, max_attempts + 1):
             ok, guid = self._enroll_one_sample(i, max_attempts)
