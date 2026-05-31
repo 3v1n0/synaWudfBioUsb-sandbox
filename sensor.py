@@ -1344,6 +1344,62 @@ class BiometricSensor(SensorTLS):
         print(f"  Match found! GUID: {matched.hex()}")
         return matched
 
+    def identify(self):
+        """
+        Single-shot identify.  Assumes the matching engine already has
+        templates loaded (from a prior identify-all or verify call).
+        Captures a finger, matches, returns the matched GUID or None.
+        """
+        print("\n--- Identify ---")
+        print("\n  Touch and hold the sensor...")
+        cap, sensor_status, _ = self.capture_data()
+        if not cap or sensor_status != 1:
+            print("  No finger detected")
+            return None
+        ctx = self._extract_ctx(cap)
+        print("  Finger ON")
+
+        i1 = self.read_interrupt(timeout=60000)
+        if i1 is None:
+            print("  Finger removed"); return None
+
+        self.get_sensor_status(0)
+        self.query_status_ext(4)
+        self.query_enrollment_needs()
+
+        ext1 = self.query_status_ext(1)
+        if ext1 and len(ext1) >= 2:
+            qual = struct.unpack('<H', ext1[-2:])[0]
+            print(f"  Progress: {qual}")
+
+        self.tls_send(
+            bytes.fromhex('8014000000010000000100000801010100'),
+            value=6, label="UPDATE_IDENTIFY_CHECK")
+
+        i2 = self.read_interrupt(timeout=60000)
+        if i2 is None:
+            print("  Finger removed before capture complete")
+            return None
+
+        self.get_sensor_status(0)
+        self.query_enrollment_simple()
+        self.query_status_ext(4)
+        self.update_enrollment_ack()
+
+        mr = self.match_result()
+        if mr is None:
+            print("  MATCH_RESULT failed (TLS error)")
+            return None
+        status, matched = mr
+        if status != 0:
+            print(f"  No match (status=0x{status:04x})")
+            return None
+        if matched is None or matched == b'\x00' * 16:
+            print("  MATCH_RESULT returned zero GUID")
+            return None
+        print(f"  Match found! GUID: {matched.hex()}")
+        return matched
+
     def _list_entries(self):
         """Fetch all entry blobs via 9f01. Returns list of 16-byte entries."""
         resp = self.tls_send(
@@ -1670,8 +1726,8 @@ class BiometricSensor(SensorTLS):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db', 'identify-all'):
-        print("Usage: sensor.py list-db|enroll|clear-db|identify-all")
+    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db', 'identify-all', 'identify'):
+        print("Usage: sensor.py list-db|enroll|clear-db|identify-all|identify")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -1732,6 +1788,13 @@ def main():
     elif sys.argv[1] == 'clear-db':
         print("clear-db...")
         sensor.erase_database()
+    elif sys.argv[1] == 'identify':
+        print("identify...")
+        guid = sensor.identify()
+        if guid:
+            print(f"Result: matched {guid.hex()}")
+        else:
+            print("Result: no match / error")
     elif sys.argv[1] == 'identify-all':
         print("identify-all...")
         guid = sensor.identify_all()
