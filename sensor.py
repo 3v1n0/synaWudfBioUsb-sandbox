@@ -1367,10 +1367,10 @@ class BiometricSensor(SensorTLS):
                 return False, status_le  # terminal; caller aborts
             # 0x0000 = "not done yet, keep going" (normal)
 
-        # Longer response carries sample count at [20:22] LE16.
+        # Longer response carries sample count at [22:24] LE16.
         # If it incremented vs previous sample, the capture was accepted.
-        if r9602 is not None and len(r9602) >= 22:
-            new_cnt = struct.unpack_from('<H', r9602, 20)[0]
+        if r9602 is not None and len(r9602) >= 24:
+            new_cnt = struct.unpack_from('<H', r9602, 22)[0]
             prev = getattr(self, '_prev_enroll_cnt', None)
             self._prev_enroll_cnt = new_cnt
             if prev is not None:
