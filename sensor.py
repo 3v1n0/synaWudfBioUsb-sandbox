@@ -549,7 +549,6 @@ class Sensor:
         try:
             resp = bytes(self.dev.read(self.INTERRUPT_EP, 64, timeout=timeout))
             _log(f"INTERRUPT ({len(resp)}B): {resp.hex()}")
-            print("Interrupt", resp.hex())
             return resp
         except usb.core.USBError as exc:
             if exc.errno == 110:  # timeout
