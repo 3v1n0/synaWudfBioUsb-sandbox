@@ -966,16 +966,13 @@ class BiometricSensor(SensorTLS):
         Parse 66-byte CAPTURE_DATA device response.
         Returns (sensor_status, reject_detail).
 
-        The marker at [2:6] (LE u32) tells if a finger was detected:
+        The marker at [18:22] (LE u32) tells if a finger was detected:
           6 = WINBIO_I_MORE_DATA = finger detected
           0 = no finger / hardware rejected
-
-        ss/rd at [8:12]/[12:16] provide additional status info but
-        the marker is the primary finger-detection signal.
         """
-        if resp is None or len(resp) < 6:
+        if resp is None or len(resp) < 22:
             return 3, 0
-        marker = struct.unpack_from('<I', resp, 2)[0]
+        marker = struct.unpack_from('<I', resp, 18)[0]
         if marker == 6:
             return 1, 0   # finger detected
         return 2, 7       # no finger
@@ -996,6 +993,30 @@ class BiometricSensor(SensorTLS):
         if resp is not None and len(resp) == 66:
             _log(f"  CAPTURE_DATA resp: {resp.hex()}")
         return resp, ss, rd
+
+    @staticmethod
+    def _parse_sensor_status(resp):
+        """
+        Parse 18-byte SENSOR_STATUS response from get_sensor_status().
+
+        Structure (from trace analysis):
+          [0:2]   reserved (0x0000)
+          [2:4]   LE16 = 0x0001 (version/type?)
+          [4:6]   reserved (0x0000)
+          [6:8]   LE16 = WINBIO_SENSOR_STATUS: 1=ACCEPT, 2=REJECT
+          [8:10]  LE16 = quality level (1-4+)
+          [12:16] LE32 = WINBIO_REJECT_DETAIL
+          [16:18] padding
+
+        Returns (sensor_status, quality_level, reject_detail).
+        sensor_status is WINBIO_SENSOR_STATUS (1=ACCEPT, 2=REJECT, etc.)
+        """
+        if resp is None or len(resp) < 10:
+            return 3, 0, 0  # SENSOR_READY
+        ss = struct.unpack_from('<H', resp, 6)[0]
+        ql = struct.unpack_from('<H', resp, 8)[0]
+        rd = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
+        return ss, ql, rd
 
     def get_sensor_status(self, ctx=0):
         """
@@ -1292,7 +1313,12 @@ class BiometricSensor(SensorTLS):
               f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})")
 
         # Pre-capture queries (finger is being placed/held)
-        self.get_sensor_status(ctx)
+        ss_resp = self.get_sensor_status(ctx)
+        ss, ql, rd = self._parse_sensor_status(ss_resp)
+        _log(f"  SENSOR_STATUS: ss={ss} ql={ql} rd={rd}")
+        if ok and ss != 1:
+            print(f"  Sensor rejected capture: status={ss} quality_level={ql} reject_detail={rd}")
+            ok = False
         self.query_status_ext(4)
         r = self.query_enrollment_needs()
         if r is None:
