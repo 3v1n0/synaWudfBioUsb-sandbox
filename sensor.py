@@ -22,18 +22,28 @@ Key derivation (confirmed from native Wine trace):
   AAD = seq_num(8) + content_type(1) + TLS_VER(2) + plain_len(2)
   verify_data = PRF_SHA384(master, "client finished", hs_hash_sha256, 12)
 
-Certificate body (402 bytes total):
+Certificate body (402 bytes total, device reads 400):
   [0:2]    run_marker = cli_rand[4:6]
   [2:402]  PairingData tag=1 verbatim (400 bytes):
-             [0:142]   HOST_142
-             [142:146] header 00 02 20 00
-             [146:178] pub_key32 (ECS2 public key X, LE)
-             [178:400] zero padding
+             [0:142]   HOST_142 (see below)
+             [140:142] sep 00 02
+             [142:144] u16le len 20 00 (= 32)
+             [144:176] pub_key32 (32 bytes, from device pairing)
+             [176:400] zero padding
+
+HOST_142 (142 bytes):
+  [0:4]    3f5f1700
+  [4:36]   ECS2 public X (LE, 32 bytes)
+  [36:72]  zero padding (36 bytes)
+  [72:104] ECS2 public Y (LE, 32 bytes)
+  [104:142] zero padding (38 bytes)
 
 PairingData (local file or Wine registry):
   tag=1: 400-byte host cert body (HOST_142 + header + pub_key + zeros)
   tag=2: 32-byte ECS2 private key D (LE)
-  tag=3: 400-byte device cert body
+  tag=3: 400-byte device cert body (same structure as tag 1)
+  tag=4: 420-byte unknown
+  tag=0: 2-byte unknown
 
 USB wValue map (confirmed from b.exe trace):
   Init cmds (plain):  OUT value=1 / IN value=0 (cert-section reads: IN value=0x8000)
@@ -162,10 +172,8 @@ DEV_Y_BE = bytes.fromhex(
 # HOST_142 fallback built from device key (used when no PairingData)
 _DEV_X_LE = bytes(reversed(DEV_X_BE))
 _DEV_Y_LE = bytes(reversed(DEV_Y_BE))
-HOST_142_FALLBACK = (b'\x3f\x5f\x17\x00'
-                     + _DEV_X_LE + b'\x00' * 20
-                     + _DEV_Y_LE + b'\x00' * 54)
-assert len(HOST_142_FALLBACK) == 142
+# (HOST_142_FALLBACK removed -- was hardcoded DEV_X/Y,
+#  but the session key must come from the fresh ECK2 pub)
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -799,19 +807,22 @@ class SensorTLS(Sensor):
         _hexdump("master secret", master)
 
         # ----- Client Certificate -----
-        # cert_body = run_marker(2) + tag1_full(400) = 402 bytes total.
-        # The two inner length prefixes (000190 000190) are device-specific
-        # constants and do not follow standard TLS cert list encoding;
-        # the receiver uses the outer hs length field.
+        # cert_body = run_marker(2) + host_142(142) + u16le(32)(2)
+        #             + pub_key32(32) + zeros(222) = 400 bytes.
+        # The paired path uses the full Tag 1 value (400B) + run_marker
+        # = 402B (extra 2 zeros are harmless; device uses the inner
+        # cert_length = 400 and ignores trailing padding).
         run_marker = cli_rand[4:6]
         if cert_data_398 is not None:
-            cert_body = run_marker + cert_data_398   # full tag1, no truncation
+            cert_body = run_marker + cert_data_398   # 2+400 = 402
+            assert len(cert_body) == 402, f"paired cert_body={len(cert_body)}"
         else:
             pub_key   = eck2_pub_le or b'\x00' * 32
             cert_body = (run_marker + host_142
-                         + struct.pack('>HB', 2, 32) + b'\x00'
-                         + pub_key + b'\x00' * 222)  # 2+142+4+32+222 = 402
-        assert len(cert_body) == 402, f"cert_body len={len(cert_body)}"
+                         + b'\x00\x02'
+                         + struct.pack('<H', 32)   # u16le(32) = 20 00
+                         + pub_key + b'\x00' * 220)  # 2+142+2+2+32+220 = 400
+            assert len(cert_body) == 400, f"fresh cert_body={len(cert_body)}"
 
         cert_hs = make_hs_message(0x0b,
                       b'\x00\x01\x90' + b'\x00\x01\x90' + cert_body)
@@ -1884,6 +1895,7 @@ def main():
         print(f"  host_142: {host_142[:8].hex()}...")
         _log(f"  eck2_le:  {eck2_le[:8].hex()}...")
         _log(f"  dev_x_be: {dev_x_be[:8].hex()}...")
+        tag3_for_save = None
         # Even with PairingData, check if device wants a challenge
         if ready and int.from_bytes(ready, 'little') != 0:
             print("  Device requests challenge (REQ_READY non-zero)")
@@ -1891,15 +1903,25 @@ def main():
             tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
             # Tag3 has fresh device key — override stored values
             dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
+            cert_data_398 = tag1
+            eck2_pub_le = tag1[144:176] if len(tag1) >= 176 else b'\x00' * 32
+            tag3_for_save = tag3
             _log(f"  Updated dev key from challenge: {dev_x_be[:8].hex()}...")
     else:
         print("  No PairingData -- generating fresh ECS2 key pair")
         eck2_be       = _rand(32)
         eck2_pub      = ecdh_pubkey(eck2_be)
         eck2_pub_le   = eck2_pub[:32][::-1]
-        host_142      = HOST_142_FALLBACK
-        cert_data_398 = None
-        dev_x_be, dev_y_be = DEV_X_BE, DEV_Y_BE
+        x_le = eck2_pub[:32][::-1]
+        y_le = eck2_pub[32:64][::-1]
+        host_142 = (b'\x3f\x5f\x17\x00' + x_le + b'\x00' * 36
+                    + y_le + b'\x00' * 38)
+        print("  Sending pairing challenge...")
+        tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
+        cert_data_398 = tag1
+        eck2_pub_le = tag1[144:176] if len(tag1) >= 176 else b'\x00' * 32
+        dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
+        tag3_for_save = tag3
 
     # ----- TLS handshake -----
     print("TLS handshake...")
@@ -1908,30 +1930,26 @@ def main():
                        cert_data_398, dev_x_be, dev_y_be)
     except TlsAlertError as exc:
         print(f"  TLS handshake failed: {exc}")
-        if "bad_certificate" in str(exc):
-            print("")
-            print("  Device rejected our certificate. This means the device")
-            print("  still has pairing data from a previous host identity.")
-            print("  To fix: run 'sensor.py reset-ownership' to clear the")
-            print("  local pairing, then provide valid pairing data by:")
-            print("    - Restoring the WINEPREFIX (rm + wineboot + cp usb.txt)")
-            print("    - Or placing a valid pairing.dat in the working directory")
-            print("  If the device still refuses, run 'b.exe reset-ownership'")
-            print("  via wine to clear the device's internal pairing state.")
         sensor.close()
         sys.exit(1)
     print("  TLS OK")
 
     # ----- Save PairingData if we used fresh keys or got new tags -----
     if not os.path.exists(PAIRING_FILE):
-        host_x_le = bytes(reversed(dev_x_be))
-        host_y_le = bytes(reversed(dev_y_be))
-        host_cert = (b'\x3f\x5f\x17\x00' + host_x_le + b'\x00' * 20
-                     + host_y_le + b'\x00' * 54)
-        pub_key = eck2_pub_le or b'\x00' * 32
-        cb = (host_142 + struct.pack('>HB', 2, 32) + b'\x00'
-              + pub_key + b'\x00' * 220)
-        _save_pairing_tlv({1: cb, 2: bytes(reversed(eck2_be)), 3: host_cert})
+        if tag3_for_save is not None:
+            _save_pairing_tlv({1: cert_data_398,
+                               2: bytes(reversed(eck2_be)),
+                               3: tag3_for_save})
+        else:
+            host_x_le = bytes(reversed(dev_x_be))
+            host_y_le = bytes(reversed(dev_y_be))
+            host_cert = (b'\x3f\x5f\x17\x00' + host_x_le
+                         + b'\x00' * 36 + host_y_le + b'\x00' * 296)
+            pub_key = eck2_pub_le or b'\x00' * 32
+            cb = (host_142 + b'\x00\x02' + struct.pack('<H', 32)
+                  + pub_key + b'\x00' * 222)
+            _save_pairing_tlv({1: cb, 2: bytes(reversed(eck2_be)),
+                               3: host_cert})
 
     # ----- Biometric commands -----
     if sys.argv[1] == 'list-db':
