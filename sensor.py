@@ -1178,23 +1178,38 @@ class BiometricSensor(SensorTLS):
         Delete all enrolled records matching the exact b.exe
         clear-db sequence from IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE.
 
-        b.exe does NOT use a401/a402/a403.  Instead it:
-          1. Lists records (same as list-db)
-          2. Calls 9f01...0000 to get erase-cursor entries
-          3. Tries a001...ENTRY on each; the first entry that
-             returns the 12-byte response with 01000000 at
-             bytes [8:12] triggers the erase.
-
-        The select/de-dup loop iterates because 9f01 can return
-        stale/partial entries (00000000 marker) before the real
-        enrolled record.
+        b.exe:
+          1. Lists records (get_storage_count)
+          2. For each record: FETCH_RECORD (9f03) + a003 + a103
+             (these authorise/validate the record for deletion)
+          3. FETCH_FIRST (9f01) to get the erase-cursor entries
+          4. Tries a001...ENTRY on each until one returns the
+             12-byte response with 01000000 at bytes [8:12]
         """
-        _, count, _ = self.get_storage_count()
+        _, count, guids = self.get_storage_count()
         print(f"  Records found: {count}")
 
         if count == 0:
             print("  No records to delete")
         else:
+            for guid in guids:
+                # Fetch record metadata
+                resp = self.tls_send(
+                    bytes.fromhex('9f03' + '00' * 3) + guid,
+                    value=2, label="FETCH_RECORD")
+                if resp is None or len(resp) < 20:
+                    print(f"  FETCH_RECORD({guid[:8].hex()}) failed")
+                    return False
+                rec_data = resp[4:20]
+                # a003 must precede a103 (both use record data)
+                for cmd in ('a003', 'a103'):
+                    resp = self.tls_send(
+                        bytes.fromhex(cmd + '000000') + rec_data,
+                        value=2, label=f"{cmd}_VALIDATE")
+                    if resp is None:
+                        print(f"  {cmd} failed")
+                        return False
+            # Erase-cursor entries from 9f01
             resp = self.tls_send(
                 bytes.fromhex('9f01' + '00' * 19),
                 value=2, label="FETCH_FIRST")
@@ -1211,7 +1226,6 @@ class BiometricSensor(SensorTLS):
                     value=2, label="SELECT_ERASE")
                 if resp is None:
                     continue
-                # Marker 01000000 at [8:12] = "1 record erased"
                 if len(resp) >= 12 and resp[8:12] == b'\x01\x00\x00\x00':
                     print(f"  Erased via entry {entries.index(ent) + 1}/{len(entries)}")
                     erased = True
