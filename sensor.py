@@ -1273,18 +1273,21 @@ class BiometricSensor(SensorTLS):
     @staticmethod
     def _parse_template_status(resp):
         """
-        Parse 66-byte ENROLL_TEMPLATE (39f4) response.
+        Parse ENROLL_TEMPLATE (39f4) response.
         Returns (template_status_hr, percent_complete, reject_detail).
         template_status_hr == 0 means success.
-        Offsets from decompiled OnUpdateEnrollment / EIS parsing:
-          [2:6]  - TemplateStatus (HRESULT, LE u32, offset 2)
-                 - 0x0006 = continuation/success marker
-          [12:16] - PercentComplete (ULONG, LE u32, offset 12)
-          [8:12]  - RejectDetail (ULONG, LE u32, offset 8)
+        Response is either `0000` (2B success) or a 66-byte STATUS_EXT-
+        like struct with details at offsets:
+          [2:6]  - TemplateStatus (HRESULT, LE u32)
+          [12:16] - PercentComplete (ULONG, LE u32)
+          [8:12]  - RejectDetail (ULONG, LE u32)
         """
-        if resp is None or len(resp) < 16:
+        if resp is None or len(resp) < 2:
             return 0x800703e5, 0, 0
-        # At offset 2: value 0x00000006 = "in progress ok", value 0 = done?
+        if resp == b'\x00\x00' or resp == b'\x00\x00\x00\x00':
+            return 0, 0, 0
+        if len(resp) < 16:
+            return 0x800703e5, 0, 0
         ts_raw = struct.unpack('<I', resp[2:6])[0]
         if ts_raw == 0 or ts_raw == 6:
             ts = 0
