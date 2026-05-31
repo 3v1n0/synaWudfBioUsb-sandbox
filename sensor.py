@@ -201,9 +201,11 @@ def _load_pairing_from_file():
 
 
 def _load_pairing_blob_from_registry(reg_path=None):
+    wine_prefix = os.environ.get("WINEPREFIX",
+                                  os.path.expanduser("~/.wine"))
     path = (reg_path
             or os.environ.get("PAIRING_REG")
-            or os.path.expanduser("~/winelatestprefix/user.reg"))
+            or os.path.expanduser(f"{wine_prefix}/user.reg"))
     try:
         lines = open(path, "r", encoding="utf-8",
                      errors="ignore").read().splitlines()
