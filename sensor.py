@@ -1227,15 +1227,21 @@ class BiometricSensor(SensorTLS):
     def match_result(self):
         """
         Send 9901 match result query.
-        Returns matched 16-byte GUID, or None on failure,
-        or b'\\x00'*16 if no match found.
+
+        Returns (status_code, guid_or_None):
+          status_code = 0x0000 on success/match, 0x0509 for no-match,
+                        or other device error codes.
+          guid_or_None = 16-byte matched GUID or None.
         """
         r = self.tls_send(
             bytes.fromhex('99010000000000000000000000'),
             value=2, label="MATCH_RESULT")
-        if not r or len(r) < 18:
+        if not r or len(r) < 2:
             return None
-        return r[2:18]
+        status = struct.unpack('<H', r[:2])[0]
+        if len(r) >= 18:
+            return status, r[2:18]
+        return status, None
 
     def identify_all(self):
         """
@@ -1324,12 +1330,16 @@ class BiometricSensor(SensorTLS):
         self.update_enrollment_ack()
 
         # 9. Match result
-        matched = self.match_result()
-        if matched is None:
-            print("  MATCH_RESULT failed (device error)")
+        mr = self.match_result()
+        if mr is None:
+            print("  MATCH_RESULT failed (TLS error)")
             return None
-        if matched == b'\x00' * 16:
-            print("  No match found")
+        status, matched = mr
+        if status != 0:
+            print(f"  No match (status=0x{status:04x})")
+            return None
+        if matched is None or matched == b'\x00' * 16:
+            print("  MATCH_RESULT returned zero GUID")
             return None
         print(f"  Match found! GUID: {matched.hex()}")
         return matched
