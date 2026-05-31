@@ -1368,8 +1368,6 @@ class BiometricSensor(SensorTLS):
           (True, None)  -- good sample, keep going
           (False, None) -- error (no finger, bad scan, etc.), skip
         """
-        import time
-        time.sleep(1)
         print(f"\n--- Sample {sample_num}/{max_samples} ---")
         print("  Touch and hold the sensor...")
         _log(f"  _enroll_one_sample started")
@@ -1528,8 +1526,8 @@ class BiometricSensor(SensorTLS):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db', 'delete-record'):
-        print("Usage: sensor.py list-db|enroll|clear-db|delete-record <idx|GUID>")
+    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db'):
+        print("Usage: sensor.py list-db|enroll|clear-db")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -1590,28 +1588,6 @@ def main():
     elif sys.argv[1] == 'clear-db':
         print("clear-db...")
         sensor.erase_database()
-    elif sys.argv[1] == 'delete-record':
-        if len(sys.argv) < 3:
-            print("Usage: ... delete-record <index|GUID>"); sys.exit(1)
-        ident = sys.argv[2]
-        _, _, guids = sensor.get_storage_count()
-        if len(ident) == 32 and all(c in '0123456789abcdefABCDEF' for c in ident):
-            try:
-                idx = [g.hex() for g in guids].index(ident)
-            except ValueError:
-                print(f"  GUID {ident} not found"); sys.exit(1)
-        else:
-            try:
-                idx = int(ident)
-            except ValueError:
-                print("  need a 0-based index or a 32-char GUID"); sys.exit(1)
-            if idx < 0 or idx >= len(guids):
-                print(f"  index {idx} out of range (0-{len(guids)-1})"); sys.exit(1)
-        print(f"delete-record... index={idx} guid={guids[idx].hex()}")
-        # The protocol erases all entries from 9f01 then finalises.
-        if not sensor.erase_database():
-            print("  erase_database failed"); sys.exit(1)
-
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
     print("Done.")
