@@ -1175,27 +1175,55 @@ class BiometricSensor(SensorTLS):
 
     def erase_database(self):
         """
-        Erase entire enrolled-fingerprint database (value=7), then
-        send CLOSE_NOTIFY to match b.exe behaviour exactly.
-        Sends a403 (2 bytes), expects 8 zero bytes on success,
-        then sends 0001 and expects 0100.
-        Returns True on success.
-        """
-        resp = self.tls_send(bytes.fromhex('a403'),
-                             value=7, label="ERASE_DATABASE")
-        if resp is None:
-            print("  ERASE_DATABASE failed (no response)")
-            return False
-        if not (len(resp) >= 8 and resp[:8] == b'\x00' * 8):
-            print(f"  ERASE_DATABASE unexpected response: {resp.hex()}")
-            return False
-        print("  Database erased")
+        Delete every enrolled record individually, matching the exact
+        b.exe clear-db command sequence:
 
-        # b.exe always sends TLS close_notify after erase
+          9f01...0000 → FETCH_FIRST  (value=2)
+          a001...GUID → SELECT       (value=2)
+          a401 → DELETE_PHASE1       (value=7)
+          a402 → DELETE_PHASE2       (value=7)
+          a403 → DELETE_FINALIZE     (value=7)
+
+        Then verify empty, close notify.
+        """
+        any_records = False
+        while True:
+            resp = self.tls_send(
+                bytes.fromhex('9f01' + '00' * 19),
+                value=2, label="FETCH_FIRST")
+            if resp is None:
+                print("  FETCH_FIRST failed")
+                return False
+            if len(resp) < 20 or resp[4:20] == b'\x00' * 16:
+                break
+            guid = resp[4:20]
+            print(f"  Deleting {guid.hex()}")
+            resp = self.tls_send(
+                bytes.fromhex('a001000000') + guid,
+                value=2, label="SELECT_DELETE")
+            if resp is None:
+                print("  SELECT_DELETE failed")
+                return False
+            for cmd, label in [('a401', 'DELETE_PHASE1'),
+                               ('a402', 'DELETE_PHASE2'),
+                               ('a403', 'DELETE_FINALIZE')]:
+                resp = self.tls_send(bytes.fromhex(cmd),
+                                     value=7, label=label)
+                if resp is None:
+                    print(f"  {label} failed")
+                    return False
+            any_records = True
+
+        if not any_records:
+            print("  No records to delete")
+
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        remaining = self.storage_query_all()
+        if remaining:
+            print(f"  WARNING: {len(remaining)} records still present")
+
         resp = self.close_notify()
-        if resp is None:
-            print("  CLOSE_NOTIFY failed after erase")
-            return False
         ok = resp == b'\x01\x00'
         print(f"  CLOSE_NOTIFY: {resp.hex()} {'OK' if ok else 'UNEXPECTED'}")
         return ok
