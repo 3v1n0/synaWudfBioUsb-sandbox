@@ -1200,6 +1200,157 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('0001'),
             value=7, label="CLOSE_NOTIFY")
 
+    def _session_init(self):
+        """Send 1400 session init challenge. Returns response or None."""
+        nonce = _rand(12)
+        return self.tls_send(
+            bytes.fromhex('1400000c') + nonce,
+            value=2, label="SESSION_INIT")
+
+    def _session_close(self):
+        """Send 1400 session close challenge."""
+        nonce = _rand(12)
+        return self.tls_send(
+            bytes.fromhex('1400000c') + nonce,
+            value=2, label="SESSION_CLOSE")
+
+    def _load_record_for_match(self, guid):
+        """
+        Load an enrolled record into the matching engine.
+        Returns True on success.
+        Sequence: 9f03 (FETCH_RECORD) → a003 (SELECT) → a103 (LOAD_TEMPLATE)
+        """
+        r = self.tls_send(
+            bytes.fromhex('9f03' + '00' * 3) + guid,
+            value=2, label=f"FETCH_MATCH({guid[:4].hex()})")
+        if not r or len(r) < 20:
+            return False
+        entry = r[4:20]
+        if entry == b'\x00' * 16:
+            return False
+        r = self.tls_send(
+            bytes.fromhex('a003000000') + entry,
+            value=2, label="SELECT_MATCH")
+        if not r:
+            return False
+        r = self.tls_send(
+            bytes.fromhex('a103000000') + entry,
+            value=2, label="LOAD_TEMPLATE")
+        return r is not None
+
+    def match_result(self):
+        """
+        Send 9901 match result query.
+        Returns matched 16-byte GUID, or None on failure,
+        or b'\\x00'*16 if no match found.
+        """
+        r = self.tls_send(
+            bytes.fromhex('99010000000000000000000000'),
+            value=2, label="MATCH_RESULT")
+        if not r or len(r) < 18:
+            return None
+        return r[2:18]
+
+    def identify_all(self):
+        """
+        Full identify-all sequence matching b.exe trace.
+        Loads all enrolled records, captures a finger, matches
+        against all loaded templates, and returns the matched
+        16-byte GUID (or None if no match / error).
+        """
+        print("\n--- Identify All ---")
+
+        # 1. Session init
+        self._session_init()
+
+        # 2. Load all enrolled records into matching engine
+        status, count, guids = self.get_storage_count()
+        _log(f"Storage count: status=0x{status:04x} count={count}")
+        if status != 0:
+            print(f"  Storage query failed: 0x{status:04x}")
+            return None
+
+        loaded = 0
+        for guid in guids:
+            if guid == b'\x00' * 16:
+                continue
+            print(f"  Loading {guid.hex()}...")
+            if self._load_record_for_match(guid):
+                loaded += 1
+                print(f"    OK")
+            else:
+                print(f"    FAILED")
+        if loaded == 0:
+            print("  No records to match against")
+            return None
+        print(f"  Loaded {loaded} record(s)")
+
+        # 3. List entries + SELECT per entry
+        entries = self._list_entries()
+        for ent in entries:
+            self.tls_send(
+                bytes.fromhex('a001000000') + ent,
+                value=2, label="SELECT_ENTRY")
+
+        # 4. Capture finger
+        print("\n  Touch and hold the sensor...")
+        cap, sensor_status, _ = self.capture_data()
+        if not cap or sensor_status != 1:
+            print("  No finger detected")
+            return None
+        ctx = self._extract_ctx(cap)
+        _log(f"  ctx={ctx}")
+        print("  Finger ON")
+
+        # 5. Interrupt 1 (capture armed)
+        i1 = self.read_interrupt(timeout=60000)
+        if i1 is None:
+            print("  Finger removed")
+            return None
+        _log(f"  Interrupt 1: {i1.hex()}")
+
+        # 6. Pre-capture queries
+        ss = self.get_sensor_status(0)
+        _log(f"  SENSOR_STATUS: {ss.hex() if ss else 'None'}")
+        self.query_status_ext(4)
+        self.query_enrollment_needs()
+
+        ext1 = self.query_status_ext(1)
+        if ext1 and len(ext1) >= 2:
+            qual = struct.unpack('<H', ext1[-2:])[0]
+            print(f"  Progress: {qual}")
+
+        # UPDATE_CHECK with 8014 (identify variant)
+        r = self.tls_send(
+            bytes.fromhex('8014000000010000000100000801010100'),
+            value=6, label="UPDATE_IDENTIFY_CHECK")
+        if r is None:
+            _log("  UPDATE_IDENTIFY_CHECK failed")
+
+        # 7. Interrupt 2 (data captured)
+        i2 = self.read_interrupt(timeout=60000)
+        if i2 is None:
+            print("  Finger removed before capture complete")
+            return None
+        _log(f"  Interrupt 2: {i2.hex()}")
+
+        # 8. Post-capture queries
+        self.get_sensor_status(0)
+        self.query_enrollment_simple()
+        self.query_status_ext(4)
+        self.update_enrollment_ack()
+
+        # 9. Match result
+        matched = self.match_result()
+        if matched is None:
+            print("  MATCH_RESULT failed (device error)")
+            return None
+        if matched == b'\x00' * 16:
+            print("  No match found")
+            return None
+        print(f"  Match found! GUID: {matched.hex()}")
+        return matched
+
     def _list_entries(self):
         """Fetch all entry blobs via 9f01. Returns list of 16-byte entries."""
         resp = self.tls_send(
@@ -1526,8 +1677,8 @@ class BiometricSensor(SensorTLS):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db'):
-        print("Usage: sensor.py list-db|enroll|clear-db")
+    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db', 'identify-all'):
+        print("Usage: sensor.py list-db|enroll|clear-db|identify-all")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -1588,6 +1739,13 @@ def main():
     elif sys.argv[1] == 'clear-db':
         print("clear-db...")
         sensor.erase_database()
+    elif sys.argv[1] == 'identify-all':
+        print("identify-all...")
+        guid = sensor.identify_all()
+        if guid:
+            print(f"Result: matched {guid.hex()}")
+        else:
+            print("Result: no match / error")
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
     print("Done.")
