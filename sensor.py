@@ -1173,6 +1173,23 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('0001'),
             value=7, label="CLOSE_NOTIFY")
 
+    def erase_database(self):
+        """
+        Erase entire enrolled-fingerprint database (value=7).
+        Sends a403 (2 bytes), expects 8 zero bytes on success.
+        Returns True on success.
+        """
+        resp = self.tls_send(bytes.fromhex('a403'),
+                             value=7, label="ERASE_DATABASE")
+        if resp is None:
+            print("  ERASE_DATABASE failed (no response)")
+            return False
+        if len(resp) >= 8 and resp[:8] == b'\x00' * 8:
+            print("  Database erased")
+            return True
+        print(f"  ERASE_DATABASE unexpected response: {resp.hex()}")
+        return False
+
     def _commit_enrollment(self, guid, label="FP1"):
         """
         Full commit finalization sequence (5 steps + close).
@@ -1286,6 +1303,8 @@ class BiometricSensor(SensorTLS):
           (True, None)  -- good sample, keep going
           (False, None) -- error (no finger, bad scan, etc.), skip
         """
+        import time
+        time.sleep(1)
         print(f"\n--- Sample {sample_num}/{max_samples} ---")
         print("  Touch and hold the sensor...")
         _log(f"  _enroll_one_sample started")
@@ -1444,8 +1463,8 @@ class BiometricSensor(SensorTLS):
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll'):
-        print("Usage: sensor.py list-db|enroll")
+    if len(sys.argv) < 2 or sys.argv[1] not in ('list-db', 'enroll', 'clear-db'):
+        print("Usage: sensor.py list-db|enroll|clear-db")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -1503,6 +1522,9 @@ def main():
         sensor.list_enrolled()
     elif sys.argv[1] == 'enroll':
         sensor.enroll()
+    elif sys.argv[1] == 'clear-db':
+        print("clear-db...")
+        sensor.erase_database()
 
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
