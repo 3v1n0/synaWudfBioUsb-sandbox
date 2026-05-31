@@ -169,11 +169,24 @@ DEV_Y_BE = bytes.fromhex(
     '4ef37a81815ead6a51b145aadbb3073f'
     '60bedb82ea38c34324983109df6fc0f3')
 
-# HOST_142 fallback built from device key (used when no PairingData)
-_DEV_X_LE = bytes(reversed(DEV_X_BE))
-_DEV_Y_LE = bytes(reversed(DEV_Y_BE))
-# (HOST_142_FALLBACK removed -- was hardcoded DEV_X/Y,
-#  but the session key must come from the fresh ECK2 pub)
+# Identity ECS2 key (hardcoded in b.exe, for pairing/challenge)
+IDENTITY_D_BE = bytes.fromhex(
+    'cca803106523ed52964f95a3742b85b3'
+    '49cba81759fd52387c0547a8af9d577f')
+
+HOST_X_BE = bytes.fromhex(
+    'b3dbef324fc769e7350d17f8329665cc'
+    '4725ceb62dc8688eb275eef6cb0dfb18')
+HOST_Y_BE = bytes.fromhex(
+    'c95675ccec0369e3e6ee72be09ba2cb5'
+    '2867214b4e80612f262e9da861e78d15')
+
+# HOST_142 from identity key (pre-built for challenge when no pairing data)
+_HOST_X_LE = bytes(reversed(HOST_X_BE))
+_HOST_Y_LE = bytes(reversed(HOST_Y_BE))
+HOST_142_IDENTITY = (b'\x3f\x5f\x17\x00' + _HOST_X_LE
+                     + b'\x00' * 36 + _HOST_Y_LE + b'\x00' * 38)
+assert len(HOST_142_IDENTITY) == 142
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -1908,14 +1921,10 @@ def main():
             tag3_for_save = tag3
             _log(f"  Updated dev key from challenge: {dev_x_be[:8].hex()}...")
     else:
-        print("  No PairingData -- generating fresh ECS2 key pair")
-        eck2_be       = _rand(32)
-        eck2_pub      = ecdh_pubkey(eck2_be)
-        eck2_pub_le   = eck2_pub[:32][::-1]
-        x_le = eck2_pub[:32][::-1]
-        y_le = eck2_pub[32:64][::-1]
-        host_142 = (b'\x3f\x5f\x17\x00' + x_le + b'\x00' * 36
-                    + y_le + b'\x00' * 38)
+        print("  No PairingData -- using identity key for challenge")
+        eck2_be       = IDENTITY_D_BE
+        host_142      = HOST_142_IDENTITY
+        eck2_pub_le   = _HOST_X_LE
         print("  Sending pairing challenge...")
         tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
         cert_data_398 = tag1
