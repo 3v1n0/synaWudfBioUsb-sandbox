@@ -1260,10 +1260,7 @@ class BiometricSensor(SensorTLS):
         """
         print("\n--- Identify All ---")
 
-        # 1. Session init
-        self._session_init()
-
-        # 2. Load all enrolled records into matching engine
+        # 1. Load all enrolled records into matching engine
         status, count, guids = self.get_storage_count()
         _log(f"Storage count: status=0x{status:04x} count={count}")
         if status != 0:
