@@ -1175,8 +1175,10 @@ class BiometricSensor(SensorTLS):
 
     def erase_database(self):
         """
-        Erase entire enrolled-fingerprint database (value=7).
-        Sends a403 (2 bytes), expects 8 zero bytes on success.
+        Erase entire enrolled-fingerprint database (value=7), then
+        send CLOSE_NOTIFY to match b.exe behaviour exactly.
+        Sends a403 (2 bytes), expects 8 zero bytes on success,
+        then sends 0001 and expects 0100.
         Returns True on success.
         """
         resp = self.tls_send(bytes.fromhex('a403'),
@@ -1184,11 +1186,19 @@ class BiometricSensor(SensorTLS):
         if resp is None:
             print("  ERASE_DATABASE failed (no response)")
             return False
-        if len(resp) >= 8 and resp[:8] == b'\x00' * 8:
-            print("  Database erased")
-            return True
-        print(f"  ERASE_DATABASE unexpected response: {resp.hex()}")
-        return False
+        if not (len(resp) >= 8 and resp[:8] == b'\x00' * 8):
+            print(f"  ERASE_DATABASE unexpected response: {resp.hex()}")
+            return False
+        print("  Database erased")
+
+        # b.exe always sends TLS close_notify after erase
+        resp = self.close_notify()
+        if resp is None:
+            print("  CLOSE_NOTIFY failed after erase")
+            return False
+        ok = resp == b'\x01\x00'
+        print(f"  CLOSE_NOTIFY: {resp.hex()} {'OK' if ok else 'UNEXPECTED'}")
+        return ok
 
     def _commit_enrollment(self, guid, label="FP1"):
         """
