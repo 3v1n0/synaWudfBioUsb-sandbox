@@ -1900,11 +1900,6 @@ def main():
         host_142      = HOST_142_FALLBACK
         cert_data_398 = None
         dev_x_be, dev_y_be = DEV_X_BE, DEV_Y_BE
-        if ready and int.from_bytes(ready, 'little') != 0:
-            print("  Device requests challenge (REQ_READY non-zero)")
-            print("  Sending pairing challenge...")
-            tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
-            dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
 
     # ----- TLS handshake -----
     print("TLS handshake...")
@@ -1917,7 +1912,12 @@ def main():
             print("")
             print("  Device rejected our certificate. This means the device")
             print("  still has pairing data from a previous host identity.")
-            print("  Run 'sensor.py reset-ownership' to clear it, then retry.")
+            print("  To fix: run 'sensor.py reset-ownership' to clear the")
+            print("  local pairing, then provide valid pairing data by:")
+            print("    - Restoring the WINEPREFIX (rm + wineboot + cp usb.txt)")
+            print("    - Or placing a valid pairing.dat in the working directory")
+            print("  If the device still refuses, run 'b.exe reset-ownership'")
+            print("  via wine to clear the device's internal pairing state.")
         sensor.close()
         sys.exit(1)
     print("  TLS OK")
