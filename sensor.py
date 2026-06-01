@@ -46,13 +46,13 @@ PairingData (local file or Wine registry):
   tag=0: 2-byte unknown
 
 USB wValue map (confirmed from windows driver trace):
-  Init cmds (plain):  OUT CH_INIT=1 / IN CH_IN=0 (cert reads: IN CH_IN_CERT=0x8000)
-  ClientHello:        OUT CH_TLS=4  / IN CH_IN=0
-  Bundle:             OUT CH_BUNDLE=0 / IN CH_IN=0
-  GET_RECORD_COUNT:   OUT CH_SENSOR=6 / IN CH_IN=0
-  STORAGE_QUERY_INIT: OUT CH_STORE=7  / IN CH_IN=0
-  STORAGE_QUERY_ALL:  OUT CH_DATA=2   / IN CH_IN=0
-  FETCH_RECORD:       OUT CH_DATA=2   / IN CH_IN=0
+  Init cmds (plain):  OUT CH_INIT=1  / IN CH_PLAIN=0 (cert reads: IN CH_IN_CERT=0x8000)
+  ClientHello:        OUT CH_TLS=4   / IN CH_PLAIN=0
+  Bundle (rest of hs):OUT CH_PLAIN=0 / IN CH_PLAIN=0
+  GET_RECORD_COUNT:   OUT CH_SENSOR=6 / IN CH_PLAIN=0
+  STORAGE_QUERY_INIT: OUT CH_STORE=7  / IN CH_PLAIN=0
+  STORAGE_QUERY_ALL:  OUT CH_DATA=2   / IN CH_PLAIN=0
+  FETCH_RECORD:       OUT CH_DATA=2   / IN CH_PLAIN=0
 
 Class hierarchy:
   Sensor        -- USB transport layer (ctrl_out / ctrl_in)
@@ -258,14 +258,13 @@ class Cmd:
 
 
 # USB wValue channel selectors (OUT direction unless noted)
-CH_IN      = 0        # IN direction (all reads)
-CH_IN_CERT = 0x8000   # IN direction for cert-section reads during init
-CH_BUNDLE  = 0        # TLS bundle OUT
+CH_PLAIN   = 0        # unencrypted transfers: all IN reads, TLS bundle OUT
 CH_INIT    = 1        # plain init commands OUT
-CH_TLS     = 4        # ClientHello / TLS handshake OUT
-CH_SENSOR  = 6        # sensor/engine control OUT
 CH_DATA    = 2        # data-plane app commands OUT
+CH_TLS     = 4        # ClientHello / TLS handshake start OUT
+CH_SENSOR  = 6        # sensor/engine control OUT
 CH_STORE   = 7        # storage/admin commands OUT
+CH_IN_CERT = 0x8000   # IN direction for cert-section reads during init
 
 # --- Sensor / engine control (value=6) ---
 CMD_GET_RECORD_COUNT     = Cmd(b'\x82', CH_SENSOR,
@@ -1121,7 +1120,7 @@ class SensorTLS(Sensor):
         # Send bundle: value=0 per windows driver trace (wVal=0x0000 confirmed)
         burst = IOCTL_HDR + hs_rec + ccs_rec + fin_rec
         _hexdump("bundle", burst)
-        self.ctrl_out(REQ_CMD, value=CH_BUNDLE, data=burst,
+        self.ctrl_out(REQ_CMD, value=CH_PLAIN, data=burst,
                       label="TLS_OUT(BUNDLE)")
         # Device should respond immediately (windows driver does no delay)
         raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
@@ -1592,7 +1591,7 @@ class BiometricSensor(SensorTLS):
     # -- Commit / finalization protocol ---
 
     COMMIT_HEADER = bytes.fromhex(
-        '9603000000000000007d0000000000100000')
+        '000000007d0000000000100000')
 
     COMMIT_IDENTITY_PREFIX = bytes.fromhex(
         '01004c00000002000000')
@@ -1664,12 +1663,11 @@ class BiometricSensor(SensorTLS):
 
     def storage_commit(self, payload):
         """
-        Send 9603 commit payload (value=7, storage layer).
+        Send 9603 commit payload (CH_STORE, storage layer).
         Saves identity (GUID, SID, label) to device storage.
         Returns response bytes or None.
         """
-        return self.tls_send(payload, value=CMD_STORAGE_COMMIT.channel,
-                             label=CMD_STORAGE_COMMIT.label)
+        return CMD_STORAGE_COMMIT.send(self, arg=payload)
 
     def engine_commit_ack(self):
         """
