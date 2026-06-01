@@ -148,7 +148,6 @@ def _rand(n):
 TemplateInfo   = namedtuple('TemplateInfo',   ['guid', 'sid', 'label', 'subfactor'])
 RecordInfo     = namedtuple('RecordInfo',     ['handle'])
 SelectInfo     = namedtuple('SelectInfo',     ['handle', 'guid'])
-StorageCount   = namedtuple('StorageCount',   ['status', 'count', 'guids'])
 CaptureStatus  = namedtuple('CaptureStatus',  ['sensor_status', 'reject_detail'])
 SensorStatus   = namedtuple('SensorStatus',   ['mode', 'sample', 'quality', 'context'])
 EnrollStatus   = namedtuple('EnrollStatus',   ['status', 'guid', 'sample_cnt',
@@ -1303,16 +1302,16 @@ class BiometricSensor(SensorTLS):
 
     def get_storage_count(self):
         """
-        Full storage query sequence to obtain the actual record count.
-        Returns StorageCount(status, count, guids).
+        Full storage query sequence to obtain enrolled GUIDs.
+        Returns list of 16-byte GUIDs.
+        Raises RuntimeError on device error.
         """
         status = self.get_record_count()
         if status != 0:
-            return StorageCount(status, 0, [])
+            raise RuntimeError(f"GET_RECORD_COUNT failed: 0x{status:04x}")
         self.storage_query_init(1)
         self.storage_query_init(2)
-        guids = self.storage_query_all()
-        return StorageCount(0, len(guids), guids)
+        return self.storage_query_all()
 
     def storage_query_init(self, n):
         """Send STORAGE_QUERY_INIT (call twice before QUERY_ALL)."""
@@ -1403,14 +1402,14 @@ class BiometricSensor(SensorTLS):
         Full list-db sequence. Returns list of (guid, record_data) for
         all non-empty slots. Prints results to stdout.
         """
-        sc = self.get_storage_count()
-        print(f"Storage count: status=0x{sc.status:04x} count={sc.count}")
-        if not sc.guids:
+        guids = self.get_storage_count()
+        print(f"Storage count: {len(guids)}")
+        if not guids:
             print("No storage slots found.")
             return []
 
         enrolled = []
-        for guid in sc.guids:
+        for guid in guids:
             rec = self.fetch_record(guid)
             if rec:
                 enrolled.append((guid, rec))
@@ -2176,14 +2175,11 @@ class BiometricSensor(SensorTLS):
         print("\n--- Identify All ---")
 
         # 1. Load all enrolled records into matching engine
-        sc = self.get_storage_count()
-        _log(f"Storage count: status=0x{sc.status:04x} count={sc.count}")
-        if sc.status != 0:
-            print(f"  Storage query failed: 0x{sc.status:04x}")
-            return None
+        guids = self.get_storage_count()
+        _log(f"Storage count: {len(guids)}")
 
         loaded = 0
-        for guid in sc.guids:
+        for guid in guids:
             if guid == NULL_GUID:
                 continue
             print(f"  Loading {guid.hex()}...")
@@ -2773,11 +2769,9 @@ class BiometricSensor(SensorTLS):
         print(f"  Label: '{label}'")
 
         # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
-        sc = self.get_storage_count()
-        print(f"  DB records: {sc.count}")
-        if sc.status != 0:
-            print(f"  Storage query status=0x{sc.status:04x}")
-        if sc.count >= 10:
+        guids = self.get_storage_count()
+        print(f"  DB records: {len(guids)}")
+        if len(guids) >= 10:
             ans = input("  Database is full! Try anyway? [y/N] ").strip().lower()
             if ans != 'y':
                 print("  Enrollment cancelled.")
@@ -2802,7 +2796,7 @@ class BiometricSensor(SensorTLS):
                 if isinstance(guid, int):
                     # Terminal error (3 bad captures, DB full, etc.)
                     print(f"  Terminal error code=0x{guid:04x}")
-                    cnt = self.get_storage_count().count
+                    cnt = len(self.get_storage_count())
                     if cnt >= 10:
                         print(f"  Database has {cnt} records "
                               "(likely full). Clear some and retry.")
@@ -2816,7 +2810,7 @@ class BiometricSensor(SensorTLS):
                 self._enroll_active = False
                 ok2 = self._commit_enrollment(guid=guid, label=label)
                 if not ok2:
-                    cnt = self.get_storage_count().count
+                    cnt = len(self.get_storage_count())
                     print(f"  DB records after failed commit: {cnt}")
                 return ok2
 
