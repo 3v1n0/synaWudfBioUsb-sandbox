@@ -2529,7 +2529,7 @@ class BiometricSensor(SensorTLS):
                   f" PercentComplete={ts.percent_complete} RejectDetail=0x{ts.reject_detail:x}")
             return False
         print(f"  Template response: {resp.hex()}")
-        _log(f"  TemplateStatus={ts:#x} PC={pc} RD=0x{rd:x}")
+        _log(f"  {ts}")
 
         # Step 3: Build + send commit payload
         sid = _rand(16)
