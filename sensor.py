@@ -1020,7 +1020,7 @@ class SensorTLS(Sensor):
                                    timeout=1000)
             self.dev.ctrl_transfer(BM_IN,  REQ_ACK,      0, 0, 2,
                                    timeout=1000)
-        except Exception:
+        except Exception as e:
             pass
         self.tls = None
         self.restart_session()
@@ -2810,6 +2810,8 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except KeyboardInterrupt:
+        print("\nKEYBOARDINTERRUPT reached __main__", flush=True)
     except Exception as exc:
         print(f"FATAL: {exc}")
         import traceback; traceback.print_exc()
