@@ -3,7 +3,7 @@
 Python USB driver for Synaptics/Kensington WBF biometric sensor (047d:00f2).
 
 Protocol summary:
-  Phase 1: 3x (REQ_START + init_cmds)
+  Phase 1: REQ_START + init_cmds (retried only if device still booting)
   Phase 2: REQ_READY -- returns 0000 (challenge is optional)
   Phase 3: TLS 1.2 handshake over custom USB framing
   Phase 4: Encrypted IOCTL biometric commands (AES-256-GCM)
@@ -657,31 +657,29 @@ class Sensor:
     def _init_round(self, n):
         """
         One init round: REQ_START + 4 plain commands.
-        Returns the device-info response (for TLS-stale detection).
-        Cert-section reads use wValue=0x8000 and request 4096 bytes
-        (native format).
+        Returns the bootstrap status response (68B).
         """
         self.ctrl_out(REQ_START, value=1, label=f"REQ_START(r{n})")
         ack = self.ctrl_in(REQ_ACK, 1, label=f"REQ_ACK(r{n})")
         assert ack == b'\x01', f"ACK={ack.hex()}"
 
-        info_resp = self._cmd_device_info(n)
+        self._cmd_device_info(n)
         self._cmd_cert_section(n, 0x09)
         self._cmd_cert_section(n, 0x1a)
-        self._cmd_bootstrap_status(n)
-        return info_resp
+        return self._cmd_bootstrap_status(n)
 
     def init_device(self):
         """
-        Run init rounds until the device responds with non-TLS data,
-        indicating it has left TLS state from a previous session.
+        Run one init round (REQ_START + 4 plain commands).
+        Retried up to 3 times only if the device signals it is still
+        booting (bootstrap status first byte == 0x02), mirroring the
+        driver's vfmDeviceInitialize state=2 retry path.
         """
-        for i in range(9):
-            info_resp = self._init_round(i)
-            # If info_resp is not a TLS record, device is in plain mode
-            if (i >= 2 and info_resp and len(info_resp) >= 1
-                    and info_resp[0] not in (0x15, 0x16, 0x17)):
+        for i in range(3):
+            boot_resp = self._init_round(i)
+            if not boot_resp or boot_resp[0] != 0x02:
                 break
+            _log(f"Device still booting (attempt {i+1}), retrying...")
         _log("Init phases done")
 
     def req_ready(self):
