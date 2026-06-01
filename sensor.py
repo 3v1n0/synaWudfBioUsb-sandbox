@@ -147,6 +147,11 @@ REQ_READY    = 0x14   # IN  -- ready check
 REQ_SHUTDOWN = 0x1b   # OUT -- vendor reset/shutdown (seen from b.exe)
 BM_OUT, BM_IN = 0x40, 0xc0
 
+# Pairing-data TLV tag numbers
+TLV_CLIENT_CERT    = 1  # 400-byte host certificate (client TLS cert body)
+TLV_CLIENT_PRIVKEY = 2  # 32-byte host ECDSA private key D (LE)
+TLV_DEVICE_CERT    = 3  # 400-byte device certificate (contains ECK1 pubkey)
+
 # ---------------------------------------------------------------------------
 # TLS constants
 # ---------------------------------------------------------------------------
@@ -377,21 +382,27 @@ def load_pairing_data():
 
 def get_pairing_fields(tlvs):
     """
+    Unpack pairing-data TLV dict into structured fields.
+
+    Returns (host_142, client_privkey_le, client_cert,
+             dev_x_be, dev_y_be, client_pubkey_x_le)
+    or None if Tag1 is missing/invalid.
     Device ECDH static key must be present in Tag 3.
     """
-    cert_data = tlvs.get(1)
-    if not cert_data or len(cert_data) < 142:
+    client_cert = tlvs.get(TLV_CLIENT_CERT)
+    if not client_cert or len(client_cert) < 142:
         return None
-    if cert_data[:4] != b'\x3f\x5f\x17\x00':
+    if client_cert[:4] != b'\x3f\x5f\x17\x00':
         return None
-    host_142    = cert_data[:142]
-    eck2_le     = tlvs.get(2, b'\x00' * 32)
-    eck2_pub_le = (cert_data[144:176]
-                   if len(cert_data) >= 176 else b'\x00' * 32)
+    host_142          = client_cert[:142]
+    client_privkey_le = tlvs.get(TLV_CLIENT_PRIVKEY, b'\x00' * 32)
+    client_pubkey_x_le = (client_cert[144:176]
+                          if len(client_cert) >= 176 else b'\x00' * 32)
     # Device ECDH static key from Tag 3 (device certificate)
-    host_cert = tlvs.get(3)
-    dev_x_be, dev_y_be = dev_key_from_tag3(host_cert)
-    return host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le
+    device_cert = tlvs.get(TLV_DEVICE_CERT)
+    dev_x_be, dev_y_be = dev_key_from_tag3(device_cert)
+    return (host_142, client_privkey_le, client_cert,
+            dev_x_be, dev_y_be, client_pubkey_x_le)
 
 
 def dev_key_from_tag3(tag3):
@@ -678,15 +689,16 @@ class Sensor:
     def req_ready(self):
         return self.ctrl_in(REQ_READY, 2, label="REQ_READY")
 
-    def send_challenge(self, host_142, eck2_be):
+    def send_challenge(self, host_142, sign_privkey_be):
         """
-        Send 408-byte pairing challenge when REQ_READY returns non-zero.
+        Send 408-byte pairing challenge.
 
         The challenge proves ownership of the host ECS2 signing key.
-        Device responds with 802 bytes: status(2) + Tag1(400) + Tag3(400).
-        Returns (tag1, tag3) on success, raises on failure.
+        Device responds with 802 bytes: status(2) + client_cert(400)
+        + device_cert(400).  Returns (client_cert, device_cert).
         """
-        sig = sign_ecdsa_sha256(eck2_be, hashlib.sha256(host_142).digest())
+        sig = sign_ecdsa_sha256(sign_privkey_be,
+                                hashlib.sha256(host_142).digest())
         challenge = b'\x93' + host_142 + b'\x47\x00' + sig
         challenge += b'\x00' * (408 - len(challenge))
         assert len(challenge) == 408
@@ -699,13 +711,14 @@ class Sensor:
                 f"Challenge response too short: {len(resp) if resp else 0}B")
         status = struct.unpack('<H', resp[:2])[0]
         if status != 0:
-            raise RuntimeError(f"Challenge rejected: status=0x{status:04x}")
-        tag1 = resp[2:402]
-        tag3 = resp[402:802] if len(resp) >= 802 else None
-        _log(f"Challenge accepted, tag1={tag1[:8].hex()}...")
-        if tag3:
-            _log(f"  tag3={tag3[:8].hex()}...")
-        return tag1, tag3
+            raise RuntimeError(
+                f"Challenge rejected: status=0x{status:04x}")
+        client_cert  = resp[2:402]
+        device_cert  = resp[402:802] if len(resp) >= 802 else None
+        _log(f"Challenge accepted, client_cert={client_cert[:8].hex()}...")
+        if device_cert:
+            _log(f"  device_cert={device_cert[:8].hex()}...")
+        return client_cert, device_cert
 
 
 # ---------------------------------------------------------------------------
@@ -722,18 +735,19 @@ class SensorTLS(Sensor):
         super().__init__()
         self.tls = None
 
-    def connect(self, host_142, eck2_be, eck2_pub_le,
-                cert_data_398, dev_x_be, dev_y_be):
+    def connect(self, host_142, client_privkey_be, client_pubkey_x_le,
+                client_cert, dev_x_be, dev_y_be):
         """
         Perform the full TLS 1.2 handshake with the device.
 
         Parameters:
-          host_142      -- 142-byte host EC key blob (PairingData tag=1[0:142])
-          eck2_be       -- 32-byte ECS2 private key D (BE) for CertVerify
-          eck2_pub_le   -- 32-byte ECS2 public key X coord (LE) for cert
-          cert_data_398 -- 400-byte stored cert body (tag=1); None = fresh
-          dev_x_be      -- 32-byte device ECDH static pub X (BE)
-          dev_y_be      -- 32-byte device ECDH static pub Y (BE)
+          host_142           -- 142-byte host EC key blob (TLV_CLIENT_CERT[0:142])
+          client_privkey_be  -- 32-byte host ECDSA private key D (BE) for CertVerify
+          client_pubkey_x_le -- 32-byte host ECDSA public key X coord (LE)
+          client_cert        -- 400-byte client certificate body (TLV_CLIENT_CERT)
+                                None = build from host_142 + pubkey
+          dev_x_be           -- 32-byte device ECDH static pub X (BE)
+          dev_y_be           -- 32-byte device ECDH static pub Y (BE)
         """
         state    = TLSState()
         cli_rand = _rand(32)
@@ -813,15 +827,15 @@ class SensorTLS(Sensor):
         # ----- Client Certificate -----
         # cert_body = run_marker(2) + host_142(142) + u16le(32)(2)
         #             + pub_key32(32) + zeros(222) = 400 bytes.
-        # The paired path uses the full Tag 1 value (400B) + run_marker
+        # The paired path uses the full client cert (400B) + run_marker
         # = 402B (extra 2 zeros are harmless; device uses the inner
         # cert_length = 400 and ignores trailing padding).
         run_marker = cli_rand[4:6]
-        if cert_data_398 is not None:
-            cert_body = run_marker + cert_data_398   # 2+400 = 402
+        if client_cert is not None:
+            cert_body = run_marker + client_cert   # 2+400 = 402
             assert len(cert_body) == 402, f"paired cert_body={len(cert_body)}"
         else:
-            pub_key   = eck2_pub_le or b'\x00' * 32
+            pub_key   = client_pubkey_x_le or b'\x00' * 32
             cert_body = (run_marker + host_142
                          + b'\x00\x02'
                          + struct.pack('<H', 32)   # u16le(32) = 20 00
@@ -840,7 +854,7 @@ class SensorTLS(Sensor):
         # ----- CertificateVerify -----
         hs_dig = state.hs_digest()
         _hexdump("HS hash for CertVerify", hs_dig)
-        sig_der = sign_ecdsa_sha256(eck2_be, hs_dig)
+        sig_der = sign_ecdsa_sha256(client_privkey_be, hs_dig)
         cv_hs   = make_hs_message(0x0f, sig_der)
         state.feed_hs(cv_hs)
 
@@ -1893,46 +1907,49 @@ def main():
     pair = get_pairing_fields(tlvs) if tlvs else None
 
     if pair:
-        host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le = pair
-        eck2_be       = eck2_le[::-1]
-        cert_data_398 = cert_data
+        host_142, client_privkey_le, client_cert, dev_x_be, dev_y_be, client_pubkey_x_le = pair
+        client_privkey_be = client_privkey_le[::-1]
         print(f"  host_142: {host_142[:8].hex()}...")
-        _log(f"  eck2_le:  {eck2_le[:8].hex()}...")
+        _log(f"  client_privkey_le: {client_privkey_le[:8].hex()}...")
         _log(f"  dev_x_be: {dev_x_be[:8].hex()}...")
-        tag3_for_save = None
+        device_cert_for_save = None
         # Even with PairingData, check if device wants a challenge
         if ready and int.from_bytes(ready, 'little') != 0:
             print("  Device requests challenge (REQ_READY non-zero)")
             print("  Sending pairing challenge...")
-            tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
-            # Tag3 has fresh device key — override stored values
-            dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
-            cert_data_398 = tag1
-            eck2_pub_le = tag1[144:176] if len(tag1) >= 176 else b'\x00' * 32
-            tag3_for_save = tag3
+            challenge_cert, challenge_device_cert = sensor.send_challenge(
+                host_142, client_privkey_be)
+            # Device certificate has fresh device key — override stored values
+            dev_x_be, dev_y_be = dev_key_from_tag3(challenge_device_cert)
+            client_cert = challenge_cert
+            client_pubkey_x_le = (challenge_cert[144:176]
+                                   if len(challenge_cert) >= 176 else b'\x00' * 32)
+            device_cert_for_save = challenge_device_cert
             _log(f"  Updated dev key from challenge: {dev_x_be[:8].hex()}...")
     else:
-        print("  No PairingData -- generating fresh Tag2 identity")
-        # Generate random Tag2 (ECDSA signing key for this pairing)
-        _tag2_int = int.from_bytes(os.urandom(32), 'big')
-        _tag2_mod = NIST256p.order - 1
-        _tag2_int = (_tag2_int % _tag2_mod) + 1
-        _tag2_d_be = _tag2_int.to_bytes(32, 'big')
-        # Compute HOST_142 from Tag2*G
-        _tag2_Q = NIST256p.generator * _tag2_int
-        _host_x_le = _tag2_Q.x().to_bytes(32, 'big')[::-1]
-        _host_y_le = _tag2_Q.y().to_bytes(32, 'big')[::-1]
-        host_142 = (b'\x3f\x5f\x17\x00' + _host_x_le
-                    + b'\x00' * 36 + _host_y_le + b'\x00' * 38)
-        eck2_be       = _tag2_d_be  # Tag2 for TLS CertVerify
-        eck2_pub_le   = _host_x_le  # pubkey X for cert body
+        print("  No PairingData -- generating fresh host identity")
+        # Generate random host ECDSA key pair (the client identity for TLS)
+        _host_privkey_int = int.from_bytes(os.urandom(32), 'big')
+        _host_privkey_mod = NIST256p.order - 1
+        _host_privkey_int = (_host_privkey_int % _host_privkey_mod) + 1
+        _host_privkey_be  = _host_privkey_int.to_bytes(32, 'big')
+        # Compute HOST_142 from host pubkey
+        _host_pubkey_Q = NIST256p.generator * _host_privkey_int
+        _host_pubkey_x_le = _host_pubkey_Q.x().to_bytes(32, 'big')[::-1]
+        _host_pubkey_y_le = _host_pubkey_Q.y().to_bytes(32, 'big')[::-1]
+        host_142 = (b'\x3f\x5f\x17\x00' + _host_pubkey_x_le
+                    + b'\x00' * 36 + _host_pubkey_y_le + b'\x00' * 38)
+        client_privkey_be = _host_privkey_be   # for TLS CertVerify
+        client_pubkey_x_le = _host_pubkey_x_le  # pubkey X for cert body
         print("  Sending pairing challenge...")
         try:
-            tag1, tag3 = sensor.send_challenge(host_142, IDENTITY_D_BE)
-            cert_data_398 = tag1
-            eck2_pub_le = tag1[144:176] if len(tag1) >= 176 else b'\x00' * 32
-            dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
-            tag3_for_save = tag3
+            challenge_cert, challenge_device_cert = sensor.send_challenge(
+                host_142, IDENTITY_D_BE)
+            client_cert = challenge_cert
+            client_pubkey_x_le = (challenge_cert[144:176]
+                                   if len(challenge_cert) >= 176 else b'\x00' * 32)
+            dev_x_be, dev_y_be = dev_key_from_tag3(challenge_device_cert)
+            device_cert_for_save = challenge_device_cert
             print("  Challenge accepted")
         except (RuntimeError, ValueError) as exc:
             print(f"  Challenge failed: {exc}")
@@ -1943,8 +1960,8 @@ def main():
     # ----- TLS handshake -----
     print("TLS handshake...")
     try:
-        sensor.connect(host_142, eck2_be, eck2_pub_le,
-                       cert_data_398, dev_x_be, dev_y_be)
+        sensor.connect(host_142, client_privkey_be, client_pubkey_x_le,
+                       client_cert, dev_x_be, dev_y_be)
     except TlsAlertError as exc:
         print(f"  TLS handshake failed: {exc}")
         sensor.close()
@@ -1952,10 +1969,10 @@ def main():
     print("  TLS OK")
 
     # ----- Save PairingData if we used fresh keys -----
-    if tag3_for_save is not None and not os.path.exists(PAIRING_FILE):
-        _save_pairing_tlv({1: cert_data_398,
-                           2: bytes(reversed(eck2_be)),
-                           3: tag3_for_save})
+    if device_cert_for_save is not None and not os.path.exists(PAIRING_FILE):
+        _save_pairing_tlv({TLV_CLIENT_CERT:    client_cert,
+                           TLV_CLIENT_PRIVKEY: bytes(reversed(client_privkey_be)),
+                           TLV_DEVICE_CERT:    device_cert_for_save})
 
     # ----- Biometric commands -----
     if sys.argv[1] == 'list-db':
