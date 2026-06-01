@@ -164,7 +164,7 @@ EntryInfo      = namedtuple('EntryInfo',      ['flags', 'record_ref'])
 RecordToEntry  = namedtuple('RecordToEntry',  ['entry_handle'])
 DeleteResult   = namedtuple('DeleteResult',   ['status'])
 DeviceInfo     = namedtuple('DeviceInfo',     ['serial', 'firmware_major', 'firmware_minor', 'raw'])
-CertSection    = namedtuple('CertSection',    ['section', 'raw'])
+StorageMeta    = namedtuple('StorageMeta',    ['store_size', 'num_entries'])
 BootStatus     = namedtuple('BootStatus',     ['state', 'raw'])
 
 # DeleteResult.status values
@@ -994,15 +994,39 @@ class Sensor:
 
     def _cmd_cert_section(self, n, section):
         """
-        Read certificate section (8e <section> 00 02 ...).
-        Returns CertSection(section, raw).
+        Read a certificate-store section (cmd 0x8e).
+
+        CERT_SECT_STORAGE_META (0x09) -- 26B response:
+          [0:2]   status (0x0000)
+          [2:4]   total payload size (20)
+          [4:6]   reserved
+          [6:8]   data size (16)
+          [8:10]  section id (0x0009)
+          [10:14] store_size  -- total cert-store capacity in bytes
+          [14:18] reserved
+          [18:22] num_entries -- number of certificate entries stored
+          [22:26] reserved
+          Returns StorageMeta(store_size, num_entries).
+
+        CERT_SECT_FIRMWARE_DESC (0x1a) -- 78B firmware pointer table,
+          no actionable data; returns None.
         """
         data = bytes([0x8e, section, 0, 2]) + b'\x00' * 20
         self.ctrl_out(REQ_CMD, channel=CH_INIT, data=data,
                       label=f"CERT_SECT_{section:02x}(r{n})")
         r = self.ctrl_in(REQ_RESP, 4096, channel=CH_IN_CERT,
                          label=f"CERT_SECT_{section:02x}(r{n})")
-        return CertSection(section=section, raw=r)
+        if section == CERT_SECT_STORAGE_META:
+            if r and len(r) >= 22:
+                store_size  = struct.unpack_from('<I', r, 10)[0]
+                num_entries = struct.unpack_from('<I', r, 18)[0]
+                sm = StorageMeta(store_size=store_size,
+                                 num_entries=num_entries)
+                _log(f"  {sm}")
+                return sm
+            return StorageMeta(store_size=None, num_entries=None)
+        # CERT_SECT_FIRMWARE_DESC: firmware memory pointer table, not useful
+        return None
 
     def _cmd_bootstrap_status(self, n):
         """
@@ -1326,9 +1350,11 @@ class SensorTLS(Sensor):
         if len(raw) < 5:
             _log(f"  TLS({label}) short response ({len(raw)}B): {raw.hex()}")
             return None
-        if raw[0] == TLS_ALERT:
-            rlen  = struct.unpack('>H', raw[3:5])[0]
-            rbody = raw[5: 5 + rlen]
+
+        rtype = raw[0]
+        rlen  = struct.unpack('>H', raw[3:5])[0]
+        rbody = raw[5: 5 + rlen]
+        if rtype == TLS_ALERT:
             try:
                 pt = self.tls.decrypt(TLS_ALERT, rbody)
                 alert = TlsAlertError(pt[0], pt[1])
@@ -1340,9 +1366,7 @@ class SensorTLS(Sensor):
             except Exception as exc:
                 raise RuntimeError(f"TLS Alert (decrypt failed): {raw.hex()}") from exc
             return None
-        rtype = raw[0]
-        rlen  = struct.unpack('>H', raw[3:5])[0]
-        rbody = raw[5: 5 + rlen]
+
         if len(rbody) < rlen:
             _log(f"  TLS({label}) truncated body: need {rlen} got {len(rbody)}")
             return None
