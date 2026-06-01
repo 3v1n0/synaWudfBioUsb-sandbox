@@ -1448,7 +1448,7 @@ class BiometricSensor(SensorTLS):
             for guid, rec in enrolled:
                 tmpl      = self.load_template(rec.handle) if rec else None
                 label_str = f"  label='{tmpl.label}'" if tmpl and tmpl.label else ""
-                sf_str    = f"  subfactor=0x{tmpl.subfactor:02x}" if tmpl else ""
+                sf_str    = f"  subfactor=0x{tmpl.subfactor:02x}" if tmpl and tmpl.subfactor is not None else ""
                 print(f"  {guid.hex()}{label_str}{sf_str}")
 
         return enrolled
@@ -1488,7 +1488,7 @@ class BiometricSensor(SensorTLS):
             tmpl = self.load_template(rec.handle) if rec else None
             guid_from_a003 = r3.guid if r3 else None
             label_str = f" label='{tmpl.label}'" if tmpl and tmpl.label else ""
-            sf_str    = f" subfactor=0x{tmpl.subfactor:02x}" if tmpl else ""
+            sf_str    = f" subfactor=0x{tmpl.subfactor:02x}" if tmpl and tmpl.subfactor is not None else ""
             print(f"  [{i}] GUID {guid.hex()}{label_str}{sf_str}")
             print(f"       9f03 -> handle {rec.handle.hex() if rec else 'N/A'}"
                   f" | a003 -> {guid_from_a003.hex() if guid_from_a003 else 'N/A'}"
@@ -2202,7 +2202,7 @@ class BiometricSensor(SensorTLS):
         tmpl = self.load_template(rec.handle) if rec else None
         if tmpl:
             label_str = f"  label='{tmpl.label}'" if tmpl.label else ""
-            print(f"  subfactor=0x{tmpl.subfactor:02x}{label_str}")
+            print(f"  subfactor=0x{tmpl.subfactor:02x}{label_str}" if tmpl.subfactor is not None else f"  {label_str}")
 
     def match_result(self):
         """
