@@ -151,7 +151,7 @@ TemplateInfo   = namedtuple('TemplateInfo',   ['guid', 'sid', 'label', 'subfacto
 RecordInfo     = namedtuple('RecordInfo',     ['handle'])
 SelectInfo     = namedtuple('SelectInfo',     ['handle', 'guid'])
 CaptureStatus  = namedtuple('CaptureStatus',  ['sensor_status', 'reject_detail'])
-CaptureData    = namedtuple('CaptureData',    ['sensor_status', 'reject_detail', 'ctx', 'raw'])
+CaptureData    = namedtuple('CaptureData',    ['finger_present', 'ctx', 'raw'])
 SensorStatus   = namedtuple('SensorStatus',   ['mode', 'sample', 'quality', 'context'])
 EnrollStatus   = namedtuple('EnrollStatus',   ['status', 'guid', 'sample_cnt',
                                                'progress_sum', 'samples_used', 'size_flag'])
@@ -1695,40 +1695,33 @@ class BiometricSensor(SensorTLS):
         """Begin enrollment (value=0x0002). Returns raw response."""
         return CMD_ENROLL_BEGIN.send(self)
 
-    # Quality bitmask → WINBIO_SENSOR_STATUS mapping
+    # Quality bitmask → reject reason string mapping
     # (from decompiled FUN_18000d054 at line 8331)
     QUALITY_MAP = {
-        0x00:       (0, 0),     # WINBIO_SENSOR_ACCEPT
-        0x02:       (5, 0x07),  # WINBIO_SENSOR_REJECT
-        0x04:       (9, 0x07),
-        0x10:       (6, 0x07),
-        0x8000:     (8, 0x07),
-        0x20000:    (3, 0x07),  # DRY finger
-        0x40000:    (4, 0x07),  # WET finger
-        0x80000000: (7, 0x07),  # BAD capture
+        0x02:       'reject',
+        0x04:       'reject',
+        0x10:       'reject',
+        0x8000:     'reject',
+        0x20000:    'dry finger',
+        0x40000:    'wet finger',
+        0x80000000: 'bad capture',
     }
 
     @staticmethod
-    def _quality_to_status(quality):
-        """Map quality bitmask to (sensor_status, reject_detail).
+    def _quality_to_finger_present(quality):
+        """Return True if quality bitmask indicates a good capture.
 
         The quality bitmask is the first DWORD of the image data header.
-        Multiple bits may be set; we return the first matching entry.
+        Zero means accept (finger present and good); any set bit means reject.
         """
-        if quality == 0:
-            return 1, 0  # ACCEPT
-        for bit, (ss, rd) in sorted(BiometricSensor.QUALITY_MAP.items()):
-            if bit and quality & bit:
-                return ss, rd
-        return 2, 7  # generic reject
+        return quality == 0
 
     def capture_data(self):
         """
         Send CAPTURE_DATA (value=0x0002) and parse the 66-byte response.
 
-        Returns CaptureData(sensor_status, reject_detail, ctx, raw):
-          sensor_status -- 1=finger detected, 2=no finger, 3=error/short resp
-          reject_detail -- 0 or 7 (no finger)
+        Returns CaptureData(finger_present, ctx, raw):
+          finger_present -- True if finger detected, False otherwise
           ctx           -- LE u16 from resp[-2:], used as enrollment context
           raw           -- full response bytes (or None on TLS error)
 
@@ -1740,16 +1733,11 @@ class BiometricSensor(SensorTLS):
         """
         raw = CMD_CAPTURE_DATA.send(self)
         if raw is None or len(raw) < 22:
-            return CaptureData(sensor_status=3, reject_detail=0, ctx=0, raw=raw)
+            return CaptureData(finger_present=False, ctx=0, raw=raw)
         marker = struct.unpack_from('<I', raw, 18)[0]
-        if marker == 6:
-            sensor_status, reject_detail = 1, 0   # finger detected
-        else:
-            sensor_status, reject_detail = 2, 7   # no finger
+        finger_present = (marker == 6)
         ctx = struct.unpack('<H', raw[-2:])[0] if len(raw) >= 2 else 0
-        cd = CaptureData(sensor_status=sensor_status,
-                         reject_detail=reject_detail,
-                         ctx=ctx, raw=raw)
+        cd = CaptureData(finger_present=finger_present, ctx=ctx, raw=raw)
         _log(f"  {cd}")
         return cd
 
@@ -2416,7 +2404,7 @@ class BiometricSensor(SensorTLS):
         # 4. Capture finger
         print("\n  Touch and hold the sensor...")
         cap = self.capture_data()
-        if not cap.raw or cap.sensor_status != 1:
+        if not cap.raw or not cap.finger_present:
             print("  No finger detected")
             return None
         # 5. Interrupt 1 (capture armed)
@@ -2476,7 +2464,7 @@ class BiometricSensor(SensorTLS):
         print("\n--- Identify ---")
         print("\n  Touch and hold the sensor...")
         cap = self.capture_data()
-        if not cap.raw or cap.sensor_status != 1:
+        if not cap.raw or not cap.finger_present:
             print("  No finger detected")
             return None
         self._print_sensor_status(cap.ctx, label="capture: ")
@@ -2825,10 +2813,10 @@ class BiometricSensor(SensorTLS):
         _log(f"  _enroll_one_sample started")
 
         cap = self.capture_data()
-        ok = cap.raw is not None and cap.sensor_status == 1
+        ok = cap.raw is not None and cap.finger_present
         if cap.raw is None:
             print("  CAPTURE_DATA failed")
-        elif cap.sensor_status != 1:
+        elif not cap.finger_present:
             print("  No finger detected")
             return False, None
 
