@@ -1497,31 +1497,18 @@ class BiometricSensor(SensorTLS):
 
     def discard_enrollment(self):
         """
-        Abort an in-progress enrollment session and shut down the
-        current TLS session gracefully.
+        Abort an in-progress enrollment session.
 
-        Matches the b.exe discard sequence exactly:
-          9604 00000000  (ENGINE_COMMIT_ACK / abort signal to device)
-          REQ_SHUTDOWN   (0x1b OUT, len=0)
-          REQ_ACK        (0x14 IN,  2B)
-
-        After this call self.tls is None.  Call restart_session() to
-        bring the session back up without a USB reset.
+        Sends 9604 (ENGINE_COMMIT_ACK) to abort on the device side,
+        then calls cancel_session() to reset the USB device and turn
+        off the LED.
         """
         print("  Sending enrollment abort (9604)...")
         try:
             self.engine_commit_ack()
         except Exception:
             pass
-        print("  Sending REQ_SHUTDOWN...")
-        try:
-            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
-                                   timeout=1000)
-            self.dev.ctrl_transfer(BM_IN,  REQ_ACK,      0, 0, 2,
-                                   timeout=1000)
-        except Exception:
-            pass
-        self.tls = None
+        self.cancel_session()
 
     def delete_record(self, entry):
         """
