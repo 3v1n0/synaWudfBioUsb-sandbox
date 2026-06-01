@@ -1591,7 +1591,7 @@ class BiometricSensor(SensorTLS):
         Returns (mode, sample, quality, context).
         """
         if resp is None or len(resp) < 12:
-            return 0, 0, 0, 0
+            return SensorStatus(0, 0, 0, 0)
         mode = struct.unpack_from('<H', resp, 6)[0]
         sample = struct.unpack_from('<H', resp, 8)[0]
         quality = struct.unpack_from('<H', resp, 10)[0]
@@ -2229,7 +2229,7 @@ class BiometricSensor(SensorTLS):
             print("  MATCH_RESULT returned zero GUID")
             return None
         self._print_match(mr.guid)
-        return matched
+        return mr.guid
 
     def identify(self):
         """
@@ -2283,7 +2283,7 @@ class BiometricSensor(SensorTLS):
             print("  MATCH_RESULT returned zero GUID")
             return None
         self._print_match(mr.guid)
-        return matched
+        return mr.guid
 
     def _list_entries(self):
         """Fetch all entry blobs via 9f01. Returns list of 16-byte entries.
