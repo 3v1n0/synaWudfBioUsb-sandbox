@@ -359,7 +359,7 @@ CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
 
 # STORAGE_COMMIT (9603) payload is variable-length (built by _build_commit_payload)
 # so no fixed Cmd descriptor -- the method builds it directly.
-CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
+CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT", sep=b'')
 
 # CAPTURE_DATA: 86 <subfactor> 00*15 <subfactor> 00*19 (37B)
 # subfactor is a WINBIO_ANSI_381_POS_* subtype; payload built by capture_data()
@@ -1591,7 +1591,7 @@ class BiometricSensor(SensorTLS):
     # -- Commit / finalization protocol ---
 
     COMMIT_HEADER = bytes.fromhex(
-        '000000007d0000000000100000')
+        '000000000000007d0000000000100000')
 
     COMMIT_IDENTITY_PREFIX = bytes.fromhex(
         '01004c00000002000000')
@@ -1609,7 +1609,7 @@ class BiometricSensor(SensorTLS):
 
     def _build_commit_payload(self, guid, sid, label):
         """
-        Build 138-byte commit payload (padded to match device expectations).
+        Build commit payload (arg to CMD_STORAGE_COMMIT, 136 bytes).
         guid  -- 16 bytes from status_query response
         sid   -- 16 bytes (generated)
         label -- string for identity label
@@ -1622,10 +1622,9 @@ class BiometricSensor(SensorTLS):
                    + self.COMMIT_PAD
                    + self.COMMIT_TLV1
                    + self._enroll_label_bytes(label))
-        # Pad to 138 bytes (trace commit size). Excess zeros are safe
-        # because TLV is self-delimiting.
-        assert len(payload) <= 138, f"commit payload too large: {len(payload)}"
-        return payload + b'\x00' * (138 - len(payload))
+        # Pad to 136 bytes (total wire = 138 with 2-byte opcode 9603).
+        assert len(payload) <= 136, f"commit payload too large: {len(payload)}"
+        return payload + b'\x00' * (136 - len(payload))
 
     def get_enroll_status(self):
         """
