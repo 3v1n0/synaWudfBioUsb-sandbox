@@ -1682,41 +1682,68 @@ class BiometricSensor(SensorTLS):
 
     def erase_database(self):
         """
-        Clear device storage by sending REQ_STOP (0x1b) to the sensor.
-        This matches b.exe's IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE
-        handler (traced 2026-06-01):
+        Erase all records from device storage using the TLS-level
+        clear sequence (traced from b.exe clear-db 2026-06-01):
 
-          IOCTL → OnEraseDatabase → EIS→vtable[12] → sends REQ_STOP
-          → device resets, clears template data
-          → IOCTL returns S_OK immediately (no TLS-level deletion)
+          1. STORAGE_QUERY_ALL to get GUIDs (loads templates)
+          2. FETCH_FIRST → list of entry handles
+          3. a001 for each entry → detect "manager" entries
+             (response 12 bytes all zeros = 000000000000000000000000)
+          4. a301 DELETE_ENTRY for each manager entry
+          5. a401/a402/a403 (finalise)
+          6. STORAGE_QUERY_INIT ×2 + close
 
-        After REQ_STOP the device resets its internal state, clearing
-        stored templates.  The GUID index from 9f02 may still report
-        stale entries (9f03 returns empty for them), but the actual
-        template data is gone.
-
-        This tears down the TLS session.  The next sensor.py command
-        will re-initialize and establish a fresh connection.
+        After this, all records are deleted and 9f02 returns empty.
         """
-        print("  Sending REQ_STOP to clear device database...")
-        try:
-            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
-                                   timeout=1000)
-            self.dev.ctrl_transfer(BM_IN, REQ_ACK, 0, 0, 2,
-                                   timeout=1000)
-            print("  REQ_STOP acknowledged -- database cleared")
-        except Exception as exc:
-            print(f"  REQ_STOP failed: {exc}")
+        print("  Fetching records...")
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        guids = self.storage_query_all()
+        print(f"  {len(guids)} GUIDs in index")
 
-        if self.tls is not None:
-            try:
-                self.tls_send(b'\x00\x01', value=7,
-                              label="CLOSE_NOTIFY", ctype=TLS_ALERT)
-            except Exception:
-                pass
-            self.tls = None
+        # Load all templates (host-side cleanup before delete)
+        for guid in guids:
+            rec = self.fetch_record(guid)
+            if rec and len(rec) > 4 and rec[4:20] != b'\x00' * 16:
+                handle = rec[4:20]
+                self.tls_send(bytes.fromhex('a003000000') + handle,
+                              value=2, label=f"SELECT_{guid[:4].hex()}")
+                self.tls_send(bytes.fromhex('a103000000') + handle,
+                              value=2, label=f"LOAD_{guid[:4].hex()}")
 
-        return True
+        # Find and delete manager entries (a001 returns all zeros)
+        entries = self._list_entries()
+        print(f"  {len(entries)} entries found")
+        managers = []
+        for ent in entries:
+            r = self.tls_send(bytes.fromhex('a001000000') + ent,
+                              value=2, label="SELECT_ENTRY")
+            if r == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00':
+                managers.append(ent)
+        print(f"  {len(managers)} manager entries to delete")
+        for ent in managers:
+            r = self.tls_send(bytes.fromhex('a301000000') + ent,
+                              value=2, label="DELETE_MANAGER")
+            if r != b'\x00\x00\x03\x00':
+                print(f"  WARNING: delete returned {r.hex()}")
+
+        # Finalise
+        for cmd, label in [('a401', 'FINALISE_1'),
+                           ('a402', 'FINALISE_2'),
+                           ('a403', 'FINALISE_3')]:
+            r = self.tls_send(bytes.fromhex(cmd), value=7, label=label)
+            if r is None:
+                print(f"  {label} failed"); return False
+
+        # Verify
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        remaining = self.storage_query_all()
+        if remaining:
+            print(f"  WARNING: {len(remaining)} records still present")
+        else:
+            print("  OK -- no records remain")
+        return not remaining
 
     def _commit_enrollment(self, guid, label="FP1"):
         """
