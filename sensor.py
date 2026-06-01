@@ -768,6 +768,10 @@ def iter_tls_records(buf):
     off = 0
     while off + TLS_RECORD_HEADER_LEN <= len(buf):
         rtype = buf[off]
+        ver = buf[off + 1: off + 3]
+        if ver != TLS_VER:
+            raise RuntimeError(
+                f"Invalid TLS record version: {ver.hex()}")
         rlen  = struct.unpack_from('>H', buf, off + 3)[0]
         if off + TLS_RECORD_HEADER_LEN + rlen > len(buf):
             break
