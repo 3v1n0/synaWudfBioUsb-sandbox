@@ -1304,8 +1304,14 @@ class BiometricSensor(SensorTLS):
         return self.storage_query_all()
 
     def storage_query_init(self, n):
-        """Send STORAGE_QUERY_INIT (call twice before QUERY_ALL)."""
-        return CMD_STORAGE_QUERY_INIT.send(self, label=f"QUERY_INIT_{n}")
+        """Send STORAGE_QUERY_INIT (40B response, [0:2] = status).
+        Raises RuntimeError on device error."""
+        resp = CMD_STORAGE_QUERY_INIT.send(self, label=f"QUERY_INIT_{n}")
+        if resp is None or len(resp) < 2:
+            raise RuntimeError(f"STORAGE_QUERY_INIT_{n}: no response")
+        status = struct.unpack_from('<H', resp, 0)[0]
+        if status != 0:
+            raise RuntimeError(f"STORAGE_QUERY_INIT_{n} failed: 0x{status:04x}")
 
     def storage_query_all(self):
         """
@@ -1913,7 +1919,6 @@ class BiometricSensor(SensorTLS):
         Does NOT delete anything.
         """
         print(f"Probing {guid.hex()}...")
-        ZEROS12 = b'\x00' * 12
 
         self.storage_query_init(1)
         self.storage_query_init(2)
