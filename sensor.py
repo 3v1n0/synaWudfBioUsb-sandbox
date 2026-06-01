@@ -1418,7 +1418,6 @@ class BiometricSensor(SensorTLS):
                 'samples_used': struct.unpack_from('<H', resp, 52)[0],
                 'size_flag': struct.unpack_from('<I', resp, 48)[0],
             }
-        print("Enroll status", status, guid, sample_cnt, extra)
         return status, guid, sample_cnt, extra
 
     def storage_commit(self, payload):
@@ -1482,11 +1481,18 @@ class BiometricSensor(SensorTLS):
     def delete_record_by_guid(self, guid):
         """Delete a single record by GUID.
 
-        Uses two-level namespace-aware lookup:
-          1. Fetch all GUIDs from 9f02
-          2. Filter to only those accessible (9f03 returns valid handle)
-          3. Find the target within the accessible subset
-          4. Delete the corresponding manager entry (a301)
+        Protocol (traced from b.exe, adapted for Linux where REQ_STOP
+        disconnects the device):
+
+        We use the manager-entry deletion path which does not need REQ_STOP:
+          1. STORAGE_QUERY_INIT x2
+          2. STORAGE_QUERY_ALL -> confirm GUID is present and get its index
+          3. FETCH_RECORD(guid) -> verify GUID is accessible (same pairing)
+          4. FETCH_FIRST -> list of all entry handles (in order)
+          5. SELECT_ENTRY on each -> collect manager entries (all-zeros)
+          6. Manager entries map 1:1 to GUIDs by position in 9f02 response
+          7. DELETE_ENTRY(matching manager) -> GUID removed
+          8. a401/a402/a403 finalize (per erase_database pattern)
 
         Only GUIDs accessible in the current TLS session (enrolled
         under this pairing) can be deleted.  Cross-namespace GUIDs
@@ -1495,50 +1501,66 @@ class BiometricSensor(SensorTLS):
         Returns True on success; False if the GUID is not accessible
         or deletion fails.
         """
+        self.storage_query_init(1)
+        self.storage_query_init(2)
         all_guids = self.storage_query_all()
 
-        # Filter to only accessible GUIDs (same pairing namespace)
-        guids = [g for g in all_guids if self._is_accessible_guid(g)]
-        if not guids:
-            print(f"  ERROR: no accessible GUIDs in current"
-                  f" pairing namespace.  All {len(all_guids)} GUID(s)"
-                  f" belong to other sessions.")
+        if guid not in all_guids:
+            print(f"  ERROR: GUID {guid.hex()} not found in device storage")
             return False
 
-        try:
-            idx = guids.index(guid)
-        except ValueError:
-            if guid in all_guids:
-                print(f"  ERROR: GUID {guid.hex()} belongs to a"
-                      f" different pairing session (9f03 returned"
-                      f" no record handle).  Delete it while paired"
-                      f" with the correct namespace or use clear-db.")
-            else:
-                print(f"  ERROR: GUID {guid.hex()} not found"
-                      f" in device storage")
+        # Find index of target GUID (must be in current pairing namespace)
+        # Verify it's accessible by fetching its record handle
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        r = self.tls_send(bytes.fromhex('9f03000000') + guid,
+                          value=2, label=f"FETCH_{guid.hex()[:8]}")
+        if not r or len(r) < 20 or r[:2] != b'\x00\x00':
+            print(f"  ERROR: GUID {guid.hex()} belongs to a different"
+                  f" pairing session.  Use clear-db for cross-namespace"
+                  f" records.")
             return False
 
+        guid_idx = all_guids.index(guid)
+        _log(f"  target GUID at index {guid_idx} in 9f02 response")
+
+        # Find all manager entries (a001 returns all zeros = 12 zero bytes)
         entries = self._list_entries()
-        managers = self._find_managers(entries)
-        if idx >= len(managers):
-            print(f"  ERROR: manager index {idx} out of"
-                  f" range ({len(managers)} managers)")
+        _log(f"  {len(entries)} total entries")
+        managers = []
+        for ent in entries:
+            r2 = self.tls_send(bytes.fromhex('a001000000') + ent,
+                               value=2, label="SELECT_ENTRY")
+            if r2 == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00':
+                managers.append(ent)
+        _log(f"  {len(managers)} manager entries found")
+
+        if guid_idx >= len(managers):
+            print(f"  ERROR: GUID index {guid_idx} out of range"
+                  f" (only {len(managers)} managers)")
             return False
 
-        target = managers[idx]
-        r = self.tls_send(bytes.fromhex('a301000000') + target,
-                          value=2, label="DELETE_MANAGER")
-        if r != b'\x00\x00\x03\x00':
-            print(f"  ERROR: a301 returned"
-                  f" {r.hex() if r else 'None'}")
-            return False
+        target_manager = managers[guid_idx]
+        _log(f"  deleting manager[{guid_idx}]={target_manager.hex()}")
+        r3 = self.tls_send(bytes.fromhex('a301000000') + target_manager,
+                           value=2, label="DELETE_MANAGER")
+        _log(f"  DELETE_MANAGER response: {r3.hex() if r3 else 'None'}")
+        if r3 == b'\x00\x00\x03\x00':
+            # Verify GUID is gone
+            self.storage_query_init(1)
+            self.storage_query_init(2)
+            after = self.storage_query_all()
+            if guid not in after:
+                _log("  GUID successfully removed")
+                return True
+            print(f"  WARNING: a301 returned 00000300 but GUID still present"
+                  f" -- positional mapping may be off")
+        else:
+            _log(f"  a301 returned {r3.hex() if r3 else 'None'}"
+                 f" (expected 00000300)")
 
-        after = self.storage_query_all()
-        if guid in after:
-            print(f"  ERROR: GUID still present after deletion")
-            return False
-
-        return True
+        print(f"  ERROR: failed to delete GUID {guid.hex()}")
+        return False
 
     def close_notify(self):
         """Send TLS close_notify (value=7). Returns response."""
@@ -2105,10 +2127,10 @@ class BiometricSensor(SensorTLS):
             print("  ENROLL_STATUS failed")
             return False, None
         status, guid, sample_cnt, extra = enroll
-        _log(f"  ENROLL_STATUS: status=0x{status:04x}"
-             f" guid={'yes' if guid else 'no'}"
-             f" sample_cnt={sample_cnt}"
-             + (f" extra={extra}" if extra else ""))
+        print(f"  ENROLL_STATUS: status=0x{status:04x}"
+              f" guid={'yes' if guid else 'no'}"
+              f" sample_cnt={sample_cnt}"
+              + (f" extra={extra}" if extra else ""))
 
         # GUID present → enrollment complete, ready to commit
         if guid:
