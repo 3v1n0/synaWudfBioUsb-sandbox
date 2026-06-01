@@ -224,17 +224,20 @@ IOCTL_HDR = b'\x44\x00\x00\x00'
 class Cmd:
     """Descriptor for a fixed-layout app-layer command."""
 
-    def __init__(self, opcode, value, body=b'', label=""):
+    def __init__(self, opcode, value, body=b'', label="", ctype=None):
         """
         opcode -- 1 or 2 bytes identifying the command (cmd + subcmd)
         value  -- TLS channel selector (2, 6 or 7)
         body   -- fixed payload bytes that follow the opcode (may be empty)
         label  -- default trace label; can be overridden in send()
+        ctype  -- TLS content type (default: TLS_APP_DATA); use TLS_ALERT
+                  for close_notify
         """
         self.opcode = opcode
         self.value  = value
         self.body   = body
         self.label  = label
+        self.ctype  = ctype  # resolved to TLS_APP_DATA in send() if None
 
     def build(self, arg=b''):
         """Return the full payload bytes, appending `arg` after opcode+body."""
@@ -243,8 +246,10 @@ class Cmd:
     def send(self, dev, arg=b'', label=None):
         """Build and send via dev.tls_send(); returns response.
         label overrides the default cmd label when provided and non-empty."""
+        ctype = self.ctype if self.ctype is not None else TLS_APP_DATA
         return dev.tls_send(self.build(arg), value=self.value,
-                            label=label if label else self.label)
+                            label=label if label else self.label,
+                            ctype=ctype)
 
 
 # 3 zero-pad bytes that separate the 2-byte opcode from the 16-byte argument
@@ -307,11 +312,13 @@ CMD_MATCH_RESULT         = Cmd(b'\x99\x01', CH_DATA,
 
 # --- Storage / admin (value=7) ---
 CMD_STORAGE_QUERY_INIT   = Cmd(b'\x9e\x01', CH_STORE, label="STORAGE_QUERY_INIT")
-CMD_FINALISE_1           = Cmd(b'\xa4\x01', CH_STORE, label="FINALISE_1")
-CMD_FINALISE_2           = Cmd(b'\xa4\x02', CH_STORE, label="FINALISE_2")
-CMD_FINALISE_3           = Cmd(b'\xa4\x03', CH_STORE, label="FINALISE_3")
-# CLOSE_NOTIFY uses ctype=TLS_ALERT so tls_send() must be called directly
-CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY")
+# Storage wipe finalise sequence (a401/a402/a403, Windows driver clear-db compat)
+CMD_STORAGE_WIPE_1       = Cmd(b'\xa4\x01', CH_STORE, label="STORAGE_WIPE_1")
+CMD_STORAGE_WIPE_2       = Cmd(b'\xa4\x02', CH_STORE, label="STORAGE_WIPE_2")
+CMD_STORAGE_WIPE_3       = Cmd(b'\xa4\x03', CH_STORE, label="STORAGE_WIPE_3")
+# TLS session teardown -- sent as a TLS Alert record, not application data
+CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY",
+                               ctype=TLS_ALERT)
 
 # --- Query / template (value=2, fixed 125-byte payloads) ---
 CMD_QUERY_ENROLL_NEEDS   = Cmd(b'\x39', CH_DATA,
@@ -1184,10 +1191,7 @@ class SensorTLS(Sensor):
         # TLS close_notify as Alert record (ctype=0x15)
         if self.tls is not None:
             try:
-                self.tls_send(CMD_CLOSE_NOTIFY.build(),
-                              value=CMD_CLOSE_NOTIFY.value,
-                              label=CMD_CLOSE_NOTIFY.label,
-                              ctype=TLS_ALERT)
+                CMD_CLOSE_NOTIFY.send(self)
             except Exception:
                 pass
         self.tls = None
@@ -1955,9 +1959,8 @@ class BiometricSensor(SensorTLS):
         return mgr_to_guid
 
     def close_notify(self):
-        """Send TLS close_notify (value=7). Returns response."""
-        return self.tls_send(CMD_CLOSE_NOTIFY.build(), value=CMD_CLOSE_NOTIFY.value,
-                             label=CMD_CLOSE_NOTIFY.label)
+        """Send TLS close_notify alert. Returns response."""
+        return CMD_CLOSE_NOTIFY.send(self)
 
     def reset_ownership(self):
         """
@@ -2265,7 +2268,7 @@ class BiometricSensor(SensorTLS):
 
         Returns True on success.
         """
-        for cmd in (CMD_FINALISE_1, CMD_FINALISE_2, CMD_FINALISE_3):
+        for cmd in (CMD_STORAGE_WIPE_1, CMD_STORAGE_WIPE_2, CMD_STORAGE_WIPE_3):
             r = cmd.send(self)
             if r is None:
                 print(f"  {cmd.label} failed")
