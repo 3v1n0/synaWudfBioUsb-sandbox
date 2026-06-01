@@ -1418,6 +1418,7 @@ class BiometricSensor(SensorTLS):
                 'samples_used': struct.unpack_from('<H', resp, 52)[0],
                 'size_flag': struct.unpack_from('<I', resp, 48)[0],
             }
+        print("Enroll status", status, guid, sample_cnt, extra)
         return status, guid, sample_cnt, extra
 
     def storage_commit(self, payload):
@@ -2146,6 +2147,11 @@ class BiometricSensor(SensorTLS):
                     self._enroll_plateau = plateau
             else:
                 changed = True
+
+        # 0x0680 = WINBIO_E_DATABASE_FULL
+        if status == 0x0680:
+            print(f"  Database full (status=0x{status:04x})")
+            return False, status
 
         # 3 consecutive no-change → enrollment complete
         if not changed and getattr(self, '_enroll_plateau', 0) >= 3:
