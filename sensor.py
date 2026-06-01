@@ -65,6 +65,8 @@ Usage:
 """
 
 import os, sys, struct, hashlib, hmac as _hmac, re, ssl
+import enum, getpass
+from datetime import datetime
 from collections import namedtuple
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import ec, utils as ec_utils
@@ -166,6 +168,20 @@ DELETE_STATUS_EMPTY = 0x00000100   # entry had no data
 DELETE_STATUS_OK    = 0x00000300   # entry deleted successfully
 
 NULL_GUID = b'\x00' * 16   # 16 zero bytes -- "no GUID" sentinel
+
+# Finger position enum, matching libfprint FpFinger values.
+class FpFinger(enum.IntEnum):
+    UNKNOWN      = 0
+    LEFT_THUMB   = 1
+    LEFT_INDEX   = 2
+    LEFT_MIDDLE  = 3
+    LEFT_RING    = 4
+    LEFT_LITTLE  = 5
+    RIGHT_THUMB  = 6
+    RIGHT_INDEX  = 7
+    RIGHT_MIDDLE = 8
+    RIGHT_RING   = 9
+    RIGHT_LITTLE = 10
 
 REQ_START        = 0x19   # OUT -- phase 1 init signal
 REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
@@ -1352,27 +1368,42 @@ class BiometricSensor(SensorTLS):
           [0:2]    status (u16 LE, 0x0000 = ok)
           [2:14]   fixed header (matches commit header sans opcode)
           [14:30]  GUID (16B)
-          [30:40]  identity prefix
-          [40:56]  SID (16B)
-          [56:112] reserved zeros + pad + TLV1
-          [112:118] TLV1 (020001000000)
-          [118:]   label TLV: 0203 00 <len LE32> <label+NUL>
+          [30:]    payload region -- format detected by marker at [30:40]:
+            WinBIO format (COMMIT_IDENTITY_PREFIX at [30:40]):
+              [30:40]  identity prefix
+              [40:56]  SID (16B)
+              [56:112] reserved zeros + pad
+              [112:118] TLV1 (020001000000)
+              [118:]   label TLV: 0203 00 <len LE32> <label+NUL>
+            libfprint format (no COMMIT_IDENTITY_PREFIX):
+              [30:]    NUL-terminated UTF-8 fprint ID string, zero-padded
 
-        Returns TemplateInfo(guid, sid, label) or None on error.
+        Returns TemplateInfo(guid, sid, label, subfactor) or None on error.
+        sid and subfactor are None for libfprint-format templates.
         """
         r = CMD_LOAD_TEMPLATE.send(self, handle)
         if not r or len(r) < 56:
             return None
-        guid      = r[14:30]
-        sid       = r[40:56]
-        # TLV1: tag=0x0002(2B LE) + len=0x0001(2B LE) + val(1B) + pad(1B)
-        subfactor = r[116] if len(r) >= 117 else 0
-        label     = None
-        idx       = r.find(b'\x02\x03', 110)
-        if idx >= 0 and len(r) >= idx + 7:
-            llen  = int.from_bytes(r[idx+3:idx+7], 'little')
-            raw   = r[idx+7:idx+7+llen]
-            label = raw.rstrip(b'\x00').decode('utf-8', errors='replace') or None
+        guid = r[14:30]
+        if r[30:40] == self.COMMIT_IDENTITY_PREFIX:
+            # WinBIO format
+            sid       = r[40:56]
+            subfactor = r[116] if len(r) >= 117 else 0
+            label     = None
+            idx       = r.find(b'\x02\x03', 110)
+            if idx >= 0 and len(r) >= idx + 7:
+                llen  = int.from_bytes(r[idx+3:idx+7], 'little')
+                raw   = r[idx+7:idx+7+llen]
+                label = raw.rstrip(b'\x00').decode('utf-8', errors='replace') or None
+        else:
+            # libfprint format: NUL-terminated UTF-8 ID string from [30:]
+            sid       = None
+            subfactor = None
+            raw       = r[30:]
+            nul       = raw.find(b'\x00')
+            label     = raw[:nul].decode('utf-8', errors='replace') if nul >= 0 else \
+                        raw.decode('utf-8', errors='replace')
+            label     = label or None
         return TemplateInfo(guid=guid, sid=sid, label=label, subfactor=subfactor)
 
     def select_record(self, handle, label="SELECT_RECORD"):
@@ -1685,12 +1716,12 @@ class BiometricSensor(SensorTLS):
         raw = label_str.encode("utf-8", errors="replace") + b"\x00"
         return b'\x02\x03\x00' + struct.pack('<I', len(raw)) + raw
 
-    def _build_commit_payload(self, guid, sid, label, subfactor=None):
+    def _build_commit_payload_winbio(self, guid, sid, label, subfactor=None):
         """
-        Build commit payload (arg to CMD_STORAGE_COMMIT, 136 bytes).
+        Build WinBIO-format commit payload (136 bytes).
         guid      -- 16 bytes from enroll_status response
         sid       -- 16 bytes (generated)
-        label     -- string for identity label
+        label     -- string for identity label (max 7 chars)
         subfactor -- TLV1 value byte (default 0 = WINBIO_SUBTYPE_ANY);
                      set via COMMIT_SUBFACTOR env var for testing
         """
@@ -1708,6 +1739,51 @@ class BiometricSensor(SensorTLS):
         # Pad to 136 bytes (total wire = 138 with 2-byte opcode 9603).
         assert len(payload) <= 136, f"commit payload too large: {len(payload)}"
         return payload + b'\x00' * (136 - len(payload))
+
+    def _build_commit_payload_fprint(self, guid, finger=FpFinger.UNKNOWN,
+                                     username=None):
+        """
+        Build libfprint-format commit payload (136 bytes).
+
+        The 119 bytes after COMMIT_HEADER+sep+GUID are a NUL-terminated
+        UTF-8 string in libfprint ID format, zero-padded:
+          FP1-{YYYYMMDD}-{finger_hex1}-{rand8_hex_upper}-{username}
+
+        guid     -- 16 bytes from enroll_status response
+        finger   -- FpFinger enum value (default UNKNOWN=0)
+        username -- str (default: current OS username, truncated to 32 chars)
+        """
+        if username is None:
+            username = getpass.getuser()[:32]
+        date_str  = datetime.now().strftime('%Y%m%d')
+        rand_part = os.urandom(4).hex().upper()
+        fp_id     = (f"FP1-{date_str}-{int(finger):x}"
+                     f"-{rand_part}-{username}")
+        id_bytes  = fp_id.encode('utf-8') + b'\x00'
+        # 136 - 17 (COMMIT_HEADER=16 + sep=1 + guid=16 wait... recount)
+        # COMMIT_HEADER=16, sep=1, guid=16 -> prefix=33; free=136-33=103
+        free = 136 - len(self.COMMIT_HEADER) - 1 - 16
+        assert len(id_bytes) <= free, \
+            f"fprint ID too long ({len(id_bytes)}B > {free}B): {fp_id!r}"
+        payload = (self.COMMIT_HEADER
+                   + b'\x00' + guid
+                   + id_bytes
+                   + b'\x00' * (free - len(id_bytes)))
+        assert len(payload) == 136, f"commit payload size wrong: {len(payload)}"
+        return payload
+
+    def _build_commit_payload(self, guid, finger=FpFinger.UNKNOWN,
+                              username=None):
+        """
+        Dispatch to WinBIO or libfprint commit payload builder.
+        Set COMMIT_WINBIO=1 env var to use WinBIO format (for b.exe compat).
+        Default is libfprint format.
+        """
+        if os.environ.get('COMMIT_WINBIO'):
+            sid   = _rand(16)
+            label = (f"FP{os.urandom(2).hex()}")[:7]
+            return self._build_commit_payload_winbio(guid, sid, label)
+        return self._build_commit_payload_fprint(guid, finger, username)
 
     def get_enroll_status(self):
         """
@@ -2513,7 +2589,7 @@ class BiometricSensor(SensorTLS):
               f" {len(remaining)} foreign GUID(s) remain")
         return True
 
-    def _commit_enrollment(self, guid, label="FP1"):
+    def _commit_enrollment(self, guid, finger=FpFinger.UNKNOWN, username=None):
         """
         Full commit finalization sequence (5 steps + close).
         Must be called after 5 successful enrollment samples.
@@ -2537,10 +2613,9 @@ class BiometricSensor(SensorTLS):
         _log(f"  {ts}")
 
         # Step 3: Build + send commit payload
-        sid = _rand(16)
-        payload = self._build_commit_payload(guid, sid, label)
+        payload = self._build_commit_payload(guid, finger, username)
         _hexdump(f"Commit plain ({len(payload)}B)", payload)
-        print(f"  Sending commit ({len(payload)}B) as label '{label}'...")
+        print(f"  Sending commit ({len(payload)}B)...")
         resp = self.storage_commit(payload)
         if resp is None:
             print("  STORAGE_COMMIT failed (TLS Alert)")
@@ -2747,7 +2822,7 @@ class BiometricSensor(SensorTLS):
                 return False, 0x0001
             return False, None
 
-    def enroll(self, label=None):
+    def enroll(self, finger=FpFinger.UNKNOWN, username=None):
         """
         Full enrollment flow (interactive).
         Checks DB capacity first, then completes each sample fully.
@@ -2755,11 +2830,9 @@ class BiometricSensor(SensorTLS):
         """
         print("\n--- Enrollment ---")
 
-        if not label:
-            label = f"FP{os.urandom(2).hex()}"  # e.g. "FPa3f1" -- 6 chars
-        else:
-            label = label[:7]
-        print(f"  Label: '{label}'")
+        if username is None:
+            username = getpass.getuser()[:32]
+        print(f"  Finger: {FpFinger(finger).name}  User: {username}")
 
         # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
         guids = self.get_storage_count()
@@ -2801,7 +2874,8 @@ class BiometricSensor(SensorTLS):
                 continue        # transient error -- wait for next touch
             if guid is not None:
                 self._enroll_active = False
-                ok2 = self._commit_enrollment(guid=guid, label=label)
+                ok2 = self._commit_enrollment(guid=guid, finger=finger,
+                                              username=username)
                 if not ok2:
                     cnt = len(self.get_storage_count())
                     print(f"  DB records after failed commit: {cnt}")
@@ -2927,8 +3001,23 @@ def main():
             print("list-db...")
             sensor.list_enrolled()
         elif sys.argv[1] == 'enroll':
-            label = sys.argv[2] if len(sys.argv) > 2 else None
-            sensor.enroll(label=label)
+            # Usage: enroll [--finger <name_or_int>]
+            args   = sys.argv[2:]
+            finger = FpFinger.UNKNOWN
+            if '--finger' in args:
+                idx = args.index('--finger')
+                if idx + 1 < len(args):
+                    farg = args[idx + 1]
+                    try:
+                        finger = FpFinger(int(farg))
+                    except ValueError:
+                        try:
+                            finger = FpFinger[farg.upper()]
+                        except KeyError:
+                            print(f"Unknown finger: {farg!r}. "
+                                  f"Valid: {[f.name for f in FpFinger]}")
+                            sys.exit(1)
+            sensor.enroll(finger=finger)
         elif sys.argv[1] == 'clear-db':
             print("clear-db...")
             sensor.erase_database()
