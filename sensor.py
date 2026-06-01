@@ -1183,10 +1183,9 @@ class SensorTLS(Sensor):
                                    timeout=1000)
         except Exception as exc:
             _log(f"  REQ_SHUTDOWN: {exc}")
-        # TLS close_notify as Alert record (ctype=0x15)
         if self.tls is not None:
             try:
-                CMD_CLOSE_NOTIFY.send(self, ctype=TLS_ALERT)
+                self.close_notify()
             except Exception:
                 pass
         self.tls = None
