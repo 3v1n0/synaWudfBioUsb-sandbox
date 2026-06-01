@@ -374,10 +374,7 @@ def load_pairing_data():
     if blob:
         plain = _decrypt_pairing_data(blob)
         if plain:
-            tlvs = _parse_pairing_tlv(plain)
-            if tlvs:
-                _save_pairing_tlv(tlvs)
-                return tlvs
+            return _parse_pairing_tlv(plain)
     return None
 
 
@@ -1322,17 +1319,36 @@ class BiometricSensor(SensorTLS):
         """
         Delete a single record by its 16-byte GUID.
 
-        Uses FETCH_RECORD (9f03) to look up the entry handle by GUID,
-        then SELECT_ENTRY + DELETE_ENTRY to remove it.
+        Uses storage position mapping:
+        1. get_storage_count() returns GUIDs in order
+        2. FETCH_FIRST lists storage entries (including empty slots)
+        3. SELECT_ENTRY + DELETE_ENTRY removes the nth valid entry
+           corresponding to the target GUID's position
+
         Returns True on success.
         """
-        resp = self.tls_send(
-            bytes.fromhex('9f03' + '00' * 3) + guid,
-            value=2, label=f"FETCH_{guid[:4].hex()}")
-        if resp is None or len(resp) < 20:
+        _, _, guids = self.get_storage_count()
+        try:
+            idx = guids.index(guid)
+        except ValueError:
+            print(f"  GUID {guid.hex()} not found in storage")
             return False
-        entry = resp[4:20]
-        return self.delete_record(entry)
+
+        entries = self._list_entries()
+        valid_count = -1
+        for ent in entries:
+            r = self.tls_send(
+                bytes.fromhex('a001000000') + ent,
+                value=2, label="SELECT_ENTRY")
+            if r is None or len(r) < 12:
+                continue
+            if r[8:12] == b'\x01\x00\x00\x00':
+                valid_count += 1
+                if valid_count == idx:
+                    return self.delete_record(ent)
+
+        print(f"  Entry #{idx} for GUID {guid.hex()} not found")
+        return False
 
     def close_notify(self):
         """Send TLS close_notify (value=7). Returns response."""
