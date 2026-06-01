@@ -166,6 +166,7 @@ DeleteResult   = namedtuple('DeleteResult',   ['status'])
 DeviceInfo     = namedtuple('DeviceInfo',     ['serial', 'firmware_major', 'firmware_minor', 'raw'])
 StorageMeta    = namedtuple('StorageMeta',    ['store_size', 'num_entries'])
 BootStatus     = namedtuple('BootStatus',     ['state', 'raw'])
+TlsRecord      = namedtuple('TlsRecord',      ['rtype', 'body'])
 DeviceCert     = namedtuple('DeviceCert',     ['raw', 'body', 'sig_der', 'dev_x_be', 'dev_y_be'])
 ChallengeResponse = namedtuple('ChallengeResponse',
                                ['client_cert', 'device_cert',
@@ -230,6 +231,9 @@ TLS_HANDSHAKE = 0x16
 TLS_CHANGE_CS = 0x14
 TLS_APP_DATA  = 0x17
 TLS_ALERT     = 0x15
+
+# TLS record header: type(1) + version(2) + length(2) -- RFC 5246 s6.2.1
+TLS_RECORD_HEADER_LEN = 5
 
 # TLS alert levels (RFC 5246 section 7.2)
 TLS_ALERT_WARNING = 1
@@ -762,6 +766,24 @@ def make_tls_record(content_type, data):
     return bytes([content_type]) + TLS_VER + struct.pack('>H', len(data)) + data
 
 
+def iter_tls_records(buf):
+    """Yield TlsRecord(rtype, body) for each TLS record in buf.
+
+    TLS record header: type(1) + version(2) + length(2BE) -- RFC 5246 s6.2.1.
+    Stops at the first incomplete header or truncated body.
+    """
+    off = 0
+    while off + TLS_RECORD_HEADER_LEN <= len(buf):
+        rtype = buf[off]
+        rlen  = struct.unpack_from('>H', buf, off + 3)[0]
+        if off + TLS_RECORD_HEADER_LEN + rlen > len(buf):
+            break
+        yield TlsRecord(rtype=rtype,
+                        body=buf[off + TLS_RECORD_HEADER_LEN:
+                                 off + TLS_RECORD_HEADER_LEN + rlen])
+        off += TLS_RECORD_HEADER_LEN + rlen
+
+
 def make_hs_message(msg_type, body):
     return bytes([msg_type]) + struct.pack('>I', len(body))[1:] + body
 
@@ -1247,20 +1269,15 @@ class SensorTLS(Sensor):
 
         # ----- Parse ServerHello + CertReq + ServerHelloDone -----
         srv_rand = None
-        off      = 0
-        while off + 5 <= len(raw_sh):
-            rtype = raw_sh[off]
-            rlen  = struct.unpack_from('>H', raw_sh, off + 3)[0]
-            rbody = raw_sh[off + 5: off + 5 + rlen]
-            off  += 5 + rlen
-            if rtype != TLS_HANDSHAKE:
+        for rec in iter_tls_records(raw_sh):
+            if rec.rtype != TLS_HANDSHAKE:
                 continue
             hoff = 0
-            while hoff < len(rbody):
-                ht   = rbody[hoff]
+            while hoff < len(rec.body):
+                ht   = rec.body[hoff]
                 hl   = struct.unpack_from('>I',
-                           b'\x00' + rbody[hoff+1:hoff+4])[0]
-                hmsg = rbody[hoff: hoff + 4 + hl]
+                           b'\x00' + rec.body[hoff+1:hoff+4])[0]
+                hmsg = rec.body[hoff: hoff + 4 + hl]
                 state.feed_hs(hmsg)
                 if ht == TLS_HS_SERVER_HELLO:
                     srv_rand = hmsg[6:38]
@@ -1340,18 +1357,14 @@ class SensorTLS(Sensor):
 
         # ----- Server CCS + Finished -----
         state.server_seq = 0
-        off = 0
-        while off + 5 <= len(raw_sfin):
-            stype = raw_sfin[off]
-            slen  = struct.unpack_from('>H', raw_sfin, off + 3)[0]
-            sbody = raw_sfin[off + 5: off + 5 + slen]
-            off  += 5 + slen
-            if stype == TLS_ALERT:
-                raise TlsAlertError(sbody[0], sbody[1] if len(sbody) > 1 else 0,
-                                    f"Bundle response: {sbody.hex()}")
-            if stype == TLS_HANDSHAKE:
+        for rec in iter_tls_records(raw_sfin):
+            if rec.rtype == TLS_ALERT:
+                raise TlsAlertError(rec.body[0],
+                                    rec.body[1] if len(rec.body) > 1 else 0,
+                                    f"Bundle response: {rec.body.hex()}")
+            if rec.rtype == TLS_HANDSHAKE:
                 try:
-                    srv_fin = state.decrypt(TLS_HANDSHAKE, sbody)
+                    srv_fin = state.decrypt(TLS_HANDSHAKE, rec.body)
                     _hexdump("Server Finished", srv_fin)
                 except Exception as exc:
                     _log(f"  Server Finished decrypt failed: {exc}")
@@ -1384,12 +1397,14 @@ class SensorTLS(Sensor):
             _log(f"  TLS({label}) short response ({len(raw)}B): {raw.hex()}")
             return None
 
-        rtype = raw[0]
-        rlen  = struct.unpack('>H', raw[3:5])[0]
-        rbody = raw[5: 5 + rlen]
-        if rtype == TLS_ALERT:
+        recs = list(iter_tls_records(raw))
+        if not recs:
+            _log(f"  TLS({label}) truncated or empty response")
+            return None
+        rec = recs[0]
+        if rec.rtype == TLS_ALERT:
             try:
-                pt = self.tls.decrypt(TLS_ALERT, rbody)
+                pt = self.tls.decrypt(TLS_ALERT, rec.body)
                 alert = TlsAlertError(pt[0], pt[1])
                 if pt[0] == TLS_ALERT_FATAL:
                     raise alert
@@ -1399,12 +1414,8 @@ class SensorTLS(Sensor):
             except Exception as exc:
                 raise RuntimeError(f"TLS Alert (decrypt failed): {raw.hex()}") from exc
             return None
-
-        if len(rbody) < rlen:
-            _log(f"  TLS({label}) truncated body: need {rlen} got {len(rbody)}")
-            return None
         try:
-            pt = self.tls.decrypt(rtype, rbody)
+            pt = self.tls.decrypt(rec.rtype, rec.body)
             _log(f"  TLS({label}) resp: {pt.hex()}")
             return pt
         except Exception as exc:
