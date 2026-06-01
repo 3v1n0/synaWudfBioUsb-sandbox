@@ -908,7 +908,7 @@ class SensorTLS(Sensor):
         pad  = (-len(rec)) % 8
         self.ctrl_out(REQ_CMD, value=value,
                       data=rec + bytes(pad), label=f"TLS_OUT({label})")
-        raw = self.ctrl_in(REQ_RESP, 1024, label=f"TLS_IN({label})")
+        raw = self.ctrl_in(REQ_RESP, 4096, label=f"TLS_IN({label})")
         if not raw:
             return None
         if len(raw) < 5:
@@ -1478,28 +1478,37 @@ class BiometricSensor(SensorTLS):
         return (rec is not None and len(rec) >= 20
                 and rec[:2] == b'\x00\x00')
 
-    def delete_record_by_guid(self, guid):
-        """Delete a single record by GUID.
+    def _record_to_entry(self, record_handle):
+        """Map a record handle to its associated entry handle via a201.
 
-        Protocol (traced from b.exe, adapted for Linux where REQ_STOP
-        disconnects the device):
+        a201(record_handle16B) -> 20B response:
+          [0:4]  status (0000 0000 = OK)
+          [4:20] entry handle (16B)
 
-        We use the manager-entry deletion path which does not need REQ_STOP:
-          1. STORAGE_QUERY_INIT x2
-          2. STORAGE_QUERY_ALL -> confirm GUID is present and get its index
-          3. FETCH_RECORD(guid) -> verify GUID is accessible (same pairing)
-          4. FETCH_FIRST -> list of all entry handles (in order)
-          5. SELECT_ENTRY on each -> collect manager entries (all-zeros)
-          6. Manager entries map 1:1 to GUIDs by position in 9f02 response
-          7. DELETE_ENTRY(matching manager) -> GUID removed
-          8. a401/a402/a403 finalize (per erase_database pattern)
+        Returns 16-byte entry handle on success, None on failure.
+        """
+        r = self.tls_send(bytes.fromhex('a201000000') + record_handle,
+                          value=2, label="RECORD_TO_ENTRY")
+        if r is None or len(r) < 20 or r[:4] != b'\x00\x00\x00\x00':
+            return None
+        return r[4:20]
 
-        Only GUIDs accessible in the current TLS session (enrolled
-        under this pairing) can be deleted.  Cross-namespace GUIDs
-        (from other pairing sessions) are rejected.
+    def delete_record_by_guid(self, guid, force=False):
+        """Attempt to delete a single record by GUID.
 
-        Returns True on success; False if the GUID is not accessible
-        or deletion fails.
+        The device firmware provides no API to map a GUID to its
+        owning manager entry.  The only known working approach is a
+        destructive probe: delete each manager entry in turn and
+        check whether the target GUID disappears -- but this
+        irrecoverably deletes any other GUIDs whose manager happens
+        to be probed first.
+
+        By default this method refuses to proceed and returns False
+        with a clear error.  Pass force=True to allow the destructive
+        probe.  Only GUIDs accessible in the current TLS session can
+        be deleted.
+
+        Returns True on success; False otherwise.
         """
         self.storage_query_init(1)
         self.storage_query_init(2)
@@ -1509,53 +1518,224 @@ class BiometricSensor(SensorTLS):
             print(f"  ERROR: GUID {guid.hex()} not found in device storage")
             return False
 
-        # Find index of target GUID (must be in current pairing namespace)
-        # Verify it's accessible by fetching its record handle
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # Verify GUID is accessible in the current pairing namespace
         r = self.tls_send(bytes.fromhex('9f03000000') + guid,
                           value=2, label=f"FETCH_{guid.hex()[:8]}")
         if not r or len(r) < 20 or r[:2] != b'\x00\x00':
             print(f"  ERROR: GUID {guid.hex()} belongs to a different"
-                  f" pairing session.  Use clear-db for cross-namespace"
-                  f" records.")
+                  f" pairing session -- cannot delete.")
             return False
 
-        guid_idx = all_guids.index(guid)
-        _log(f"  target GUID at index {guid_idx} in 9f02 response")
+        if not force:
+            print(
+                f"  ERROR: cannot delete a single GUID safely.\n"
+                f"\n"
+                f"  The device provides no API to map a GUID to its\n"
+                f"  owning manager entry.  The only known working method\n"
+                f"  is a destructive probe that deletes manager entries\n"
+                f"  one by one until the target GUID disappears -- any\n"
+                f"  other GUID whose manager is probed first will be\n"
+                f"  irrecoverably lost.\n"
+                f"\n"
+                f"  To delete ALL accessible GUIDs in this session's\n"
+                f"  namespace safely, use: clear-local-db\n"
+                f"\n"
+                f"  To proceed with the destructive probe anyway, pass\n"
+                f"  --force to the delete-record command."
+            )
+            return False
 
-        # Find all manager entries (a001 returns all zeros = 12 zero bytes)
+        # --- Destructive probe (force=True) ---
+        print(f"  WARNING: destructive probe -- other GUIDs may be"
+              f" deleted as a side-effect.")
         entries = self._list_entries()
-        _log(f"  {len(entries)} total entries")
-        managers = []
-        for ent in entries:
-            r2 = self.tls_send(bytes.fromhex('a001000000') + ent,
-                               value=2, label="SELECT_ENTRY")
-            if r2 == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00':
-                managers.append(ent)
-        _log(f"  {len(managers)} manager entries found")
+        managers = self._find_managers(entries)
+        _log(f"  {len(managers)} managers found; probing...")
+        for mgr in managers:
+            r_del = self.tls_send(
+                bytes.fromhex('a301000000') + mgr,
+                value=2, label="PROBE_DELETE")
+            if r_del != b'\x00\x00\x03\x00':
+                continue
+            self.storage_query_init(1)
+            self.storage_query_init(2)
+            after = self.storage_query_all()
+            if guid not in after:
+                _log(f"  manager {mgr.hex()} owned target GUID -- removed")
+                return True
+            _log(f"  manager {mgr.hex()} deleted a different GUID")
+        print(f"  ERROR: probe exhausted -- target GUID not removed")
+        return False
 
-        if guid_idx >= len(managers):
-            print(f"  ERROR: GUID index {guid_idx} out of range"
-                  f" (only {len(managers)} managers)")
-            return False
+    def probe_guid(self, guid):
+        """Non-destructive probe: trace the a201 chain for a GUID
+        and try a003 on all managers to find which one knows the GUID.
 
-        _log(f"  deleting manager[{guid_idx}]={managers[guid_idx].hex()}")
-        ok = self._delete_managers_at_indices([guid_idx], managers)
+        Does NOT delete anything.
+        """
+        print(f"Probing {guid.hex()}...")
+        ZEROS12 = b'\x00' * 12
 
-        # Verify GUID is gone
         self.storage_query_init(1)
         self.storage_query_init(2)
-        after = self.storage_query_all()
-        if ok and guid not in after:
-            _log("  GUID successfully removed")
-            return True
+        all_guids = self.storage_query_all()
 
-        if ok:
-            print(f"  WARNING: a301 returned 00000300 but GUID still"
-                  f" present -- positional mapping may be off")
-        print(f"  ERROR: failed to delete GUID {guid.hex()}")
-        return False
+        r = self.tls_send(bytes.fromhex('9f03000000') + guid,
+                          value=2, label=f"FETCH_{guid.hex()[:8]}")
+        if not r or len(r) < 20 or r[:2] != b'\x00\x00':
+            print("  Not accessible (wrong namespace or not found)")
+            return
+        record_handle = r[4:20]
+        print(f"  record_handle : {record_handle.hex()}")
+
+        # a201 chain
+        r2 = self.tls_send(bytes.fromhex('a201000000') + record_handle,
+                           value=2, label="A201_rh")
+        if r2 and len(r2) >= 20 and r2[:4] == b'\x00\x00\x00\x00':
+            entry1 = r2[4:20]
+            r3 = self.tls_send(bytes.fromhex('a001000000') + entry1,
+                               value=2, label="A001_e1")
+            is_mgr1 = (r3 == ZEROS12)
+            print(f"  entry1 (a201) : {entry1.hex()}  manager={is_mgr1}")
+            print(f"  a001(entry1)  : {r3.hex() if r3 else 'None'}")
+
+            r4 = self.tls_send(bytes.fromhex('a201000000') + entry1,
+                               value=2, label="A201_e1")
+            if r4 and len(r4) >= 20 and r4[:4] == b'\x00\x00\x00\x00':
+                entry2 = r4[4:20]
+                r5 = self.tls_send(bytes.fromhex('a001000000') + entry2,
+                                   value=2, label="A001_e2")
+                is_mgr2 = (r5 == ZEROS12)
+                print(f"  entry2 (chain): {entry2.hex()}  manager={is_mgr2}")
+                print(f"  a001(entry2)  : {r5.hex() if r5 else 'None'}")
+            else:
+                print(f"  a201(entry1)  : {r4.hex() if r4 else 'None'} (no chain)")
+
+        # Try a003 on each manager -- a003 returns GUID at [16:32] for records;
+        # if it works on managers too, we can identify manager->GUID mapping.
+        # Also try: a201(manager) -> intermediate entry -> a001 to get record ref.
+        # This gives manager -> record_handle[0:8] -> GUID mapping.
+        print("\n  Scanning managers with a003/a201 chain:")
+        entries = self._list_entries()
+        managers = self._find_managers(entries)
+        # Build record_handle prefix map for accessible GUIDs
+        rh_prefix_to_guid = {}
+        for g in all_guids:
+            rh_r = self.tls_send(bytes.fromhex('9f03000000') + g,
+                                 value=2, label="FETCH_RH")
+            if rh_r and len(rh_r) >= 20 and rh_r[:2] == b'\x00\x00':
+                rh_prefix_to_guid[rh_r[4:12]] = g
+        for mgr in managers:
+            r_a3 = self.tls_send(bytes.fromhex('a003000000') + mgr,
+                                 value=2, label="A003_mgr")
+            a201_r = self.tls_send(bytes.fromhex('a201000000') + mgr,
+                                   value=2, label="A201_mgr")
+            owner_guid = None
+            if a201_r and len(a201_r) >= 20 and a201_r[:4] == b'\x00\x00\x00\x00':
+                mid_entry = a201_r[4:20]
+                a001_mid = self.tls_send(bytes.fromhex('a001000000') + mid_entry,
+                                         value=2, label="A001_mid")
+                if a001_mid and len(a001_mid) >= 12:
+                    ref = a001_mid[4:12]
+                    owner_guid = rh_prefix_to_guid.get(ref)
+            print(f"    mgr {mgr.hex()[:16]}..."
+                  f"  a003={r_a3.hex() if r_a3 else 'None'}"
+                   f"  owner_guid={owner_guid.hex() if owner_guid else 'unknown'}")
+
+    def probe_managers(self):
+        """Map every manager entry to its owned GUID (non-destructive).
+
+        Strategy: each manager has satellite entries whose a001[4:12]
+        == manager[0:8].  One of those satellites, when followed via
+        a201, reaches an entry whose a001[4:12] matches the
+        record_handle[0:8] of an accessible GUID.
+
+        Prints the manager->GUID table; also shows unresolved managers
+        (belonging to foreign namespaces whose record handles we cannot
+        fetch).  Does NOT delete anything.
+        """
+        from collections import defaultdict
+
+        # --- entries first (before any 9f02/9f03 which shift cursor) ---
+        entries = self._list_entries()
+        print(f"  {len(entries)} total entries")
+
+        managers, non_mgr = [], []
+        for ent in entries:
+            r = self.tls_send(bytes.fromhex('a001000000') + ent,
+                              value=2, label="A001")
+            if r == b'\x00' * 12:
+                managers.append(ent)
+            elif r and len(r) >= 12:
+                non_mgr.append((ent, r[4:12]))
+        print(f"  {len(managers)} managers, {len(non_mgr)} non-manager entries")
+
+        ref_to_ents = defaultdict(list)
+        for ent, ref in non_mgr:
+            ref_to_ents[ref].append(ent)
+
+        # --- now fetch GUIDs and record handles ---
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        all_guids = self.storage_query_all()
+        guid_to_rh = {}
+        for g in all_guids:
+            rr = self.tls_send(bytes.fromhex('9f03000000') + g,
+                               value=2, label=f"FETCH_{g.hex()[:8]}")
+            if rr and len(rr) >= 20 and rr[:2] == b'\x00\x00':
+                guid_to_rh[g] = rr[4:20]
+        rh_prefix_to_guid = {rh[:8]: g for g, rh in guid_to_rh.items()}
+        print(f"  {len(all_guids)} GUIDs, {len(guid_to_rh)} accessible")
+
+        # --- map each manager to a GUID ---
+        # Strategy:
+        #   GUID -> rh -> direct_entry (a001[4:12] == rh[0:8])
+        #   manager -> satellites (entries whose a001[4:12] == mgr[0:8])
+        #   If any satellite == direct_entry, that manager owns the GUID.
+        # This works because non-manager entries whose ref == rh[0:8] are
+        # the record's "slot" entries, and one of them is a satellite of
+        # the owning manager.
+        print("\n  Manager -> GUID mapping:")
+        mgr_to_guid = {}
+
+        # Build: entry_handle -> manager that has it as a satellite
+        entry_to_mgr = {}
+        for mgr in managers:
+            for sat in ref_to_ents.get(mgr[:8], []):
+                entry_to_mgr[bytes(sat)] = mgr
+
+        for g, rh in guid_to_rh.items():
+            # Find all entries directly referencing this record_handle
+            direct_entries = ref_to_ents.get(rh[:8], [])
+            found_mgr = None
+            for de in direct_entries:
+                mgr = entry_to_mgr.get(bytes(de))
+                _log(f"    GUID {g.hex()[:8]} de={de.hex()[:16]}"
+                     f" mgr={mgr.hex()[:16] if mgr is not None else 'None'}")
+                if mgr is not None:
+                    found_mgr = mgr
+                    break
+            if found_mgr is not None:
+                mgr_to_guid[bytes(found_mgr)] = g
+                print(f"    {found_mgr.hex()[:16]}...  -> {g.hex()[:8]}"
+                      f"  (via direct entry {de.hex()[:16]})")
+            else:
+                print(f"    ??? no manager found for GUID {g.hex()[:8]}"
+                      f"  (direct_entries={len(direct_entries)})")
+
+        # Report managers not yet assigned (foreign namespace)
+        for mgr in managers:
+            if bytes(mgr) not in mgr_to_guid:
+                print(f"    {mgr.hex()[:16]}...  -> foreign/unknown")
+
+        # --- also report direct rh-prefix matches in entry refs ---
+        print("\n  Direct rh-prefix matches in entry refs:")
+        for g, rh in guid_to_rh.items():
+            matched = ref_to_ents.get(rh[:8], [])
+            print(f"    {g.hex()[:8]}  rh={rh.hex()[:16]}  "
+                  f"direct_entry_matches={len(matched)}")
+
+        return mgr_to_guid
 
     def close_notify(self):
         """Send TLS close_notify (value=7). Returns response."""
@@ -1922,39 +2102,71 @@ class BiometricSensor(SensorTLS):
         """
         Delete only accessible GUIDs (current pairing namespace).
 
-        Uses the same positional manager-entry mapping as
-        delete_record_by_guid: for each accessible GUID, find its
-        index in the 9f02 response and delete managers[index].
         Foreign-namespace GUIDs (from other pairing sessions) are
         left untouched.  Finalises with a401/a402/a403.
 
-        After this, only GUIDs from other sessions remain in 9f02.
+        Strategy: enumerate accessible GUIDs first, then delete manager
+        entries one by one.  After each deletion check which accessible
+        GUID disappeared; repeat until none remain.  No GUID->manager
+        mapping is required -- the device's own response tells us when
+        the right manager was hit.
         """
         print("  Querying records...")
         self.storage_query_init(1)
         self.storage_query_init(2)
         all_guids = self.storage_query_all()
 
-        # Identify accessible GUIDs and their positions in 9f02
-        accessible_indices = [
-            i for i, g in enumerate(all_guids)
-            if self._is_accessible_guid(g)
-        ]
-        if not accessible_indices:
+        accessible = set(
+            g for g in all_guids if self._is_accessible_guid(g)
+        )
+        if not accessible:
             print("  No accessible GUIDs in current namespace")
             return True
-        print(f"  {len(accessible_indices)} accessible GUID(s) to delete"
-              f" ({len(all_guids) - len(accessible_indices)}"
-              f" foreign, skipped)")
+        n_foreign = len(all_guids) - len(accessible)
+        print(f"  {len(accessible)} accessible GUID(s) to delete"
+              f" ({n_foreign} foreign, skipped)")
 
-        # Build ordered manager list (position i -> managers[i] == GUID i)
-        entries = self._list_entries()
-        managers = self._find_managers(entries)
-        _log(f"  {len(managers)} manager entries found")
+        remaining_accessible = set(accessible)
+        deleted = 0
 
-        if not self._delete_managers_at_indices(accessible_indices,
-                                                managers):
-            print("  WARNING: one or more deletions failed")
+        while remaining_accessible:
+            entries = self._list_entries()
+            managers = self._find_managers(entries)
+            _log(f"  {len(managers)} manager entries found")
+            if not managers:
+                print("  ERROR: no managers left but accessible GUIDs"
+                      " still reported -- aborting")
+                break
+
+            progress = False
+            for mgr in managers:
+                r_del = self.tls_send(
+                    bytes.fromhex('a301000000') + mgr,
+                    value=2, label="DELETE_MANAGER")
+                if r_del != b'\x00\x00\x03\x00':
+                    _log(f"  a301 returned"
+                         f" {r_del.hex() if r_del else 'None'} -- skip")
+                    continue
+                # Check which accessible GUID disappeared
+                self.storage_query_init(1)
+                self.storage_query_init(2)
+                after = set(self.storage_query_all())
+                gone = remaining_accessible - after
+                if gone:
+                    for g in gone:
+                        _log(f"  deleted GUID {g.hex()}")
+                        deleted += 1
+                    remaining_accessible -= gone
+                    progress = True
+                    break  # restart manager scan (handles are stale)
+                else:
+                    _log(f"  manager {mgr.hex()[:16]} deleted a foreign"
+                         f" GUID -- continuing")
+
+            if not progress:
+                print("  ERROR: no progress in manager sweep --"
+                      " aborting to avoid infinite loop")
+                break
 
         if not self._finalise_storage():
             return False
@@ -1969,7 +2181,8 @@ class BiometricSensor(SensorTLS):
             print(f"  WARNING: {len(still_accessible)} accessible"
                   f" GUID(s) still present")
             return False
-        print(f"  OK -- {len(remaining)} foreign GUID(s) remain")
+        print(f"  OK -- deleted {deleted} GUID(s),"
+              f" {len(remaining)} foreign GUID(s) remain")
         return True
 
     def _commit_enrollment(self, guid, label="FP1"):
@@ -2278,10 +2491,11 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in (
             'list-db', 'list-db-all', 'enroll', 'clear-db',
             'clear-local-db', 'identify-all', 'identify',
-            'reset-ownership', 'delete-record'):
+            'reset-ownership', 'delete-record', 'probe-guid',
+            'probe-managers'):
         print("Usage: sensor.py list-db|list-db-all|enroll|clear-db|"
               "clear-local-db|identify-all|identify|reset-ownership|"
-              "delete-record [guid <hex32>]")
+              "delete-record [guid <hex32>]|probe-guid <hex32>")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -2405,19 +2619,31 @@ def main():
         print("list-db-all...")
         sensor.list_all()
     elif sys.argv[1] == 'delete-record':
-        if len(sys.argv) < 4 or sys.argv[2] != 'guid':
-            print("Usage: sensor.py delete-record guid <hex32>")
+        # Usage: delete-record [--force] guid <hex32>
+        args = sys.argv[2:]
+        force = '--force' in args
+        args = [a for a in args if a != '--force']
+        if len(args) < 2 or args[0] != 'guid':
+            print("Usage: sensor.py delete-record [--force] guid <hex32>")
             sys.exit(1)
-        guid_hex = sys.argv[3]
+        guid_hex = args[1]
         if len(guid_hex) != 32:
             print("GUID must be 32 hex characters")
             sys.exit(1)
         guid = bytes.fromhex(guid_hex)
         print(f"Deleting record {guid_hex}...")
-        ok = sensor.delete_record_by_guid(guid)
+        ok = sensor.delete_record_by_guid(guid, force=force)
         print(f"  {'OK' if ok else 'FAILED'}")
         if not ok:
             sys.exit(1)
+    elif sys.argv[1] == 'probe-guid':
+        if len(sys.argv) < 3 or len(sys.argv[2]) != 32:
+            print("Usage: sensor.py probe-guid <hex32>")
+            sys.exit(1)
+        sensor.probe_guid(bytes.fromhex(sys.argv[2]))
+    elif sys.argv[1] == 'probe-managers':
+        print("probe-managers...")
+        sensor.probe_managers()
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
     print("Done.")
