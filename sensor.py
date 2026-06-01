@@ -2661,9 +2661,7 @@ class BiometricSensor(SensorTLS):
         self._print_sensor_status(self.get_sensor_status(0), label="captured: ")
         self.query_enrollment_simple()
         ext4b = self.query_status_ext(4)
-        if ext4b is not None:
-            qual2 = ext4b[-2:]
-            _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0]}")
+        _log(f"  Ext4 progress: {ext4b.progress}")
         self.update_enrollment_ack()
 
         enroll = self.get_enroll_status()
