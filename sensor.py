@@ -938,7 +938,24 @@ class SensorTLS(Sensor):
             _log(f"  TLS({label}) short response ({len(raw)}B): {raw.hex()}")
             return None
         if raw[0] == TLS_ALERT:
-            _log(f"  TLS ALERT: {raw.hex()}")
+            rlen  = struct.unpack('>H', raw[3:5])[0]
+            rbody = raw[5: 5 + rlen]
+            try:
+                pt = self.tls.decrypt(TLS_ALERT, rbody)
+                level = {1: 'warning', 2: 'fatal'}.get(pt[0], f'level={pt[0]}')
+                desc  = {0: 'close_notify', 10: 'unexpected_message',
+                         20: 'bad_record_mac', 40: 'handshake_failure',
+                         42: 'bad_certificate', 47: 'illegal_parameter',
+                         48: 'unknown_ca', 50: 'decode_error',
+                         51: 'decrypt_error', 70: 'protocol_version',
+                         80: 'internal_error', 90: 'user_canceled',
+                         100: 'no_renegotiation'}.get(pt[1], f'desc=0x{pt[1]:02x}')
+                _log(f"  TLS Alert: {level} {desc}")
+                if pt[0] == 2:  # fatal
+                    return None
+                # warning close_notify is expected -- not an error
+            except Exception as exc:
+                _log(f"  TLS Alert (decrypt failed): {raw.hex()} {exc}")
             return None
         rtype = raw[0]
         rlen  = struct.unpack('>H', raw[3:5])[0]
