@@ -83,18 +83,22 @@ except ImportError:
 
 class TlsAlertError(RuntimeError):
     """Device returned a TLS alert during handshake or encrypted session."""
-    ALERTS = {
-        0x2a: "bad_certificate",
-        0x2e: "decode_error",
-        0x28: "handshake_failure",
-        0x2f: "decrypt_error",
-        0x30: "protocol_version",
-        0x15: "certificate_unknown",
-    }
+
+    @staticmethod
+    def desc_name(code):
+        try:
+            return ssl.AlertDescription(code).name
+        except ValueError:
+            return f'0x{code:02x}'
+
+    @staticmethod
+    def level_name(level):
+        return {TLS_ALERT_WARNING: 'warning',
+                TLS_ALERT_FATAL:   'fatal'}.get(level, f'level={level}')
 
     def __init__(self, level, code, extra=""):
-        name = self.ALERTS.get(code, f"unknown(0x{code:02x})")
-        msg = f"TLS Alert: level={level:#04x} code={name}"
+        msg = (f"TLS Alert: {TlsAlertError.level_name(level)}"
+               f" {TlsAlertError.desc_name(code)}")
         if extra:
             msg += f" {extra}"
         super().__init__(msg)
@@ -946,16 +950,11 @@ class SensorTLS(Sensor):
             rbody = raw[5: 5 + rlen]
             try:
                 pt = self.tls.decrypt(TLS_ALERT, rbody)
-                level = {TLS_ALERT_WARNING: 'warning',
-                         TLS_ALERT_FATAL:   'fatal'}.get(pt[0], f'level={pt[0]}')
-                try:
-                    desc = ssl.AlertDescription(pt[1]).name
-                except Exception:
-                    desc = f'0x{pt[1]:02x}'
-                _log(f"  TLS Alert: {level} {desc}")
+                alert = TlsAlertError(pt[0], pt[1])
+                _log(f"  {alert}")
                 if pt[0] == TLS_ALERT_FATAL:
                     return None
-                # warning close_notify is expected -- not an error
+                # warning (e.g. close_notify) is expected -- not an error
             except Exception as exc:
                 _log(f"  TLS Alert (decrypt failed): {raw.hex()} {exc}")
             return None
