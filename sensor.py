@@ -619,7 +619,12 @@ class Sensor:
                 _log(f"claim intf {ifnum}: {exc}")
 
     def read_interrupt(self, timeout=60000):
-        """Read from interrupt endpoint (blocking). Returns bytes or None."""
+        """Read from interrupt endpoint (blocking). Returns bytes or None.
+
+        SIGINT (Ctrl+C) cancels the libusb transfer and causes USBError
+        instead of KeyboardInterrupt on Linux.  Re-raise as
+        KeyboardInterrupt so callers can handle cancellation cleanly.
+        """
         try:
             resp = bytes(self.dev.read(self.INTERRUPT_EP, 64, timeout=timeout))
             _log(f"INTERRUPT ({len(resp)}B): {resp.hex()}")
@@ -628,6 +633,10 @@ class Sensor:
             if exc.errno == 110:  # timeout
                 _log("INTERRUPT timeout")
                 return None
+            # errno 4 = EINTR (signal interrupted syscall)
+            # errno 19 = ENODEV (libusb cancels transfer on SIGINT on Linux)
+            if exc.errno in (4, 19):
+                raise KeyboardInterrupt from exc
             raise
 
     # --- Init protocol ---
@@ -730,6 +739,7 @@ class SensorTLS(Sensor):
     def __init__(self):
         super().__init__()
         self.tls = None
+        self._pairing = None  # set by connect(); used by restart_session()
 
     def connect(self, host_pubkey, client_privkey_be, client_pubkey_x_le,
                 client_cert, dev_x_be, dev_y_be):
@@ -894,6 +904,14 @@ class SensorTLS(Sensor):
                     _log(f"  Server Finished decrypt failed: {exc}")
 
         self.tls = state
+        self._pairing = dict(
+            host_pubkey=host_pubkey,
+            client_privkey_be=client_privkey_be,
+            client_pubkey_x_le=client_pubkey_x_le,
+            client_cert=client_cert,
+            dev_x_be=dev_x_be,
+            dev_y_be=dev_y_be,
+        )
         _log("TLS handshake complete")
 
     def tls_send(self, plain, value, label="", ctype=TLS_APP_DATA):
@@ -946,6 +964,22 @@ class SensorTLS(Sensor):
             except Exception:
                 pass
         self.tls = None
+
+    def restart_session(self):
+        """
+        Re-establish the TLS session on the existing USB handle after a
+        clean shutdown (e.g. discard_enrollment).  Mirrors what b.exe does
+        after discard: immediately re-runs init + new TLS handshake on the
+        same USB device handle without any USB reset or re-enumeration.
+
+        Requires a prior connect() call so that self._pairing is populated.
+        """
+        if self._pairing is None:
+            raise RuntimeError(
+                "No pairing data stored -- call connect() first")
+        self.tls = None
+        self.init_device()
+        self.connect(**self._pairing)
 
 
 # ---------------------------------------------------------------------------
@@ -1436,6 +1470,32 @@ class BiometricSensor(SensorTLS):
         return self.tls_send(
             bytes.fromhex('9604000000'),
             value=2, label="ENGINE_COMMIT_ACK")
+
+    def discard_enrollment(self):
+        """
+        Abort an in-progress enrollment session and shut down the
+        current TLS session gracefully.
+
+        Matches the b.exe discard sequence exactly:
+          9604 00000000  (ENGINE_COMMIT_ACK / abort signal to device)
+          REQ_SHUTDOWN   (0x1b OUT, len=0)
+          REQ_ACK        (0x14 IN,  2B)
+
+        After this call self.tls is None.  Call restart_session() to
+        bring the session back up without a USB reset.
+        """
+        try:
+            self.engine_commit_ack()
+        except Exception:
+            pass
+        try:
+            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
+                                   timeout=1000)
+            self.dev.ctrl_transfer(BM_IN,  REQ_ACK,      0, 0, 2,
+                                   timeout=1000)
+        except Exception:
+            pass
+        self.tls = None
 
     def delete_record(self, entry):
         """
@@ -2504,28 +2564,24 @@ class BiometricSensor(SensorTLS):
                         _, cnt, _ = self.get_storage_count()
                         print(f"  DB records after failed commit: {cnt}")
                     return ok2
-        except KeyboardInterrupt:
-            # Device requires 9604 + close_notify to cleanly abort an
-            # in-progress enrollment session (confirmed from b.exe trace).
-            # The LED is controlled by a proprietary structured command
-            # via a background thread in the Windows driver -- not a simple
-            # plain USB byte we can replicate. Resetting the device is the
-            # cleanest way to turn it off from Linux.
-            print("\n  Enrollment interrupted -- sending discard to device...")
+        except (KeyboardInterrupt, usb.core.USBError) as exc:
+            # KeyboardInterrupt: Ctrl+C caught cleanly.
+            # USBError: on Linux, SIGINT can cancel a libusb transfer and
+            # raise USBError(ENODEV/errno=19) or USBError(EINTR/errno=4)
+            # instead of KeyboardInterrupt.  Treat both as cancellation.
+            if isinstance(exc, usb.core.USBError) and exc.errno not in (4, 19):
+                raise  # genuine USB error, not a signal
+            # Graceful discard matching b.exe: 9604 + REQ_SHUTDOWN +
+            # REQ_ACK, then immediately re-establish TLS so the device
+            # and session object are ready for the next operation without
+            # any USB reset or re-enumeration.
+            print("\n  Enrollment interrupted -- discarding...")
+            self.discard_enrollment()
             try:
-                self.engine_commit_ack()
-            except Exception:
-                pass
-            try:
-                self.close_notify()
-            except Exception:
-                pass
-            self.tls = None
-            try:
-                self.dev.reset()
-            except Exception:
-                pass
-            print("  Enrollment discarded.")
+                self.restart_session()
+            except Exception as restart_exc:
+                _log(f"  restart_session failed: {restart_exc}")
+            print("  Enrollment discarded. Session ready.")
             return False
 
         print("  Enrollment aborted after 50 attempts")
