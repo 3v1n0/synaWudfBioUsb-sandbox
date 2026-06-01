@@ -1263,6 +1263,8 @@ class SensorTLS(Sensor):
         if raw_sh and raw_sh[0] == TLS_ALERT:
             raise TlsAlertError(raw_sh[1], raw_sh[2],
                                 f"ClientHello rejected: {raw_sh.hex()}")
+        if not raw_sh:
+            raise RuntimeError("No TLS response after ClientHello")
 
         # ----- Parse ServerHello + CertReq + ServerHelloDone -----
         srv_rand = None
@@ -1271,9 +1273,16 @@ class SensorTLS(Sensor):
                 continue
             hoff = 0
             while hoff < len(rec.body):
+                if hoff + 4 > len(rec.body):
+                    raise RuntimeError(
+                        "Malformed handshake: truncated header")
                 ht   = rec.body[hoff]
                 hl   = struct.unpack_from('>I',
                            b'\x00' + rec.body[hoff+1:hoff+4])[0]
+                if hoff + 4 + hl > len(rec.body):
+                    raise RuntimeError(
+                        f"Malformed handshake: type=0x{ht:02x} "
+                        f"len={hl} exceeds record")
                 hmsg = rec.body[hoff: hoff + 4 + hl]
                 state.feed_hs(hmsg)
                 if ht == TLS_HS_SERVER_HELLO:
@@ -1365,6 +1374,8 @@ class SensorTLS(Sensor):
                       label="TLS_OUT(BUNDLE)")
         # Device should respond immediately (windows driver does no delay)
         raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
+        if not raw_sfin:
+            raise RuntimeError("No TLS response after handshake bundle")
 
         # ----- Server CCS + Finished -----
         state.server_seq = 0
