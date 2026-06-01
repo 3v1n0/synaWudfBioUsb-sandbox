@@ -362,10 +362,13 @@ CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
 # CAPTURE_DATA: 86 <subfactor> 00*15 <subfactor> 00*19 (37B)
 # subfactor is a WINBIO_ANSI_381_POS_* subtype; payload built by capture_data()
 # Full 37-byte payload: 86 06 00*15 06 00*19
-# 0x06 = bitmask of device finger slots to watch (bits 1+2 = slots 1+2),
-# hardcoded in CCaptureImage::CheckForFingerPresence as eventMask=0x180.
-# This arms the sensor for finger-presence detection on those slots;
-# it is NOT a SubFactor or per-finger identity selector.
+# Byte[1] and byte[17] are an opaque mode field (not a SubFactor).
+# Empirically confirmed values:
+#   0x02 -- works but LED only lights on finger touch, not on arm
+#   0x04 -- works, LED lights immediately when sensor is armed
+#   0x06 -- works, LED lights immediately when armed (driver default)
+# Values 0x01,0x03,0x05,0x07,0x08,0x10,0x20,0x40,0x80 all rejected.
+# Driver hardcodes eventMask=0x180 in CCaptureImage producing 0x06.
 CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,
                                body=b'\x06' + b'\x00' * 15 +
                                     b'\x06' + b'\x00' * 19,
