@@ -1544,14 +1544,16 @@ class BiometricSensor(SensorTLS):
 
     def get_sensor_status(self, ctx=0):
         """
-        Query sensor status (value=0x0006, 9 bytes).
+        Query sensor status (CH_SENSOR, 9 bytes).
         ctx is the enrollment context byte extracted from CAPTURE_DATA
         response[-2:] (LE u16).  Returns 18-byte response.
         """
-        payload = (CMD_SENSOR_STATUS.opcode + bytes([ctx])
-                   + CMD_SENSOR_STATUS.sep + CMD_SENSOR_STATUS.body)
-        return self.tls_send(payload, value=CMD_SENSOR_STATUS.channel,
-                             label=f"{CMD_SENSOR_STATUS.label}(ctx={ctx})")
+        cmd = Cmd(CMD_SENSOR_STATUS.opcode + bytes([ctx]),
+                  CMD_SENSOR_STATUS.channel,
+                  body=CMD_SENSOR_STATUS.body,
+                  sep=CMD_SENSOR_STATUS.sep,
+                  label=f"{CMD_SENSOR_STATUS.label}(ctx={ctx})")
+        return cmd.send(self)
 
     def update_enrollment_check(self):
         """
