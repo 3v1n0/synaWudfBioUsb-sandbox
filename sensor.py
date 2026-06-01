@@ -602,8 +602,10 @@ class Sensor:
                 _log(f"  resp ({len(resp)}B): {resp[:64].hex()}")
                 return resp
             except usb.core.USBError as exc:
-                backend_timeout = getattr(exc, 'backend_error_code', None) == -7
-                if exc.errno == 110 or backend_timeout:
+                is_timeout = (exc.errno == 110
+                              or getattr(exc, 'backend_error_code', None) == -7
+                              or 'timeout' in str(exc).lower())
+                if is_timeout:
                     remaining -= t
                     if remaining <= 0:
                         _log(f"  TIMEOUT")
