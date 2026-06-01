@@ -1054,6 +1054,101 @@ class BiometricSensor(SensorTLS):
 
         return enrolled
 
+    def list_all(self):
+        """
+        Comprehensive enumeration: shows ALL records, entries, and
+        their relationships.  Exposes the firmware's storage layout.
+
+        Three handle namespaces exist:
+          - 9f01 FETCH_FIRST → entry handles (storage containers)
+          - 9f02 STORAGE_QUERY_ALL → GUIDs → 9f03 → record handles
+          - 9f03(entry) → entry-internal slot handles (opaque)
+
+        Record handles (from 9f03 with a GUID) work with a003/a103.
+        Entry-internal slot handles (from 9f03 with an entry handle)
+        return 0304 with a003/a103 and are NOT resolvable to GUIDs.
+
+        a302 DELETE_RECORD is not supported (returns 8306).
+        MATCH_RESULT can return GUIDs not present in 9f02 enumeration.
+        """
+        import struct
+
+        # 1. Record count via 8200
+        count_resp = self.tls_send(
+            bytes.fromhex('820000000000000207'),
+            value=6, label="GET_COUNT")
+        _log(f"GET_RECORD_COUNT ({len(count_resp) if count_resp else 0}B):"
+             f" {count_resp.hex() if count_resp else 'None'}")
+
+        # 2. Storage query init + query all
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        guids = self.storage_query_all()
+        print(f"\nRecords (STORAGE_QUERY_ALL via 9f02): {len(guids)}")
+        for i, guid in enumerate(guids):
+            rec = self.fetch_record(guid)
+            handle = rec[4:20] if (rec and len(rec) > 4
+                                   and rec[0:2] == b'\x00\x00') else None
+            r3 = (self.tls_send(bytes.fromhex('a003000000') + handle,
+                                value=2, label=f"SEL_{i}")
+                  if handle else None)
+            r4 = (self.tls_send(bytes.fromhex('a103000000') + handle,
+                                value=2, label=f"TMPL_{i}")
+                  if handle else None)
+            tmpl_guid = r4[14:30] if (r4 and len(r4) >= 30) else None
+            guid_from_a003 = r3[20:36] if (r3 and len(r3) >= 36) else None
+            print(f"  [{i}] GUID {guid.hex()}")
+            print(f"       9f03 -> handle {handle.hex() if handle else 'N/A'}"
+                  f" | a003 -> {guid_from_a003.hex() if guid_from_a003 else 'N/A'}"
+                  f" | a103 -> {tmpl_guid.hex() if tmpl_guid else 'N/A'}")
+            if guid_from_a003 and guid_from_a003 != guid:
+                print(f"       WARN: a003 GUID mismatch!")
+            if tmpl_guid and tmpl_guid != guid:
+                print(f"       WARN: template GUID mismatch!")
+
+        # 3. FETCH_FIRST entries + 9f03(entry) for per-entry slots
+        entries = self._list_entries()
+        print(f"\nEntries (FETCH_FIRST via 9f01): {len(entries)}")
+        for i, ent in enumerate(entries):
+            # 9f03(entry) returns slot handles if entry has data
+            r = self.tls_send(bytes.fromhex('9f03' + '00' * 3) + ent,
+                              value=2, label=f"FETCH_ENT_{i}")
+            n_slots = 0; slot_handles = []
+            if r and len(r) >= 4:
+                n_slots = struct.unpack('<H', r[2:4])[0]
+                slot_handles = [r[4+j*16:4+(j+1)*16]
+                                for j in range(n_slots)]
+            print(f"  [{i}] handle={ent.hex()}"
+                  f" slots={n_slots}"
+                  f" slot_handles={[h.hex() for h in slot_handles]}")
+            if n_slots > 0:
+                a001 = self.tls_send(bytes.fromhex('a001000000') + ent,
+                                     value=2, label=f"SEL_ENT_{i}")
+                print(f"       a001(entry)={a001.hex() if a001 else 'None'}"
+                      f" ({len(a001) if a001 else 0}B)")
+                # Show that slot handles are NOT resolvable to GUIDs
+                for j, sh in enumerate(slot_handles[:2]):
+                    rx = self.tls_send(bytes.fromhex('a003000000') + sh,
+                                       value=2, label=f"A03_SH_{i}_{j}")
+                    print(f"       slot[{j}]: a003 ->"
+                          f" {rx.hex() if rx else 'None'}")
+
+        summary_count = 0
+        for e in entries:
+            rr = self.tls_send(bytes.fromhex('9f03' + '00' * 3) + e,
+                               value=2, label=f"CK_{e[:4].hex()}")
+            if rr and len(rr) >= 4:
+                cc = struct.unpack('<H', rr[2:4])[0]
+                if cc > 0:
+                    summary_count += 1
+        print(f"\nSummary:")
+        print(f"  GUIDs from 9f02: {len(guids)}")
+        print(f"  Entries with data: {summary_count} / {len(entries)}")
+        print(f"  a302 DELETE_RECORD: NOT SUPPORTED (returns 8306)")
+        print(f"  Hidden GUIDs: only discoverable via MATCH_RESULT")
+        print(f"  (requires physical finger press on sensor)")
+        return guids
+
 
     # --- Enroll protocol ---
 
@@ -1893,10 +1988,11 @@ class BiometricSensor(SensorTLS):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in (
-            'list-db', 'enroll', 'clear-db', 'identify-all', 'identify',
-            'reset-ownership', 'delete-record'):
-        print("Usage: sensor.py list-db|enroll|clear-db|identify-all|identify"
-              "|reset-ownership|delete-record [guid <hex32>]")
+            'list-db', 'list-db-all', 'enroll', 'clear-db', 'identify-all',
+            'identify', 'reset-ownership', 'delete-record'):
+        print("Usage: sensor.py list-db|list-db-all|enroll|clear-db|"
+              "identify-all|identify|reset-ownership|delete-record "
+              "[guid <hex32>]")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -2013,6 +2109,9 @@ def main():
             print(f"Result: matched {guid.hex()}")
         else:
             print("Result: no match / error")
+    elif sys.argv[1] == 'list-db-all':
+        print("list-db-all...")
+        sensor.list_all()
     elif sys.argv[1] == 'delete-record':
         if len(sys.argv) < 4 or sys.argv[2] != 'guid':
             print("Usage: sensor.py delete-record guid <hex32>")
