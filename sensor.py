@@ -908,7 +908,7 @@ class SensorTLS(Sensor):
         pad  = (-len(rec)) % 8
         self.ctrl_out(REQ_CMD, value=value,
                       data=rec + bytes(pad), label=f"TLS_OUT({label})")
-        raw = self.ctrl_in(REQ_RESP, 256, label=f"TLS_IN({label})")
+        raw = self.ctrl_in(REQ_RESP, 1024, label=f"TLS_IN({label})")
         if not raw:
             return None
         if len(raw) < 5:
@@ -1133,6 +1133,15 @@ class BiometricSensor(SensorTLS):
                     print(f"       slot[{j}]: a003 ->"
                           f" {rx.hex() if rx else 'None'}")
 
+        # 4. Detect manager entries (a001 = all zeros)
+        managers = self._find_managers(entries)
+        if managers:
+            print(f"\nManager entries (a001=all-zeros, one per GUID slot):"
+                  f" {len(managers)}")
+            for i, m in enumerate(managers):
+                idx = next((j for j, e in enumerate(entries) if e == m), -1)
+                print(f"  [{i}] entry[{idx}] handle={m.hex()}")
+
         summary_count = 0
         for e in entries:
             rr = self.tls_send(bytes.fromhex('9f03' + '00' * 3) + e,
@@ -1143,6 +1152,7 @@ class BiometricSensor(SensorTLS):
                     summary_count += 1
         print(f"\nSummary:")
         print(f"  GUIDs from 9f02: {len(guids)}")
+        print(f"  Managers: {len(managers)}")
         print(f"  Entries with data: {summary_count} / {len(entries)}")
         print(f"  a302 DELETE_RECORD: NOT SUPPORTED (returns 8306)")
         print(f"  Hidden GUIDs: only discoverable via MATCH_RESULT")
@@ -1410,26 +1420,60 @@ class BiometricSensor(SensorTLS):
             value=2, label="DELETE_ENTRY")
         return r == b'\x00\x00\x03\x00'
 
+    def _find_managers(self, entries):
+        """Given a list of 16-byte entry handles from FETCH_FIRST,
+        return the subset whose a001 response is 12 zero bytes
+        (manager entries). Each manager owns exactly one GUID slot."""
+        managers = []
+        for ent in entries:
+            r = self.tls_send(bytes.fromhex('a001000000') + ent,
+                              value=2, label="SELECT_ENTRY")
+            if r == b'\x00' * 12:
+                managers.append(ent)
+        return managers
+
     def delete_record_by_guid(self, guid):
-        """
-        Delete a single record by its 16-byte GUID.
+        """Delete a single template by GUID.
 
-        The device firmware does NOT support TLS-level per-record
-        deletion (a302 DELETE_RECORD returns 8306 in all contexts).
-        Record deletion is a host-side operation:
-          IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD → OnDeleteFinger →
-          EIS→vtable[12] → sends REQ_STOP → returns S_OK.
+        The device's manager entries (a001=all-zeros) map 1:1 to
+        GUID slots in the 9f02 index.  We find the manager at the
+        same position as the target GUID, then a301 DELETE_ENTRY it.
 
-        At the firmware level this is a no-op: the template stays on
-        the device.  The host manages identity-to-template mapping.
-        To physically free storage on the device, call erase_database()
-        (sends REQ_STOP to reset device state).
+        Returns True on success; False if the GUID is not found or
+        deletion fails.  After deletion, storage_query_all() is
+        re-queried to confirm the GUID is gone.
+
+        NOTE: a302 DELETE_RECORD is NOT supported (returns 8306).
+        Only manager entry deletion (a301) physically removes data.
         """
-        _log(f"delete_record_by_guid({guid.hex()}):"
-             f" firmware has no TLS-level delete-by-GUID;"
-             f" host handles deletion via IOCTL")
-        _log(f"  (use erase_database() to physically remove templates"
-             f" from device storage)")
+        guids = self.storage_query_all()
+        try:
+            idx = guids.index(guid)
+        except ValueError:
+            _log(f"delete_record_by_guid: GUID {guid.hex()} not found")
+            return False
+
+        entries = self._list_entries()
+        managers = self._find_managers(entries)
+        if idx >= len(managers):
+            _log(f"delete_record_by_guid: manager index {idx} out of"
+                 f" range ({len(managers)} managers)")
+            return False
+
+        target = managers[idx]
+        r = self.tls_send(bytes.fromhex('a301000000') + target,
+                          value=2, label="DELETE_MANAGER")
+        if r != b'\x00\x00\x03\x00':
+            _log(f"delete_record_by_guid: a301 returned"
+                 f" {r.hex() if r else 'None'}")
+            return False
+
+        after = self.storage_query_all()
+        if guid in after:
+            _log(f"delete_record_by_guid: GUID still present after deletion")
+            return False
+
+        _log(f"delete_record_by_guid({guid.hex()}): OK")
         return True
 
     def close_notify(self):
