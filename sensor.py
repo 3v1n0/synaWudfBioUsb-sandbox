@@ -2485,24 +2485,33 @@ class BiometricSensor(SensorTLS):
         self._enroll_plateau = 0
         self._enroll_errors = 0
         max_attempts = 50
-        for i in range(1, max_attempts + 1):
-            ok, guid = self._enroll_one_sample(i, max_attempts)
-            if not ok:
-                if isinstance(guid, int):
-                    # Terminal error (e.g. status_query returned error code)
-                    print(f"  status_query returned error code=0x{guid:04x}")
-                    _, cnt, _ = self.get_storage_count()
-                    if cnt >= 10:
-                        print(f"  Database has {cnt} records "
-                              "(likely full). Clear some and retry.")
-                    return False
-                continue            # transient error -- wait for next touch
-            if guid is not None:
-                ok2 = self._commit_enrollment(guid=guid, label="FP1")
-                if not ok2:
-                    _, cnt, _ = self.get_storage_count()
-                    print(f"  DB records after failed commit: {cnt}")
-                return ok2
+        try:
+            for i in range(1, max_attempts + 1):
+                ok, guid = self._enroll_one_sample(i, max_attempts)
+                if not ok:
+                    if isinstance(guid, int):
+                        # Terminal error (e.g. status_query returned error code)
+                        print(f"  status_query returned error code=0x{guid:04x}")
+                        _, cnt, _ = self.get_storage_count()
+                        if cnt >= 10:
+                            print(f"  Database has {cnt} records "
+                                  "(likely full). Clear some and retry.")
+                        return False
+                    continue        # transient error -- wait for next touch
+                if guid is not None:
+                    ok2 = self._commit_enrollment(guid=guid, label="FP1")
+                    if not ok2:
+                        _, cnt, _ = self.get_storage_count()
+                        print(f"  DB records after failed commit: {cnt}")
+                    return ok2
+        except KeyboardInterrupt:
+            # Device requires 9604 + close_notify to cleanly abort an
+            # in-progress enrollment session (confirmed from b.exe trace).
+            print("\n  Enrollment interrupted -- sending discard to device...")
+            self.engine_commit_ack()
+            self.close_notify()
+            print("  Enrollment discarded.")
+            return False
 
         print("  Enrollment aborted after 50 attempts")
         return False
