@@ -2808,6 +2808,13 @@ def main():
 
 
 if __name__ == '__main__':
+    import signal
+    _interrupted = False
+    def _sigint_handler(sig, frame):
+        global _interrupted
+        _interrupted = True
+        print("\nSIGINT caught by Python handler", flush=True)
+    signal.signal(signal.SIGINT, _sigint_handler)
     try:
         main()
     except KeyboardInterrupt:
