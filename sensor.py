@@ -2794,13 +2794,13 @@ def main():
 
 if __name__ == '__main__':
     import signal
-    def _sigint_handler(sig, frame):
+    def _sigint(sig, frame):
         raise KeyboardInterrupt
-    signal.signal(signal.SIGINT, _sigint_handler)
+    # libusb may override Python's SIGINT handler; restore it explicitly
+    # so Ctrl+C raises KeyboardInterrupt even while blocked in a C call.
+    signal.signal(signal.SIGINT, _sigint)
     try:
         main()
-    except KeyboardInterrupt:
-        print("\nKEYBOARDINTERRUPT reached __main__", flush=True)
     except Exception as exc:
         print(f"FATAL: {exc}")
         import traceback; traceback.print_exc()
