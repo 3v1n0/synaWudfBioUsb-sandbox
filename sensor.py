@@ -2693,7 +2693,7 @@ class BiometricSensor(SensorTLS):
         elif cap.sensor_status != 1:
             print("  No finger detected")
             return False, None
-        _log(f"  ctx={cap.ctx}")
+
         self._print_sensor_status(self.get_sensor_status(cap.ctx), label="capture: ")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
