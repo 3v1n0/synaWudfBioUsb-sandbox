@@ -359,12 +359,18 @@ CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
 # so no fixed Cmd descriptor -- the method builds it directly.
 CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
 
-# CAPTURE_DATA and STATUS_EXT have a runtime parameter byte inserted at
-# fixed offsets inside the payload, so build() is called by the method.
-#   CAPTURE_DATA (86 <subfactor> 00*15 <subfactor> 00*19, 37B, value=2)
-#   STATUS_EXT   (86 00 00*15 <param> 00*19,        37B, value=2)
-CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,  label="CAPTURE_DATA")
-CMD_STATUS_EXT           = Cmd(b'\x86', CH_DATA,  label="STATUS_EXT")
+# CAPTURE_DATA: 86 06 00*15 06 00*19 (37B, subfactor=6 always)
+CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,
+                               b'\x00' * 15 + b'\x06' + b'\x00' * 19,
+                               label="CAPTURE_DATA", sep=b'\x06')
+# STATUS_EXT param=4 (initial/post capture): 86 00 00*15 04 00*19 (37B)
+CMD_STATUS_EXT_4         = Cmd(b'\x86', CH_DATA,
+                               b'\x00' * 15 + b'\x04' + b'\x00' * 19,
+                               label="STATUS_EXT(param=4)", sep=b'\x00')
+# STATUS_EXT param=1 (quality/progress): 86 00 00*15 01 00*19 (37B)
+CMD_STATUS_EXT_1         = Cmd(b'\x86', CH_DATA,
+                               b'\x00' * 15 + b'\x01' + b'\x00' * 19,
+                               label="STATUS_EXT(param=1)", sep=b'\x00')
 
 
 
@@ -1474,19 +1480,13 @@ class BiometricSensor(SensorTLS):
             return 1, 0   # finger detected
         return 2, 7       # no finger
 
-    def capture_data(self, subfactor=6):
+    def capture_data(self):
         """
         Send CAPTURE_DATA (value=0x0002).
         Returns (resp, sensor_status, reject_detail).
-        37-byte payload: 86 <subf> 00*15 <subf> 00*19
+        37-byte payload: 86 06 00*15 06 00*19
         """
-        payload = (CMD_CAPTURE_DATA.opcode + bytes([subfactor])
-                   + b'\x00' * 15
-                   + bytes([subfactor])
-                   + b'\x00' * 19)
-        assert len(payload) == 37
-        resp = self.tls_send(payload, value=CMD_CAPTURE_DATA.value,
-                             label=CMD_CAPTURE_DATA.label)
+        resp = CMD_CAPTURE_DATA.send(self)
         ss, rd = self._parse_capture_response(resp)
         if resp is not None and len(resp) == 66:
             _log(f"  CAPTURE_DATA resp: {resp.hex()}")
@@ -1556,17 +1556,14 @@ class BiometricSensor(SensorTLS):
         """
         return CMD_QUERY_ENROLL_NEEDS.send(self)
 
-    def query_status_ext(self, param=0):
+    def query_status_ext(self, param=4):
         """
         Extended status query (value=0x0002, 37 bytes).
         86 00 <00*15> <param> <00*19>
-        param=04 for initial capture, param=01 for quality check.
+        param=4 for initial/post capture, param=1 for quality check.
         """
-        payload = (CMD_STATUS_EXT.opcode + b'\x00' + b'\x00' * 15
-                   + bytes([param]) + b'\x00' * 19)
-        assert len(payload) == 37
-        return self.tls_send(payload, value=CMD_STATUS_EXT.value,
-                             label=f"STATUS_EXT(param={param})")
+        cmd = CMD_STATUS_EXT_4 if param == 4 else CMD_STATUS_EXT_1
+        return cmd.send(self)
 
     def query_enrollment_simple(self):
         """
