@@ -163,6 +163,9 @@ StatusExt      = namedtuple('StatusExt',      ['progress'])
 EntryInfo      = namedtuple('EntryInfo',      ['flags', 'record_ref'])
 RecordToEntry  = namedtuple('RecordToEntry',  ['entry_handle'])
 DeleteResult   = namedtuple('DeleteResult',   ['status'])
+DeviceInfo     = namedtuple('DeviceInfo',     ['serial', 'firmware_major', 'firmware_minor', 'raw'])
+CertSection    = namedtuple('CertSection',    ['section', 'raw'])
+BootStatus     = namedtuple('BootStatus',     ['state', 'raw'])
 
 # DeleteResult.status values
 DELETE_STATUS_EMPTY = 0x00000100   # entry had no data
@@ -920,29 +923,48 @@ class Sensor:
           [10]    firmware major version
           [11]    firmware minor version
           [18:24] serial number (6 bytes, formatted as %02X each)
+
+        Returns DeviceInfo(serial, firmware_major, firmware_minor, raw).
+        Also stores serial and firmware_version on self.
         """
         self.ctrl_out(REQ_CMD, channel=CH_INIT,
                       data=bytes.fromhex('0100000000000000'),
                       label=f"DEV_INFO(r{n})")
         r = self.ctrl_in(REQ_RESP, 0x26, label=f"DEV_INFO(r{n})")
         if r and len(r) >= 24:
-            self.firmware_version = (r[10], r[11])
-            self.serial = r[18:24].hex().upper()
+            di = DeviceInfo(serial=r[18:24].hex().upper(),
+                            firmware_major=r[10],
+                            firmware_minor=r[11],
+                            raw=r)
+            self.firmware_version = (di.firmware_major, di.firmware_minor)
+            self.serial = di.serial
+            _log(f"  {di}")
+            return di
+        return DeviceInfo(serial=None, firmware_major=None, firmware_minor=None, raw=r)
 
     def _cmd_cert_section(self, n, section):
-        """Read certificate section (8e <section> 00 02 ...)."""
+        """
+        Read certificate section (8e <section> 00 02 ...).
+        Returns CertSection(section, raw).
+        """
         data = bytes([0x8e, section, 0, 2]) + b'\x00' * 20
         self.ctrl_out(REQ_CMD, channel=CH_INIT, data=data,
                       label=f"CERT_SECT_{section:02x}(r{n})")
-        return self.ctrl_in(REQ_RESP, 4096, channel=CH_IN_CERT,
-                            label=f"CERT_SECT_{section:02x}(r{n})")
+        r = self.ctrl_in(REQ_RESP, 4096, channel=CH_IN_CERT,
+                         label=f"CERT_SECT_{section:02x}(r{n})")
+        return CertSection(section=section, raw=r)
 
     def _cmd_bootstrap_status(self, n):
-        """Send bootstrap status query (19...) -> 68B response."""
+        """
+        Send bootstrap status query (19...) -> 68B response.
+        Returns BootStatus(state, raw); state == 0x02 means still booting.
+        """
         self.ctrl_out(REQ_CMD, channel=CH_INIT,
                       data=bytes.fromhex('1900000000000000'),
                       label=f"BOOT_STATUS(r{n})")
-        return self.ctrl_in(REQ_RESP, 0x44, label=f"BOOT_STATUS(r{n})")
+        r = self.ctrl_in(REQ_RESP, 0x44, label=f"BOOT_STATUS(r{n})")
+        state = r[0] if r else None
+        return BootStatus(state=state, raw=r)
 
     def _init_round(self, n):
         """
@@ -956,7 +978,9 @@ class Sensor:
         self._cmd_device_info(n)
         self._cmd_cert_section(n, 0x09)
         self._cmd_cert_section(n, 0x1a)
-        return self._cmd_bootstrap_status(n)
+        boot = self._cmd_bootstrap_status(n)
+        _log(f"  {boot}")
+        return boot
 
     def init_device(self):
         """
@@ -966,8 +990,8 @@ class Sensor:
         driver's vfmDeviceInitialize state=2 retry path.
         """
         for i in range(3):
-            boot_resp = self._init_round(i)
-            if not boot_resp or boot_resp[0] != 0x02:
+            boot = self._init_round(i)
+            if not boot.raw or boot.state != 0x02:
                 break
             _log(f"Device still booting (attempt {i+1}), retrying...")
         _log("Init phases done")
