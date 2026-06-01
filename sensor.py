@@ -619,25 +619,31 @@ class Sensor:
                 _log(f"claim intf {ifnum}: {exc}")
 
     def read_interrupt(self, timeout=60000):
-        """Read from interrupt endpoint (blocking). Returns bytes or None.
+        """Read from interrupt endpoint. Polls in short slices so that
+        Ctrl+C (KeyboardInterrupt) is delivered promptly without needing
+        a finger touch to unblock the call.
 
-        SIGINT (Ctrl+C) cancels the libusb transfer and causes USBError
-        instead of KeyboardInterrupt on Linux.  Re-raise as
-        KeyboardInterrupt so callers can handle cancellation cleanly.
+        Returns bytes on success, None on timeout.
+        Raises KeyboardInterrupt on SIGINT.
         """
-        try:
-            resp = bytes(self.dev.read(self.INTERRUPT_EP, 64, timeout=timeout))
-            _log(f"INTERRUPT ({len(resp)}B): {resp.hex()}")
-            return resp
-        except usb.core.USBError as exc:
-            if exc.errno == 110:  # timeout
-                _log("INTERRUPT timeout")
-                return None
-            # errno 4 = EINTR (signal interrupted syscall)
-            # errno 19 = ENODEV (libusb cancels transfer on SIGINT on Linux)
-            if exc.errno in (4, 19):
-                raise KeyboardInterrupt from exc
-            raise
+        slice_ms = 200
+        remaining = timeout
+        while True:
+            t = min(slice_ms, remaining)
+            try:
+                resp = bytes(self.dev.read(self.INTERRUPT_EP, 64, timeout=t))
+                _log(f"INTERRUPT ({len(resp)}B): {resp.hex()}")
+                return resp
+            except usb.core.USBError as exc:
+                if exc.errno == 110:  # ETIMEDOUT -- slice expired, loop
+                    remaining -= t
+                    if remaining <= 0:
+                        _log("INTERRUPT timeout")
+                        return None
+                    continue
+                if exc.errno in (4, 19):
+                    raise KeyboardInterrupt from exc
+                raise
 
     # --- Init protocol ---
 
