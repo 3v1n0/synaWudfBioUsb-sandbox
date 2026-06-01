@@ -2545,17 +2545,29 @@ class BiometricSensor(SensorTLS):
         self._enroll_plateau = 0
         self._enroll_errors = 0
         max_attempts = 50
+
+        def _discard_and_restart(reason):
+            """Send 9604+REQ_SHUTDOWN then re-establish TLS session."""
+            print(f"\n  {reason} -- discarding enrollment...")
+            self.discard_enrollment()
+            try:
+                self.restart_session()
+            except Exception as restart_exc:
+                _log(f"  restart_session failed: {restart_exc}")
+            print("  Enrollment discarded. Session ready.")
+
         try:
             for i in range(1, max_attempts + 1):
                 ok, guid = self._enroll_one_sample(i, max_attempts)
                 if not ok:
                     if isinstance(guid, int):
-                        # Terminal error (e.g. status_query returned error code)
-                        print(f"  status_query returned error code=0x{guid:04x}")
+                        # Terminal error (3 bad captures, DB full, etc.)
+                        print(f"  Terminal error code=0x{guid:04x}")
                         _, cnt, _ = self.get_storage_count()
                         if cnt >= 10:
                             print(f"  Database has {cnt} records "
                                   "(likely full). Clear some and retry.")
+                        _discard_and_restart("Enrollment aborted")
                         return False
                     continue        # transient error -- wait for next touch
                 if guid is not None:
@@ -2575,16 +2587,10 @@ class BiometricSensor(SensorTLS):
             # REQ_ACK, then immediately re-establish TLS so the device
             # and session object are ready for the next operation without
             # any USB reset or re-enumeration.
-            print("\n  Enrollment interrupted -- discarding...")
-            self.discard_enrollment()
-            try:
-                self.restart_session()
-            except Exception as restart_exc:
-                _log(f"  restart_session failed: {restart_exc}")
-            print("  Enrollment discarded. Session ready.")
+            _discard_and_restart("Enrollment interrupted")
             return False
 
-        print("  Enrollment aborted after 50 attempts")
+        _discard_and_restart("Enrollment aborted after 50 attempts")
         return False
 
 
