@@ -1397,21 +1397,24 @@ class BiometricSensor(SensorTLS):
         # GUID at [2:18] in 82-byte response
         return resp[2:18]
 
-    def enroll_commit(self, payload):
+    def storage_commit(self, payload):
         """
-        Send 9603 commit payload (138 bytes, value=7).
+        Send 9603 commit payload (value=7, storage layer).
+        Saves identity (GUID, SID, label) to device storage.
         Returns response bytes or None.
         """
-        return self.tls_send(payload, value=7, label="ENROLL_COMMIT")
+        return self.tls_send(payload, value=7, label="STORAGE_COMMIT")
 
-    def enroll_commit_ack(self):
+    def engine_commit_ack(self):
         """
-        Send 9604 commit ack (5 bytes, value=2).
+        Send 9604 commit ack (value=2, engine/sensor layer).
+        Releases enrollment session resources on the engine side
+        after storage_commit() has saved the identity.
         Returns response bytes or None.
         """
         return self.tls_send(
             bytes.fromhex('9604000000'),
-            value=2, label="ENROLL_COMMIT_ACK")
+            value=2, label="ENGINE_COMMIT_ACK")
 
     def delete_record(self, entry):
         """
@@ -1854,10 +1857,9 @@ class BiometricSensor(SensorTLS):
         payload = self._build_commit_payload(guid, sid, label)
         _hexdump(f"Commit plain ({len(payload)}B)", payload)
         print(f"  Sending commit ({len(payload)}B) as label '{label}'...")
-        resp = self.enroll_commit(payload)
+        resp = self.storage_commit(payload)
         if resp is None:
-            print("  ENROLL_COMMIT failed (TLS Alert)")
-            # Try to log TLS state for debugging
+            print("  STORAGE_COMMIT failed (TLS Alert)")
             if self.tls:
                 _log(f"  client_seq={self.tls.client_seq} server_seq={self.tls.server_seq}")
             return False
@@ -1873,11 +1875,11 @@ class BiometricSensor(SensorTLS):
             return False
         print(f"  Storage query resp ({len(resp)}B): {resp[:16].hex()}...")
 
-        # Step 5: Commit ack
-        print("  Commit ack...")
-        resp = self.enroll_commit_ack()
+        # Step 5: Engine commit ack (release enrollment session)
+        print("  Engine ack...")
+        resp = self.engine_commit_ack()
         if resp is None:
-            print("  ENROLL_COMMIT_ACK failed")
+            print("  ENGINE_COMMIT_ACK failed")
             return False
         print(f"  Ack response: {resp.hex()}")
 
