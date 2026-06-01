@@ -166,6 +166,7 @@ DeleteResult   = namedtuple('DeleteResult',   ['status'])
 DeviceInfo     = namedtuple('DeviceInfo',     ['serial', 'firmware_major', 'firmware_minor', 'raw'])
 StorageMeta    = namedtuple('StorageMeta',    ['store_size', 'num_entries'])
 BootStatus     = namedtuple('BootStatus',     ['state', 'raw'])
+DeviceCert     = namedtuple('DeviceCert',     ['raw', 'body', 'sig_der', 'dev_x_be', 'dev_y_be'])
 ChallengeResponse = namedtuple('ChallengeResponse',
                                ['client_cert', 'device_cert',
                                 'pub_key32', 'dev_x_be', 'dev_y_be'])
@@ -1076,28 +1077,37 @@ class Sensor:
     def req_ready(self):
         return self.ctrl_in(REQ_READY, 2, label="REQ_READY")
 
-    def _verify_device_cert(self, device_cert):
+    def _parse_device_cert(self, raw):
         """
-        Verify the device certificate returned by the challenge response.
+        Parse the 400-byte device cert blob into a DeviceCert namedtuple.
 
-        Raises RuntimeError if device_cert is missing, too short, or if the
-        CA signature check fails.
+        Raises RuntimeError if raw is missing, too short, or has an
+        invalid DER signature length field.
 
-        device_cert layout (400B, confirmed from decompiled driver):
-          [0:142]        cert body (device's copy of host_pubkey blob)
+        device_cert layout (confirmed from decompiled driver):
+          [0:142]        body (device's copy of host_pubkey blob, 142B)
           [142:144]      DER sig length as u16le (typically 70-72B)
-          [144:144+slen] DER ECDSA sig over SHA256(cert_body[0:142])
+          [144:144+slen] DER ECDSA sig over SHA256(body)
         """
-        if not device_cert or len(device_cert) < 146:
+        if not raw or len(raw) < 146:
             raise RuntimeError(
-                f"Device cert missing or too short: "
-                f"{len(device_cert) if device_cert else 0}B")
-        sig_len = struct.unpack_from('<H', device_cert, 142)[0]
-        if not (68 <= sig_len <= 72) or len(device_cert) < 144 + sig_len:
+                f"Device cert too short: {len(raw) if raw else 0}B")
+        sig_len = struct.unpack_from('<H', raw, 142)[0]
+        if not (68 <= sig_len <= 72) or len(raw) < 144 + sig_len:
             raise RuntimeError(
                 f"Device cert DER sig length invalid: {sig_len}")
-        dev_sig_der = device_cert[144:144 + sig_len]
-        cert_body   = device_cert[:142]
+        body    = raw[:142]
+        sig_der = raw[144:144 + sig_len]
+        dev_x_be, dev_y_be = dev_key_from_tag3(raw)
+        return DeviceCert(raw=raw, body=body, sig_der=sig_der,
+                          dev_x_be=dev_x_be, dev_y_be=dev_y_be)
+
+    def _verify_device_cert(self, device_cert):
+        """
+        Verify a DeviceCert against the hardcoded Synaptics CA public key.
+
+        Raises RuntimeError if the CA signature check fails.
+        """
         pub_nums = ec.EllipticCurvePublicNumbers(
             int.from_bytes(DEVICE_CA_X, 'big'),
             int.from_bytes(DEVICE_CA_Y, 'big'),
@@ -1105,7 +1115,8 @@ class Sensor:
         ca_pub = pub_nums.public_key(default_backend())
         from cryptography.exceptions import InvalidSignature
         try:
-            ca_pub.verify(dev_sig_der, cert_body, ec.ECDSA(hashes.SHA256()))
+            ca_pub.verify(device_cert.sig_der, device_cert.body,
+                          ec.ECDSA(hashes.SHA256()))
             print("  Device CA signature verified OK")
         except InvalidSignature:
             raise RuntimeError(
@@ -1141,19 +1152,19 @@ class Sensor:
             raise RuntimeError(
                 f"Challenge rejected: status=0x{status:04x}")
         client_cert = resp[2:402]
-        device_cert = resp[402:802]
+        device_cert_raw = resp[402:802]
         _log(f"Challenge accepted, client_cert={client_cert[:8].hex()}...")
-        _log(f"  device_cert={device_cert[:8].hex()}...")
+        _log(f"  device_cert={device_cert_raw[:8].hex()}...")
 
+        device_cert = self._parse_device_cert(device_cert_raw)
         self._verify_device_cert(device_cert)
 
-        pub_key32  = client_cert[144:176]
-        dev_x_be, dev_y_be = dev_key_from_tag3(device_cert)
+        pub_key32 = client_cert[144:176]
         return ChallengeResponse(client_cert=client_cert,
                                  device_cert=device_cert,
                                  pub_key32=pub_key32,
-                                 dev_x_be=dev_x_be,
-                                 dev_y_be=dev_y_be)
+                                 dev_x_be=device_cert.dev_x_be,
+                                 dev_y_be=device_cert.dev_y_be)
 
 
 # ---------------------------------------------------------------------------
@@ -3132,7 +3143,7 @@ def main():
     if device_cert_for_save is not None and not os.path.exists(PAIRING_FILE):
         _save_pairing_tlv({TLV_CLIENT_CERT:    client_cert,
                            TLV_CLIENT_PRIVKEY: bytes(reversed(client_privkey_be)),
-                           TLV_DEVICE_CERT:    device_cert_for_save})
+                           TLV_DEVICE_CERT:    device_cert_for_save.raw})
 
     # ----- Biometric commands -----
     try:
