@@ -157,6 +157,8 @@ MatchResult    = namedtuple('MatchResult',    ['status', 'guid', 'score', 'index
                                                'strength', 'template_update'])
 TemplateStatus = namedtuple('TemplateStatus', ['status', 'percent_complete', 'reject_detail'])
 
+NULL_GUID = b'\x00' * 16   # 16 zero bytes -- "no GUID" sentinel
+
 REQ_START        = 0x19   # OUT -- phase 1 init signal
 REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
 REQ_CMD          = 0x16   # OUT -- send command
@@ -1334,7 +1336,7 @@ class BiometricSensor(SensorTLS):
         if not r or len(r) < 20 or r[:2] != b'\x00\x00':
             return None
         handle = r[4:20]
-        if handle == b'\x00' * 16:
+        if handle == NULL_GUID:
             return None
         return RecordInfo(handle=handle)
 
@@ -1725,8 +1727,8 @@ class BiometricSensor(SensorTLS):
             return None
         rlen = len(resp)
         status       = struct.unpack_from('<H', resp, 0)[0] if rlen >= 2 else 0xffff
-        guid         = resp[2:18] if rlen >= 18 else b'\x00' * 16
-        if guid == b'\x00' * 16:
+        guid         = resp[2:18] if rlen >= 18 else NULL_GUID
+        if guid == NULL_GUID:
             guid = None
         sample_cnt   = struct.unpack_from('<H', resp, 22)[0] if rlen >= 24 else None
         progress_sum = struct.unpack_from('<H', resp, 24)[0] if rlen >= 54 else None
@@ -2150,7 +2152,7 @@ class BiometricSensor(SensorTLS):
 
         loaded = 0
         for guid in guids:
-            if guid == b'\x00' * 16:
+            if guid == NULL_GUID:
                 continue
             print(f"  Loading {guid.hex()}...")
             if self._load_record_for_match(guid):
@@ -2222,7 +2224,7 @@ class BiometricSensor(SensorTLS):
         if mr.status != 0:
             print(f"  No match (status=0x{mr.status:04x})")
             return None
-        if mr.guid is None or mr.guid == b'\x00' * 16:
+        if mr.guid is None or mr.guid == NULL_GUID:
             print("  MATCH_RESULT returned zero GUID")
             return None
         self._print_match(mr.guid)
@@ -2276,7 +2278,7 @@ class BiometricSensor(SensorTLS):
         if mr.status != 0:
             print(f"  No match (status=0x{mr.status:04x})")
             return None
-        if mr.guid is None or mr.guid == b'\x00' * 16:
+        if mr.guid is None or mr.guid == NULL_GUID:
             print("  MATCH_RESULT returned zero GUID")
             return None
         self._print_match(mr.guid)
@@ -2725,8 +2727,8 @@ class BiometricSensor(SensorTLS):
         else:
             errs = (getattr(self, '_enroll_errors', 0) + 1)
             self._enroll_errors = errs
-            if status != 0:
-                print(f"  Capture rejected (status=0x{status:04x})"
+            if enroll.status != 0:
+                print(f"  Capture rejected (status=0x{enroll.status:04x})"
                       f" {errs}/3 - lift and retry")
             else:
                 print(f"  Finger released too early {errs}/3")
