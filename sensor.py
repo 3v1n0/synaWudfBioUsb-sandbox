@@ -205,7 +205,100 @@ CIPHER_SUITE = CS_ECDHE_ECDSA_AES256_GCM_SHA384  # alias used in key derivation
 IOCTL_HDR = b'\x44\x00\x00\x00'
 
 # ---------------------------------------------------------------------------
-# Identity key (P_SHA256 D) — for challenge signature only
+# App-layer command descriptors
+#
+# All commands sent via tls_send() follow one of these structural shapes:
+#
+#   FIXED   -- entire payload is a constant blob, no arguments
+#   HANDLE  -- 2-byte opcode + 3 zero pad + 16-byte handle/GUID argument
+#   PARAM   -- command with a single small integer parameter at a fixed offset
+#
+# The 'value' field is the TLS channel selector (REQ_CMD wValue):
+#   2 = data-plane  (engine, storage queries, capture, match, enroll)
+#   6 = sensor ctrl (status, counters, update-check, ack)
+#   7 = storage/session admin (init, commit, finalise, close)
+#
+# Each Cmd instance exposes a build() method returning the payload bytes.
+# ---------------------------------------------------------------------------
+
+class Cmd:
+    """Descriptor for a fixed-layout app-layer command."""
+
+    def __init__(self, opcode, value, body=b''):
+        """
+        opcode -- 1 or 2 bytes identifying the command (cmd + subcmd)
+        value  -- TLS channel selector (2, 6 or 7)
+        body   -- fixed payload bytes that follow the opcode (may be empty)
+        """
+        self.opcode = opcode
+        self.value  = value
+        self.body   = body
+
+    def build(self, arg=b''):
+        """Return the full payload bytes, appending `arg` after opcode+body."""
+        return self.opcode + self.body + arg
+
+    def send(self, dev, arg=b'', label=""):
+        """Build and send via dev.tls_send(); returns response."""
+        return dev.tls_send(self.build(arg), value=self.value, label=label)
+
+
+# 3 zero-pad bytes that separate the 2-byte opcode from the 16-byte argument
+# in all handle/GUID commands (confirmed across every ax/9f command).
+_PAD3 = b'\x00\x00\x00'
+
+# Sensor-control channel
+CH_SENSOR = 6
+# Data-plane channel
+CH_DATA   = 2
+# Storage/admin channel
+CH_STORE  = 7
+
+# --- Sensor / engine control (value=6) ---
+CMD_GET_RECORD_COUNT     = Cmd(b'\x82', CH_SENSOR,
+                               b'\x00\x00\x00\x00\x00\x00\x02\x07')
+CMD_SENSOR_STATUS        = Cmd(b'\x87', CH_SENSOR,
+                               b'\x00\x20\x00\x01\x00\x00\x00')
+CMD_UPDATE_ENROLL_CHECK  = Cmd(b'\x80\x0c', CH_SENSOR,
+                               b'\x00\x00\x00\x01\x00\x00\x00'
+                               b'\x01\x00\x00\x08\x01\x01\x01\x00')
+CMD_UPDATE_IDENT_CHECK   = Cmd(b'\x80\x14', CH_SENSOR,
+                               b'\x00\x00\x00\x01\x00\x00\x00'
+                               b'\x01\x00\x00\x08\x01\x01\x01\x00')
+CMD_UPDATE_ACK           = Cmd(b'\x81', CH_SENSOR)
+
+# --- Storage queries / fetch (value=2, handle arg) ---
+CMD_FETCH_FIRST          = Cmd(b'\x9f\x01', CH_DATA,  _PAD3 + b'\x00' * 16)
+CMD_STORAGE_QUERY_ALL    = Cmd(b'\x9f\x02', CH_DATA,  _PAD3 + b'\xff' * 16)
+CMD_FETCH_RECORD         = Cmd(b'\x9f\x03', CH_DATA,  _PAD3)  # + guid/handle
+CMD_SELECT_ENTRY         = Cmd(b'\xa0\x01', CH_DATA,  _PAD3)  # + entry handle
+CMD_SELECT_RECORD        = Cmd(b'\xa0\x03', CH_DATA,  _PAD3)  # + record handle
+CMD_LOAD_TEMPLATE        = Cmd(b'\xa1\x03', CH_DATA,  _PAD3)  # + record handle
+CMD_RECORD_TO_ENTRY      = Cmd(b'\xa2\x01', CH_DATA,  _PAD3)  # + record handle
+CMD_DELETE_ENTRY         = Cmd(b'\xa3\x01', CH_DATA,  _PAD3)  # + entry handle
+
+# --- Enroll lifecycle (value=2) ---
+CMD_ENROLL_BEGIN         = Cmd(b'\x96\x01', CH_DATA,
+                               b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
+CMD_ENROLL_STATUS        = Cmd(b'\x96\x02', CH_DATA,  b'\x00\x00\x00')
+CMD_ENGINE_COMMIT_ACK    = Cmd(b'\x96\x04', CH_DATA,  b'\x00\x00\x00')
+CMD_MATCH_RESULT         = Cmd(b'\x99\x01', CH_DATA,
+                               b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00')
+
+# --- Storage / admin (value=7) ---
+CMD_STORAGE_QUERY_INIT   = Cmd(b'\x9e\x01', CH_STORE)
+CMD_FINALISE_1           = Cmd(b'\xa4\x01', CH_STORE)
+CMD_FINALISE_2           = Cmd(b'\xa4\x02', CH_STORE)
+CMD_FINALISE_3           = Cmd(b'\xa4\x03', CH_STORE)
+# CLOSE_NOTIFY uses ctype=TLS_ALERT so tls_send() must be called directly
+CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE)
+
+# STORAGE_COMMIT (9603) payload is variable-length (built by _build_commit_payload)
+# so no fixed Cmd descriptor -- the method builds it directly.
+
+
+# ---------------------------------------------------------------------------
+# Identity key (P_SHA256 D) - for challenge signature only
 # ---------------------------------------------------------------------------
 
 # Derived from P_SHA256(hardcoded_constants, "HS_KEY_PAIR_GEN")
@@ -232,7 +325,7 @@ IDENTITY_D_BE = bytes(reversed(IDENTITY_D_LE))
 from ecdsa import NIST256p
 
 # Device static ECDH public key is obtained from Tag3 (device cert)
-# during the challenge/pairing flow — never hardcoded.
+# during the challenge/pairing flow - never hardcoded.
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -1027,7 +1120,7 @@ class SensorTLS(Sensor):
         # TLS close_notify as Alert record (ctype=0x15)
         if self.tls is not None:
             try:
-                self.tls_send(b'\x00\x01', value=7,
+                self.tls_send(CMD_CLOSE_NOTIFY.build(), value=CMD_CLOSE_NOTIFY.value,
                               label="CLOSE_NOTIFY", ctype=TLS_ALERT)
             except Exception:
                 pass
@@ -1036,7 +1129,7 @@ class SensorTLS(Sensor):
     def restart_session(self):
         """
         Re-establish the TLS session on the existing USB handle after a
-        clean shutdown (e.g. discard_enrollment).  Mirrors what b.exe does
+        clean shutdown (e.g. discard_enrollment).  Mirrors what windows driver does
         after discard: immediately re-runs init + new TLS handshake on the
         same USB device handle without any USB reset or re-enumeration.
 
@@ -1090,9 +1183,7 @@ class BiometricSensor(SensorTLS):
         NOT the actual count.  Use get_storage_count() for
         the real number of records.
         """
-        resp = self.tls_send(
-            bytes.fromhex('820000000000000207'),
-            value=6, label="GET_RECORD_COUNT")
+        resp = CMD_GET_RECORD_COUNT.send(self, label="GET_RECORD_COUNT")
         if resp is None or len(resp) < 2:
             return -1
         return struct.unpack('<H', resp[:2])[0]
@@ -1112,18 +1203,14 @@ class BiometricSensor(SensorTLS):
 
     def storage_query_init(self, n):
         """Send STORAGE_QUERY_INIT (call twice before QUERY_ALL)."""
-        return self.tls_send(
-            bytes.fromhex('9e01'),
-            value=7, label=f"QUERY_INIT_{n}")
+        return CMD_STORAGE_QUERY_INIT.send(self, label=f"QUERY_INIT_{n}")
 
     def storage_query_all(self):
         """
         Send STORAGE_QUERY_ALL wildcard.
         Returns list of 16-byte GUIDs for all allocated storage slots.
         """
-        resp = self.tls_send(
-            bytes.fromhex('9f02' + '00' * 3 + 'ff' * 16),
-            value=2, label="QUERY_ALL")
+        resp = CMD_STORAGE_QUERY_ALL.send(self, label="QUERY_ALL")
         if not resp or len(resp) < 4:
             return []
         slot_count = struct.unpack('<H', resp[2:4])[0]
@@ -1141,9 +1228,7 @@ class BiometricSensor(SensorTLS):
         Returns raw response bytes, or None on error.
         An all-zero 4-byte response means the slot is empty.
         """
-        return self.tls_send(
-            bytes.fromhex('9f03' + '00' * 3) + guid,
-            value=2, label=f"FETCH_{guid[:4].hex()}")
+        return CMD_FETCH_RECORD.send(self, guid, label=f"FETCH_{guid[:4].hex()}")
 
     def list_enrolled(self):
         """
@@ -1191,9 +1276,7 @@ class BiometricSensor(SensorTLS):
         import struct
 
         # 1. Record count via 8200
-        count_resp = self.tls_send(
-            bytes.fromhex('820000000000000207'),
-            value=6, label="GET_COUNT")
+        count_resp = CMD_GET_RECORD_COUNT.send(self, label="GET_COUNT")
         _log(f"GET_RECORD_COUNT ({len(count_resp) if count_resp else 0}B):"
              f" {count_resp.hex() if count_resp else 'None'}")
 
@@ -1206,11 +1289,9 @@ class BiometricSensor(SensorTLS):
             rec = self.fetch_record(guid)
             handle = rec[4:20] if (rec and len(rec) > 4
                                    and rec[0:2] == b'\x00\x00') else None
-            r3 = (self.tls_send(bytes.fromhex('a003000000') + handle,
-                                value=2, label=f"SEL_{i}")
+            r3 = (CMD_SELECT_RECORD.send(self, handle, label="")
                   if handle else None)
-            r4 = (self.tls_send(bytes.fromhex('a103000000') + handle,
-                                value=2, label=f"TMPL_{i}")
+            r4 = (CMD_LOAD_TEMPLATE.send(self, handle, label="")
                   if handle else None)
             tmpl_guid = r4[14:30] if (r4 and len(r4) >= 30) else None
             guid_from_a003 = r3[20:36] if (r3 and len(r3) >= 36) else None
@@ -1228,8 +1309,7 @@ class BiometricSensor(SensorTLS):
         print(f"\nEntries (FETCH_FIRST via 9f01): {len(entries)}")
         for i, ent in enumerate(entries):
             # 9f03(entry) returns slot handles if entry has data
-            r = self.tls_send(bytes.fromhex('9f03' + '00' * 3) + ent,
-                              value=2, label=f"FETCH_ENT_{i}")
+            r = CMD_FETCH_RECORD.send(self, ent, label="")
             n_slots = 0; slot_handles = []
             if r and len(r) >= 4:
                 n_slots = struct.unpack('<H', r[2:4])[0]
@@ -1239,14 +1319,12 @@ class BiometricSensor(SensorTLS):
                   f" slots={n_slots}"
                   f" slot_handles={[h.hex() for h in slot_handles]}")
             if n_slots > 0:
-                a001 = self.tls_send(bytes.fromhex('a001000000') + ent,
-                                     value=2, label=f"SEL_ENT_{i}")
+                a001 = CMD_SELECT_ENTRY.send(self, ent, label="")
                 print(f"       a001(entry)={a001.hex() if a001 else 'None'}"
                       f" ({len(a001) if a001 else 0}B)")
                 # Show that slot handles are NOT resolvable to GUIDs
                 for j, sh in enumerate(slot_handles[:2]):
-                    rx = self.tls_send(bytes.fromhex('a003000000') + sh,
-                                       value=2, label=f"A03_SH_{i}_{j}")
+                    rx = CMD_SELECT_RECORD.send(self, sh, label="")
                     print(f"       slot[{j}]: a003 ->"
                           f" {rx.hex() if rx else 'None'}")
 
@@ -1261,8 +1339,7 @@ class BiometricSensor(SensorTLS):
 
         summary_count = 0
         for e in entries:
-            rr = self.tls_send(bytes.fromhex('9f03' + '00' * 3) + e,
-                               value=2, label=f"CK_{e[:4].hex()}")
+            rr = CMD_FETCH_RECORD.send(self, e, label="")
             if rr and len(rr) >= 4:
                 cc = struct.unpack('<H', rr[2:4])[0]
                 if cc > 0:
@@ -1281,9 +1358,7 @@ class BiometricSensor(SensorTLS):
 
     def enroll_begin(self):
         """Begin enrollment (value=0x0002). Returns raw response."""
-        return self.tls_send(
-            bytes.fromhex('96010000000000000000000000'),
-            value=2, label="ENROLL_BEGIN")
+        return CMD_ENROLL_BEGIN.send(self, label="ENROLL_BEGIN")
 
     # Quality bitmask → WINBIO_SENSOR_STATUS mapping
     # (from decompiled FUN_18000d054 at line 8331)
@@ -1387,8 +1462,9 @@ class BiometricSensor(SensorTLS):
         ctx is the enrollment context byte extracted from CAPTURE_DATA
         response[-2:] (LE u16).  Returns 18-byte response.
         """
-        payload = bytes([0x87, ctx]) + bytes.fromhex('00200001000000')
-        return self.tls_send(payload, value=6,
+        # ctx is inserted between opcode and body (byte 1 = ctx, not an arg)
+        payload = CMD_SENSOR_STATUS.opcode + bytes([ctx]) + CMD_SENSOR_STATUS.body
+        return self.tls_send(payload, value=CMD_SENSOR_STATUS.value,
                              label=f"SENSOR_STATUS(ctx={ctx})")
 
     def update_enrollment_check(self):
@@ -1396,15 +1472,11 @@ class BiometricSensor(SensorTLS):
         Send UPDATE_ENROLLMENT check (value=0x0006).
         17-byte payload: 800c + zeros + flags + subfactor.
         """
-        payload = bytes.fromhex(
-            '800c000000010000000100000801010100')
-        return self.tls_send(payload, value=6, label="UPDATE_ENROLL_CHECK")
+        return CMD_UPDATE_ENROLL_CHECK.send(self, label="UPDATE_ENROLL_CHECK")
 
     def update_enrollment_ack(self):
         """Send ack byte (81) after enrollment update (value=0x0006)."""
-        return self.tls_send(
-            bytes.fromhex('81'),
-            value=6, label="UPDATE_ENROLL_ACK")
+        return CMD_UPDATE_ACK.send(self, label="UPDATE_ENROLL_ACK")
 
     def query_enrollment_needs(self):
         """
@@ -1516,9 +1588,7 @@ class BiometricSensor(SensorTLS):
         device has extracted enough data and enrollment is
         ready to finalize.
         """
-        resp = self.tls_send(
-            bytes.fromhex('9602000000'),
-            value=2, label="ENROLL_STATUS")
+        resp = CMD_ENROLL_STATUS.send(self, label="ENROLL_STATUS")
         if resp is None:
             return None
         rlen = len(resp)
@@ -1552,9 +1622,7 @@ class BiometricSensor(SensorTLS):
         after storage_commit() has saved the identity.
         Returns response bytes or None.
         """
-        return self.tls_send(
-            bytes.fromhex('9604000000'),
-            value=2, label="ENGINE_COMMIT_ACK")
+        return CMD_ENGINE_COMMIT_ACK.send(self, label="ENGINE_COMMIT_ACK")
 
     def discard_enrollment(self):
         """
@@ -1579,14 +1647,10 @@ class BiometricSensor(SensorTLS):
         from get_storage_count() GUIDs.
         Returns True on success.
         """
-        r = self.tls_send(
-            bytes.fromhex('a001000000') + entry,
-            value=2, label="SELECT_ENTRY")
+        r = CMD_SELECT_ENTRY.send(self, entry, label="SELECT_ENTRY")
         if r is None:
             return False
-        r = self.tls_send(
-            bytes.fromhex('a301000000') + entry,
-            value=2, label="DELETE_ENTRY")
+        r = CMD_DELETE_ENTRY.send(self, entry, label="DELETE_ENTRY")
         return r == b'\x00\x00\x03\x00'
 
     def _find_managers(self, entries):
@@ -1595,8 +1659,7 @@ class BiometricSensor(SensorTLS):
         (manager entries). Each manager owns exactly one GUID slot."""
         managers = []
         for ent in entries:
-            r = self.tls_send(bytes.fromhex('a001000000') + ent,
-                              value=2, label="SELECT_ENTRY")
+            r = CMD_SELECT_ENTRY.send(self, ent, label="SELECT_ENTRY")
             if r == b'\x00' * 12:
                 managers.append(ent)
         return managers
@@ -1619,8 +1682,7 @@ class BiometricSensor(SensorTLS):
 
         Returns 16-byte entry handle on success, None on failure.
         """
-        r = self.tls_send(bytes.fromhex('a201000000') + record_handle,
-                          value=2, label="RECORD_TO_ENTRY")
+        r = CMD_RECORD_TO_ENTRY.send(self, record_handle, label="RECORD_TO_ENTRY")
         if r is None or len(r) < 20 or r[:4] != b'\x00\x00\x00\x00':
             return None
         return r[4:20]
@@ -1651,8 +1713,7 @@ class BiometricSensor(SensorTLS):
             return False
 
         # Verify GUID is accessible in the current pairing namespace
-        r = self.tls_send(bytes.fromhex('9f03000000') + guid,
-                          value=2, label=f"FETCH_{guid.hex()[:8]}")
+        r = CMD_FETCH_RECORD.send(self, guid, label="")
         if not r or len(r) < 20 or r[:2] != b'\x00\x00':
             print(f"  ERROR: GUID {guid.hex()} belongs to a different"
                   f" pairing session -- cannot delete.")
@@ -1684,9 +1745,7 @@ class BiometricSensor(SensorTLS):
         managers = self._find_managers(entries)
         _log(f"  {len(managers)} managers found; probing...")
         for mgr in managers:
-            r_del = self.tls_send(
-                bytes.fromhex('a301000000') + mgr,
-                value=2, label="PROBE_DELETE")
+            r_del = CMD_DELETE_ENTRY.send(self, mgr, label="PROBE_DELETE")
             if r_del != b'\x00\x00\x03\x00':
                 continue
             self.storage_query_init(1)
@@ -1712,8 +1771,7 @@ class BiometricSensor(SensorTLS):
         self.storage_query_init(2)
         all_guids = self.storage_query_all()
 
-        r = self.tls_send(bytes.fromhex('9f03000000') + guid,
-                          value=2, label=f"FETCH_{guid.hex()[:8]}")
+        r = CMD_FETCH_RECORD.send(self, guid, label="")
         if not r or len(r) < 20 or r[:2] != b'\x00\x00':
             print("  Not accessible (wrong namespace or not found)")
             return
@@ -1721,22 +1779,18 @@ class BiometricSensor(SensorTLS):
         print(f"  record_handle : {record_handle.hex()}")
 
         # a201 chain
-        r2 = self.tls_send(bytes.fromhex('a201000000') + record_handle,
-                           value=2, label="A201_rh")
+        r2 = CMD_RECORD_TO_ENTRY.send(self, record_handle, label="A201_rh")
         if r2 and len(r2) >= 20 and r2[:4] == b'\x00\x00\x00\x00':
             entry1 = r2[4:20]
-            r3 = self.tls_send(bytes.fromhex('a001000000') + entry1,
-                               value=2, label="A001_e1")
+            r3 = CMD_SELECT_ENTRY.send(self, entry1, label="A001_e1")
             is_mgr1 = (r3 == ZEROS12)
             print(f"  entry1 (a201) : {entry1.hex()}  manager={is_mgr1}")
             print(f"  a001(entry1)  : {r3.hex() if r3 else 'None'}")
 
-            r4 = self.tls_send(bytes.fromhex('a201000000') + entry1,
-                               value=2, label="A201_e1")
+            r4 = CMD_RECORD_TO_ENTRY.send(self, entry1, label="A201_e1")
             if r4 and len(r4) >= 20 and r4[:4] == b'\x00\x00\x00\x00':
                 entry2 = r4[4:20]
-                r5 = self.tls_send(bytes.fromhex('a001000000') + entry2,
-                                   value=2, label="A001_e2")
+                r5 = CMD_SELECT_ENTRY.send(self, entry2, label="A001_e2")
                 is_mgr2 = (r5 == ZEROS12)
                 print(f"  entry2 (chain): {entry2.hex()}  manager={is_mgr2}")
                 print(f"  a001(entry2)  : {r5.hex() if r5 else 'None'}")
@@ -1753,20 +1807,16 @@ class BiometricSensor(SensorTLS):
         # Build record_handle prefix map for accessible GUIDs
         rh_prefix_to_guid = {}
         for g in all_guids:
-            rh_r = self.tls_send(bytes.fromhex('9f03000000') + g,
-                                 value=2, label="FETCH_RH")
+            rh_r = CMD_FETCH_RECORD.send(self, g, label="FETCH_RH")
             if rh_r and len(rh_r) >= 20 and rh_r[:2] == b'\x00\x00':
                 rh_prefix_to_guid[rh_r[4:12]] = g
         for mgr in managers:
-            r_a3 = self.tls_send(bytes.fromhex('a003000000') + mgr,
-                                 value=2, label="A003_mgr")
-            a201_r = self.tls_send(bytes.fromhex('a201000000') + mgr,
-                                   value=2, label="A201_mgr")
+            r_a3 = CMD_SELECT_RECORD.send(self, mgr, label="A003_mgr")
+            a201_r = CMD_RECORD_TO_ENTRY.send(self, mgr, label="A201_mgr")
             owner_guid = None
             if a201_r and len(a201_r) >= 20 and a201_r[:4] == b'\x00\x00\x00\x00':
                 mid_entry = a201_r[4:20]
-                a001_mid = self.tls_send(bytes.fromhex('a001000000') + mid_entry,
-                                         value=2, label="A001_mid")
+                a001_mid = CMD_SELECT_ENTRY.send(self, mid_entry, label="A001_mid")
                 if a001_mid and len(a001_mid) >= 12:
                     ref = a001_mid[4:12]
                     owner_guid = rh_prefix_to_guid.get(ref)
@@ -1794,8 +1844,7 @@ class BiometricSensor(SensorTLS):
 
         managers, non_mgr = [], []
         for ent in entries:
-            r = self.tls_send(bytes.fromhex('a001000000') + ent,
-                              value=2, label="A001")
+            r = CMD_SELECT_ENTRY.send(self, ent, label="A001")
             if r == b'\x00' * 12:
                 managers.append(ent)
             elif r and len(r) >= 12:
@@ -1812,8 +1861,7 @@ class BiometricSensor(SensorTLS):
         all_guids = self.storage_query_all()
         guid_to_rh = {}
         for g in all_guids:
-            rr = self.tls_send(bytes.fromhex('9f03000000') + g,
-                               value=2, label=f"FETCH_{g.hex()[:8]}")
+            rr = CMD_FETCH_RECORD.send(self, g, label="")
             if rr and len(rr) >= 20 and rr[:2] == b'\x00\x00':
                 guid_to_rh[g] = rr[4:20]
         rh_prefix_to_guid = {rh[:8]: g for g, rh in guid_to_rh.items()}
@@ -1871,9 +1919,8 @@ class BiometricSensor(SensorTLS):
 
     def close_notify(self):
         """Send TLS close_notify (value=7). Returns response."""
-        return self.tls_send(
-            bytes.fromhex('0001'),
-            value=7, label="CLOSE_NOTIFY")
+        return self.tls_send(CMD_CLOSE_NOTIFY.build(), value=CMD_CLOSE_NOTIFY.value,
+                             label="CLOSE_NOTIFY")
 
     def reset_ownership(self):
         """
@@ -1881,7 +1928,7 @@ class BiometricSensor(SensorTLS):
 
         Replicates windows driver reset-ownership: sends IOCTL-equivalent to
         device, closes TLS, REQ_SHUTDOWN, then deletes pairing.dat.
-        No USB unpair command exists on this device — it's a
+        No USB unpair command exists on this device - it's a
         software-only operation (registry cleanup on Windows).
         """
         print("\n--- Reset Ownership ---")
@@ -1908,22 +1955,17 @@ class BiometricSensor(SensorTLS):
         Returns True on success.
         Sequence: 9f03 (FETCH_RECORD) → a003 (SELECT) → a103 (LOAD_TEMPLATE)
         """
-        r = self.tls_send(
-            bytes.fromhex('9f03' + '00' * 3) + guid,
-            value=2, label=f"FETCH_MATCH({guid[:4].hex()})")
+        r = CMD_FETCH_RECORD.send(self, guid,
+                                  label=f"FETCH_MATCH({guid[:4].hex()})")
         if not r or len(r) < 20:
             return False
         entry = r[4:20]
         if entry == b'\x00' * 16:
             return False
-        r = self.tls_send(
-            bytes.fromhex('a003000000') + entry,
-            value=2, label="SELECT_MATCH")
+        r = CMD_SELECT_RECORD.send(self, entry, label="SELECT_MATCH")
         if not r:
             return False
-        r = self.tls_send(
-            bytes.fromhex('a103000000') + entry,
-            value=2, label="LOAD_TEMPLATE")
+        r = CMD_LOAD_TEMPLATE.send(self, entry, label="LOAD_TEMPLATE")
         return r is not None
 
     def match_result(self):
@@ -1945,9 +1987,7 @@ class BiometricSensor(SensorTLS):
                  match_strength, template_update)
         or None on TLS error.
         """
-        r = self.tls_send(
-            bytes.fromhex('99010000000000000000000000'),
-            value=2, label="MATCH_RESULT")
+        r = CMD_MATCH_RESULT.send(self, label="MATCH_RESULT")
         if not r or len(r) < 2:
             return None
         status = struct.unpack('<H', r[:2])[0]
@@ -1997,9 +2037,7 @@ class BiometricSensor(SensorTLS):
         # 3. List entries + SELECT per entry
         entries = self._list_entries()
         for ent in entries:
-            self.tls_send(
-                bytes.fromhex('a001000000') + ent,
-                value=2, label="SELECT_ENTRY")
+            CMD_SELECT_ENTRY.send(self, ent, label="SELECT_ENTRY")
 
         # 4. Capture finger
         print("\n  Touch and hold the sensor...")
@@ -2029,9 +2067,7 @@ class BiometricSensor(SensorTLS):
             print(f"  Progress: {qual}")
 
         # UPDATE_CHECK with 8014 (identify variant)
-        r = self.tls_send(
-            bytes.fromhex('8014000000010000000100000801010100'),
-            value=6, label="UPDATE_IDENTIFY_CHECK")
+        r = CMD_UPDATE_IDENT_CHECK.send(self, label="UPDATE_IDENTIFY_CHECK")
         if r is None:
             _log("  UPDATE_IDENTIFY_CHECK failed")
 
@@ -2092,9 +2128,7 @@ class BiometricSensor(SensorTLS):
             qual = struct.unpack('<H', ext1[-2:])[0]
             print(f"  Progress: {qual}")
 
-        self.tls_send(
-            bytes.fromhex('8014000000010000000100000801010100'),
-            value=6, label="UPDATE_IDENTIFY_CHECK")
+        CMD_UPDATE_IDENT_CHECK.send(self, label="UPDATE_IDENTIFY_CHECK")
 
         i2 = self.read_interrupt(timeout=60000)
         if i2 is None:
@@ -2127,9 +2161,7 @@ class BiometricSensor(SensorTLS):
         Alert 022f otherwise, corrupting the session)."""
         self.storage_query_init(1)
         self.storage_query_init(2)
-        resp = self.tls_send(
-            bytes.fromhex('9f01' + '00' * 19),
-            value=2, label="FETCH_FIRST")
+        resp = CMD_FETCH_FIRST.send(self, label="FETCH_FIRST")
         if resp is None or len(resp) < 4:
             return []
         nentries = struct.unpack('<H', resp[2:4])[0]
@@ -2153,8 +2185,7 @@ class BiometricSensor(SensorTLS):
                 ok = False
                 continue
             ent = managers[idx]
-            r = self.tls_send(bytes.fromhex('a301000000') + ent,
-                              value=2, label="DELETE_MANAGER")
+            r = CMD_DELETE_ENTRY.send(self, ent, label="DELETE_MANAGER")
             if r != b'\x00\x00\x03\x00':
                 print(f"  WARNING: delete[{idx}] returned"
                       f" {r.hex() if r else 'None'}")
@@ -2177,8 +2208,7 @@ class BiometricSensor(SensorTLS):
         print(f"  {len(entries)} entries to delete")
         deleted = 0
         for e in entries:
-            r = self.tls_send(bytes.fromhex('a301000000') + e,
-                              value=2, label="DELETE_ENTRY")
+            r = CMD_DELETE_ENTRY.send(self, e, label="DELETE_ENTRY")
             if r is not None:
                 deleted += 1
         print(f"  {deleted} deleted")
@@ -2194,14 +2224,14 @@ class BiometricSensor(SensorTLS):
         return not remaining
 
     def _finalise_storage(self):
-        """Send a401/a402/a403 finalise sequence (b.exe clear-db compat).
+        """Send a401/a402/a403 finalise sequence (windows driver clear-db compat).
 
         Returns True on success.
         """
-        for cmd, label in [('a401', 'FINALISE_1'),
-                           ('a402', 'FINALISE_2'),
-                           ('a403', 'FINALISE_3')]:
-            r = self.tls_send(bytes.fromhex(cmd), value=7, label=label)
+        for cmd, label in [(CMD_FINALISE_1, 'FINALISE_1'),
+                           (CMD_FINALISE_2, 'FINALISE_2'),
+                           (CMD_FINALISE_3, 'FINALISE_3')]:
+            r = cmd.send(self, label=label)
             if r is None:
                 print(f"  {label} failed")
                 return False
@@ -2209,7 +2239,7 @@ class BiometricSensor(SensorTLS):
 
     def erase_database_compat(self):
         """
-        Erase enrolled records using the b.exe clear-db sequence.
+        Erase enrolled records using the windows driver clear-db sequence.
 
         Mirrors what the Windows driver does: loads all templates, then
         deletes only manager entries (a001=all-zeros) via a301, then
@@ -2223,15 +2253,13 @@ class BiometricSensor(SensorTLS):
         guids = self.storage_query_all()
         print(f"  {len(guids)} GUIDs in index")
 
-        # Load all templates (host-side prep before delete, per b.exe)
+        # Load all templates (host-side prep before delete, per windows driver)
         for guid in guids:
             rec = self.fetch_record(guid)
             if rec and len(rec) > 4 and rec[4:20] != b'\x00' * 16:
                 handle = rec[4:20]
-                self.tls_send(bytes.fromhex('a003000000') + handle,
-                              value=2, label=f"SELECT_{guid[:4].hex()}")
-                self.tls_send(bytes.fromhex('a103000000') + handle,
-                              value=2, label=f"LOAD_{guid[:4].hex()}")
+                CMD_SELECT_RECORD.send(self, handle, label="")
+                CMD_LOAD_TEMPLATE.send(self, handle, label="")
 
         # Delete only manager entries (a001 returns all zeros)
         entries = self._list_entries()
@@ -2294,9 +2322,7 @@ class BiometricSensor(SensorTLS):
 
             progress = False
             for mgr in managers:
-                r_del = self.tls_send(
-                    bytes.fromhex('a301000000') + mgr,
-                    value=2, label="DELETE_MANAGER")
+                r_del = CMD_DELETE_ENTRY.send(self, mgr, label="DELETE_MANAGER")
                 if r_del != b'\x00\x00\x03\x00':
                     _log(f"  a301 returned"
                          f" {r_del.hex() if r_del else 'None'} -- skip")
@@ -2383,9 +2409,7 @@ class BiometricSensor(SensorTLS):
 
         # Step 4: Storage query init
         print("  Storage query...")
-        resp = self.tls_send(
-            bytes.fromhex('9e01'),
-            value=7, label="COMMIT_STORAGE_QUERY")
+        resp = CMD_STORAGE_QUERY_INIT.send(self, label="COMMIT_STORAGE_QUERY")
         if resp is None:
             print("  Storage query failed")
             return False
@@ -2568,7 +2592,7 @@ class BiometricSensor(SensorTLS):
 
         # 3 consecutive no-change → enrollment complete
         if not changed and getattr(self, '_enroll_plateau', 0) >= 3:
-            print(f"  Enrollment progress plateaued — device cannot extract"
+            print(f"  Enrollment progress plateaued - device cannot extract"
                   f" more data.  Aborting.")
             return False, 0x0002
 
@@ -2581,11 +2605,11 @@ class BiometricSensor(SensorTLS):
             self._enroll_errors = errs
             if status != 0:
                 print(f"  Capture rejected (status=0x{status:04x})"
-                      f" {errs}/3 — lift and retry")
+                      f" {errs}/3 - lift and retry")
             else:
                 print(f"  Finger released too early {errs}/3")
             if errs >= 3:
-                print(f"  3 consecutive unproductive captures — aborting")
+                print(f"  3 consecutive unproductive captures - aborting")
                 return False, 0x0001
             return False, None
 
@@ -2704,7 +2728,7 @@ def main():
             print("  Sending pairing challenge...")
             challenge_cert, challenge_device_cert = sensor.send_challenge(
                 host_pubkey, client_privkey_be)
-            # Device certificate has fresh device key — override stored values
+            # Device certificate has fresh device key - override stored values
             dev_x_be, dev_y_be = dev_key_from_tag3(challenge_device_cert)
             client_cert = challenge_cert
             client_pubkey_x_le = (challenge_cert[144:176]
