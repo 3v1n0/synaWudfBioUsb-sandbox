@@ -978,8 +978,31 @@ class SensorTLS(Sensor):
             raise RuntimeError(
                 "No pairing data stored -- call connect() first")
         self.tls = None
+        print("  Re-initialising device...")
         self.init_device()
+        print("  Re-establishing TLS session...")
         self.connect(**self._pairing)
+        print("  Session ready.")
+
+    def cancel_session(self):
+        """
+        Shut down the current TLS session and restart it cleanly.
+        Use this for Ctrl+C outside of an active enrollment (identify,
+        list-db, etc.).  Does NOT send the enrollment abort (9604).
+
+        For enrollment cancellation use discard_enrollment() first,
+        then restart_session().
+        """
+        print("  Sending REQ_SHUTDOWN...")
+        try:
+            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
+                                   timeout=1000)
+            self.dev.ctrl_transfer(BM_IN,  REQ_ACK,      0, 0, 2,
+                                   timeout=1000)
+        except Exception:
+            pass
+        self.tls = None
+        self.restart_session()
 
 
 # ---------------------------------------------------------------------------
@@ -1484,10 +1507,12 @@ class BiometricSensor(SensorTLS):
         After this call self.tls is None.  Call restart_session() to
         bring the session back up without a USB reset.
         """
+        print("  Sending enrollment abort (9604)...")
         try:
             self.engine_commit_ack()
         except Exception:
             pass
+        print("  Sending REQ_SHUTDOWN...")
         try:
             self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
                                    timeout=1000)
@@ -2545,52 +2570,36 @@ class BiometricSensor(SensorTLS):
         self._enroll_plateau = 0
         self._enroll_errors = 0
         max_attempts = 50
+        self._enroll_active = True
 
-        def _discard_and_restart(reason):
-            """Send 9604+REQ_SHUTDOWN then re-establish TLS session."""
-            print(f"\n  {reason} -- discarding enrollment...")
-            self.discard_enrollment()
-            try:
-                self.restart_session()
-            except Exception as restart_exc:
-                _log(f"  restart_session failed: {restart_exc}")
-            print("  Enrollment discarded. Session ready.")
+        for i in range(1, max_attempts + 1):
+            ok, guid = self._enroll_one_sample(i, max_attempts)
+            if not ok:
+                if isinstance(guid, int):
+                    # Terminal error (3 bad captures, DB full, etc.)
+                    print(f"  Terminal error code=0x{guid:04x}")
+                    _, cnt, _ = self.get_storage_count()
+                    if cnt >= 10:
+                        print(f"  Database has {cnt} records "
+                              "(likely full). Clear some and retry.")
+                    print("  Discarding enrollment...")
+                    self.discard_enrollment()
+                    self.restart_session()
+                    self._enroll_active = False
+                    return False
+                continue        # transient error -- wait for next touch
+            if guid is not None:
+                self._enroll_active = False
+                ok2 = self._commit_enrollment(guid=guid, label="FP1")
+                if not ok2:
+                    _, cnt, _ = self.get_storage_count()
+                    print(f"  DB records after failed commit: {cnt}")
+                return ok2
 
-        try:
-            for i in range(1, max_attempts + 1):
-                ok, guid = self._enroll_one_sample(i, max_attempts)
-                if not ok:
-                    if isinstance(guid, int):
-                        # Terminal error (3 bad captures, DB full, etc.)
-                        print(f"  Terminal error code=0x{guid:04x}")
-                        _, cnt, _ = self.get_storage_count()
-                        if cnt >= 10:
-                            print(f"  Database has {cnt} records "
-                                  "(likely full). Clear some and retry.")
-                        _discard_and_restart("Enrollment aborted")
-                        return False
-                    continue        # transient error -- wait for next touch
-                if guid is not None:
-                    ok2 = self._commit_enrollment(guid=guid, label="FP1")
-                    if not ok2:
-                        _, cnt, _ = self.get_storage_count()
-                        print(f"  DB records after failed commit: {cnt}")
-                    return ok2
-        except (KeyboardInterrupt, usb.core.USBError) as exc:
-            # KeyboardInterrupt: Ctrl+C caught cleanly.
-            # USBError: on Linux, SIGINT can cancel a libusb transfer and
-            # raise USBError(ENODEV/errno=19) or USBError(EINTR/errno=4)
-            # instead of KeyboardInterrupt.  Treat both as cancellation.
-            if isinstance(exc, usb.core.USBError) and exc.errno not in (4, 19):
-                raise  # genuine USB error, not a signal
-            # Graceful discard matching b.exe: 9604 + REQ_SHUTDOWN +
-            # REQ_ACK, then immediately re-establish TLS so the device
-            # and session object are ready for the next operation without
-            # any USB reset or re-enumeration.
-            _discard_and_restart("Enrollment interrupted")
-            return False
-
-        _discard_and_restart("Enrollment aborted after 50 attempts")
+        print("  Enrollment aborted after 50 attempts -- discarding...")
+        self.discard_enrollment()
+        self.restart_session()
+        self._enroll_active = False
         return False
 
 
@@ -2702,66 +2711,77 @@ def main():
                            TLV_DEVICE_CERT:    device_cert_for_save})
 
     # ----- Biometric commands -----
-    if sys.argv[1] == 'list-db':
-        print("list-db...")
-        sensor.list_enrolled()
-    elif sys.argv[1] == 'enroll':
-        sensor.enroll()
-    elif sys.argv[1] == 'clear-db':
-        print("clear-db...")
-        sensor.erase_database()
-    elif sys.argv[1] == 'clear-db-compat':
-        print("clear-db-compat...")
-        sensor.erase_database_compat()
-    elif sys.argv[1] == 'clear-local-db':
-        print("clear-local-db...")
-        sensor.clear_local_db()
-    elif sys.argv[1] == 'identify':
-        print("identify...")
-        guid = sensor.identify()
-        if guid:
-            print(f"Result: matched {guid.hex()}")
+    try:
+        if sys.argv[1] == 'list-db':
+            print("list-db...")
+            sensor.list_enrolled()
+        elif sys.argv[1] == 'enroll':
+            sensor.enroll()
+        elif sys.argv[1] == 'clear-db':
+            print("clear-db...")
+            sensor.erase_database()
+        elif sys.argv[1] == 'clear-db-compat':
+            print("clear-db-compat...")
+            sensor.erase_database_compat()
+        elif sys.argv[1] == 'clear-local-db':
+            print("clear-local-db...")
+            sensor.clear_local_db()
+        elif sys.argv[1] == 'identify':
+            print("identify...")
+            guid = sensor.identify()
+            if guid:
+                print(f"Result: matched {guid.hex()}")
+            else:
+                print("Result: no match / error")
+        elif sys.argv[1] == 'identify-all':
+            print("identify-all...")
+            guid = sensor.identify_all()
+            if guid:
+                print(f"Result: matched {guid.hex()}")
+            else:
+                print("Result: no match / error")
+        elif sys.argv[1] == 'list-db-all':
+            print("list-db-all...")
+            sensor.list_all()
+        elif sys.argv[1] == 'purge-entries':
+            print("purge-entries...")
+            sensor.purge_entries()
+        elif sys.argv[1] == 'delete-record':
+            # Usage: delete-record [--force] guid <hex32>
+            args = sys.argv[2:]
+            force = '--force' in args
+            args = [a for a in args if a != '--force']
+            if len(args) < 2 or args[0] != 'guid':
+                print("Usage: sensor.py delete-record [--force] guid <hex32>")
+                sys.exit(1)
+            guid_hex = args[1]
+            if len(guid_hex) != 32:
+                print("GUID must be 32 hex characters")
+                sys.exit(1)
+            guid = bytes.fromhex(guid_hex)
+            print(f"Deleting record {guid_hex}...")
+            ok = sensor.delete_record_by_guid(guid, force=force)
+            print(f"  {'OK' if ok else 'FAILED'}")
+            if not ok:
+                sys.exit(1)
+        elif sys.argv[1] == 'probe-guid':
+            if len(sys.argv) < 3 or len(sys.argv[2]) != 32:
+                print("Usage: sensor.py probe-guid <hex32>")
+                sys.exit(1)
+            sensor.probe_guid(bytes.fromhex(sys.argv[2]))
+        elif sys.argv[1] == 'probe-managers':
+            print("probe-managers...")
+            sensor.probe_managers()
+    except (KeyboardInterrupt, usb.core.USBError) as exc:
+        if isinstance(exc, usb.core.USBError) and exc.errno not in (4, 19):
+            raise
+        print("\nInterrupted.")
+        if getattr(sensor, '_enroll_active', False):
+            print("  Discarding active enrollment...")
+            sensor.discard_enrollment()
         else:
-            print("Result: no match / error")
-    elif sys.argv[1] == 'identify-all':
-        print("identify-all...")
-        guid = sensor.identify_all()
-        if guid:
-            print(f"Result: matched {guid.hex()}")
-        else:
-            print("Result: no match / error")
-    elif sys.argv[1] == 'list-db-all':
-        print("list-db-all...")
-        sensor.list_all()
-    elif sys.argv[1] == 'purge-entries':
-        print("purge-entries...")
-        sensor.purge_entries()
-    elif sys.argv[1] == 'delete-record':
-        # Usage: delete-record [--force] guid <hex32>
-        args = sys.argv[2:]
-        force = '--force' in args
-        args = [a for a in args if a != '--force']
-        if len(args) < 2 or args[0] != 'guid':
-            print("Usage: sensor.py delete-record [--force] guid <hex32>")
-            sys.exit(1)
-        guid_hex = args[1]
-        if len(guid_hex) != 32:
-            print("GUID must be 32 hex characters")
-            sys.exit(1)
-        guid = bytes.fromhex(guid_hex)
-        print(f"Deleting record {guid_hex}...")
-        ok = sensor.delete_record_by_guid(guid, force=force)
-        print(f"  {'OK' if ok else 'FAILED'}")
-        if not ok:
-            sys.exit(1)
-    elif sys.argv[1] == 'probe-guid':
-        if len(sys.argv) < 3 or len(sys.argv[2]) != 32:
-            print("Usage: sensor.py probe-guid <hex32>")
-            sys.exit(1)
-        sensor.probe_guid(bytes.fromhex(sys.argv[2]))
-    elif sys.argv[1] == 'probe-managers':
-        print("probe-managers...")
-        sensor.probe_managers()
+            sensor.cancel_session()
+        return
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
     print("Done.")
