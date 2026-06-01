@@ -162,6 +162,35 @@ CIPHER_SUITE  = b'\xc0\x2e'
 # Fallback device ECDH static key (from ECK1 export in Wine trace)
 # ---------------------------------------------------------------------------
 
+# Derived from P_SHA256(hardcoded_constants, "HS_KEY_PAIR_GEN")
+# key=first16_hardcoded, seed=last16_hardcoded+aaaa, hash=SHA256
+def _derive_identity_key():
+    import hashlib, hmac
+    blob = bytes.fromhex(
+        '717cd72d0962bc4a2846138dbb2c2419'
+        '2512a76407065f383846139d4bec2033')
+    k = blob[:16]
+    s = blob[16:] + bytes([0xaa, 0xaa])
+    label = b'HS_KEY_PAIR_GEN'
+    seed_in = label + s
+    a = hmac.new(k, seed_in, hashlib.sha256).digest()
+    res = b''
+    while len(res) < 32:
+        res += hmac.new(k, a + seed_in, hashlib.sha256).digest()
+        a = hmac.new(k, a, hashlib.sha256).digest()
+    return res[:32]  # D as LE bytes
+
+IDENTITY_D_LE = _derive_identity_key()
+IDENTITY_D_BE = bytes(reversed(IDENTITY_D_LE))
+
+# Compute host pubkey from D*G
+from ecdsa import NIST256p
+_G = NIST256p.generator
+_host_Q = _G * int.from_bytes(IDENTITY_D_LE, 'little')
+HOST_X_BE = _host_Q.x().to_bytes(32, 'big')
+HOST_Y_BE = _host_Q.y().to_bytes(32, 'big')
+
+# Device static ECDH public key (factory-permanent, from ECK1 export)
 DEV_X_BE = bytes.fromhex(
     '63df20dd820af4274c9e9a1854f02102'
     'bc0e1b76b8746817b68c440122df20bf')
@@ -169,19 +198,7 @@ DEV_Y_BE = bytes.fromhex(
     '4ef37a81815ead6a51b145aadbb3073f'
     '60bedb82ea38c34324983109df6fc0f3')
 
-# Identity ECS2 key (hardcoded in b.exe, for pairing/challenge)
-IDENTITY_D_BE = bytes.fromhex(
-    'cca803106523ed52964f95a3742b85b3'
-    '49cba81759fd52387c0547a8af9d577f')
-
-HOST_X_BE = bytes.fromhex(
-    'b3dbef324fc769e7350d17f8329665cc'
-    '4725ceb62dc8688eb275eef6cb0dfb18')
-HOST_Y_BE = bytes.fromhex(
-    'c95675ccec0369e3e6ee72be09ba2cb5'
-    '2867214b4e80612f262e9da861e78d15')
-
-# HOST_142 from identity key (pre-built for challenge when no pairing data)
+# HOST_142 from identity key (for challenge/TLS when no pairing data)
 _HOST_X_LE = bytes(reversed(HOST_X_BE))
 _HOST_Y_LE = bytes(reversed(HOST_Y_BE))
 HOST_142_IDENTITY = (b'\x3f\x5f\x17\x00' + _HOST_X_LE
@@ -1921,16 +1938,39 @@ def main():
             tag3_for_save = tag3
             _log(f"  Updated dev key from challenge: {dev_x_be[:8].hex()}...")
     else:
-        print("  No PairingData -- using identity key for challenge")
-        eck2_be       = IDENTITY_D_BE
-        host_142      = HOST_142_IDENTITY
-        eck2_pub_le   = _HOST_X_LE
-        print("  Sending pairing challenge...")
-        tag1, tag3 = sensor.send_challenge(host_142, eck2_be)
-        cert_data_398 = tag1
-        eck2_pub_le = tag1[144:176] if len(tag1) >= 176 else b'\x00' * 32
-        dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
-        tag3_for_save = tag3
+        print("  No PairingData -- generating fresh Tag2 identity")
+        # Generate random Tag2 (ECDSA signing key for this pairing)
+        _tag2_int = int.from_bytes(os.urandom(32), 'big')
+        _tag2_mod = NIST256p.order - 1
+        _tag2_int = (_tag2_int % _tag2_mod) + 1
+        _tag2_d_be = _tag2_int.to_bytes(32, 'big')
+        # Compute HOST_142 from Tag2*G
+        _tag2_Q = NIST256p.generator * _tag2_int
+        _host_x_le = _tag2_Q.x().to_bytes(32, 'big')[::-1]
+        _host_y_le = _tag2_Q.y().to_bytes(32, 'big')[::-1]
+        host_142 = (b'\x3f\x5f\x17\x00' + _host_x_le
+                    + b'\x00' * 36 + _host_y_le + b'\x00' * 38)
+        eck2_be       = _tag2_d_be  # Tag2 for TLS CertVerify
+        eck2_pub_le   = _host_x_le  # pubkey X for cert body
+        dev_x_be      = DEV_X_BE
+        dev_y_be      = DEV_Y_BE
+        if ready and int.from_bytes(ready, 'little') != 0:
+            print("  Device requests challenge (REQ_READY non-zero)")
+            print("  Sending pairing challenge...")
+            # Sign with P_SHA256 D (manufacturer key), NOT Tag2
+            tag1, tag3 = sensor.send_challenge(host_142, IDENTITY_D_BE)
+            cert_data_398 = tag1
+            eck2_pub_le = tag1[144:176] if len(tag1) >= 176 else b'\x00' * 32
+            dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
+            tag3_for_save = tag3
+        else:
+            print("  Device already paired, skipping challenge")
+            pub32 = b'\x00' * 32
+            cert_data_398 = (host_142 + b'\x00\x02'
+                             + struct.pack('<H', 32) + pub32
+                             + b'\x00' * 222)
+            assert len(cert_data_398) == 400, len(cert_data_398)
+            tag3_for_save = None
 
     # ----- TLS handshake -----
     print("TLS handshake...")
