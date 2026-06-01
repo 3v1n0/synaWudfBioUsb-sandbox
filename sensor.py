@@ -158,7 +158,7 @@ TLV_CLIENT_PRIVKEY = 2  # 32-byte host ECDSA private key D (LE)
 TLV_DEVICE_CERT    = 3  # 400-byte device certificate (contains ECK1 pubkey)
 
 # ANSI 381 finger position subtypes (WINBIO_BIOMETRIC_SUBTYPE)
-WINBIO_ANSI_381_POS_UNKNOWN          = 0
+WINBIO_SUBTYPE_NO_INFORMATION        = 0
 WINBIO_ANSI_381_POS_RH_THUMB         = 1
 WINBIO_ANSI_381_POS_RH_INDEX_FINGER  = 2
 WINBIO_ANSI_381_POS_RH_MIDDLE_FINGER = 3
@@ -169,6 +169,10 @@ WINBIO_ANSI_381_POS_LH_INDEX_FINGER  = 7
 WINBIO_ANSI_381_POS_LH_MIDDLE_FINGER = 8
 WINBIO_ANSI_381_POS_LH_RING_FINGER   = 9
 WINBIO_ANSI_381_POS_LH_LITTLE_FINGER = 10
+WINBIO_ANSI_381_POS_RH_FOUR_FINGERS  = 13
+WINBIO_ANSI_381_POS_LH_FOUR_FINGERS  = 14
+WINBIO_ANSI_381_POS_TWO_THUMBS       = 15
+WINBIO_SUBTYPE_ANY                   = 255
 
 # ---------------------------------------------------------------------------
 # TLS constants
@@ -375,13 +379,15 @@ CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
 # CAPTURE_DATA: 86 <subfactor> 00*15 <subfactor> 00*19 (37B)
 # subfactor is a WINBIO_ANSI_381_POS_* subtype; payload built by capture_data()
 CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,  label="CAPTURE_DATA")
-# STATUS_EXT param=4 (initial/post capture): 86 00 00*15 04 00*19 (37B)
+# STATUS_EXT param=4: 86 00 <00*31> 04000000 (37B)
 CMD_STATUS_EXT_4         = Cmd(b'\x86', CH_DATA,
-                               b'\x00' * 15 + b'\x04' + b'\x00' * 19,
+                               b'\x00' * 31 + b'\x04\x00\x00\x00',
                                label="STATUS_EXT(param=4)", sep=b'\x00')
-# STATUS_EXT param=1 (quality/progress): 86 00 00*15 01 00*19 (37B)
+# STATUS_EXT param=1: 86 00 0000 01000000 00*12 01000000 00*13 (37B)
 CMD_STATUS_EXT_1         = Cmd(b'\x86', CH_DATA,
-                               b'\x00' * 15 + b'\x01' + b'\x00' * 19,
+                               b'\x00\x00'
+                               + b'\x01\x00\x00\x00' + b'\x00' * 12
+                               + b'\x01\x00\x00\x00' + b'\x00' * 13,
                                label="STATUS_EXT(param=1)", sep=b'\x00')
 
 
