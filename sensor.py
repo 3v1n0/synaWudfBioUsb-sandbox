@@ -1334,8 +1334,16 @@ class SensorTLS(Sensor):
         state.feed_hs(cv_hs)
 
         # ----- ChangeCipherSpec + Finished -----
-        verify  = prf(master, 'client finished', state.hs_digest(), 12)
+        hs_before_client_fin = state.hs_digest()
+        verify  = prf(master, 'client finished', hs_before_client_fin, 12)
         fin_hs  = make_hs_message(TLS_HS_FINISHED, verify)
+        # Native behavior appears to use the pre-client-finished transcript
+        # for server Finished verification. Keep this strict to the observed
+        # device behavior.
+        expected_srv_fin = make_hs_message(
+            TLS_HS_FINISHED,
+            prf(master, 'server finished', hs_before_client_fin, 12),
+        )
 
         hs_rec  = make_tls_record(TLS_HANDSHAKE, cert_hs + cke_hs + cv_hs)
         ccs_rec = make_tls_record(TLS_CHANGE_CS, b'\x01')
@@ -1356,6 +1364,7 @@ class SensorTLS(Sensor):
 
         # ----- Server CCS + Finished -----
         state.server_seq = 0
+        saw_server_finished = False
         for rec in iter_tls_records(raw_sfin):
             if rec.rtype == TLS_ALERT:
                 raise TlsAlertError(rec.body[0],
@@ -1365,8 +1374,16 @@ class SensorTLS(Sensor):
                 try:
                     srv_fin = state.decrypt(TLS_HANDSHAKE, rec.body)
                     _hexdump("Server Finished", srv_fin)
+                    if srv_fin != expected_srv_fin:
+                        raise RuntimeError(
+                            "Server Finished verify_data mismatch")
+                    saw_server_finished = True
                 except Exception as exc:
-                    _log(f"  Server Finished decrypt failed: {exc}")
+                    raise RuntimeError(
+                        f"Server Finished validation failed: {exc}") from exc
+
+        if not saw_server_finished:
+            raise RuntimeError("Server Finished not received")
 
         self.tls = state
         self._pairing = PairingState(
