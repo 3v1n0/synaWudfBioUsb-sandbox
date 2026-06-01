@@ -46,13 +46,13 @@ PairingData (local file or Wine registry):
   tag=0: 2-byte unknown
 
 USB wValue map (confirmed from windows driver trace):
-  Init cmds (plain):  OUT value=1 / IN value=0 (cert-section reads: IN value=0x8000)
-  ClientHello:        OUT value=4 / IN value=0
-  Bundle:             OUT value=0 / IN value=0
-  GET_RECORD_COUNT:   OUT value=6 / IN value=0
-  STORAGE_QUERY_INIT: OUT value=7 / IN value=0
-  STORAGE_QUERY_ALL:  OUT value=2 / IN value=0
-  FETCH_RECORD:       OUT value=2 / IN value=0
+  Init cmds (plain):  OUT CH_INIT=1 / IN CH_IN=0 (cert reads: IN CH_IN_CERT=0x8000)
+  ClientHello:        OUT CH_TLS=4  / IN CH_IN=0
+  Bundle:             OUT CH_BUNDLE=0 / IN CH_IN=0
+  GET_RECORD_COUNT:   OUT CH_SENSOR=6 / IN CH_IN=0
+  STORAGE_QUERY_INIT: OUT CH_STORE=7  / IN CH_IN=0
+  STORAGE_QUERY_ALL:  OUT CH_DATA=2   / IN CH_IN=0
+  FETCH_RECORD:       OUT CH_DATA=2   / IN CH_IN=0
 
 Class hierarchy:
   Sensor        -- USB transport layer (ctrl_out / ctrl_in)
@@ -257,12 +257,15 @@ class Cmd:
                             ctype=ctype)
 
 
-# Sensor-control channel
-CH_SENSOR = 6
-# Data-plane channel
-CH_DATA   = 2
-# Storage/admin channel
-CH_STORE  = 7
+# USB wValue channel selectors (OUT direction unless noted)
+CH_IN      = 0        # IN direction (all reads)
+CH_IN_CERT = 0x8000   # IN direction for cert-section reads during init
+CH_BUNDLE  = 0        # TLS bundle OUT
+CH_INIT    = 1        # plain init commands OUT
+CH_TLS     = 4        # ClientHello / TLS handshake OUT
+CH_SENSOR  = 6        # sensor/engine control OUT
+CH_DATA    = 2        # data-plane app commands OUT
+CH_STORE   = 7        # storage/admin commands OUT
 
 # --- Sensor / engine control (value=6) ---
 CMD_GET_RECORD_COUNT     = Cmd(b'\x82', CH_SENSOR,
@@ -871,7 +874,7 @@ class Sensor:
 
     def _cmd_device_info(self, n):
         """Send device info query (01...) -> 38B response."""
-        self.ctrl_out(REQ_CMD, value=1,
+        self.ctrl_out(REQ_CMD, value=CH_INIT,
                       data=bytes.fromhex('0100000000000000'),
                       label=f"DEV_INFO(r{n})")
         return self.ctrl_in(REQ_RESP, 0x26, label=f"DEV_INFO(r{n})")
@@ -879,14 +882,14 @@ class Sensor:
     def _cmd_cert_section(self, n, section):
         """Read certificate section (8e <section> 00 02 ...)."""
         data = bytes([0x8e, section, 0, 2]) + b'\x00' * 20
-        self.ctrl_out(REQ_CMD, value=1, data=data,
+        self.ctrl_out(REQ_CMD, value=CH_INIT, data=data,
                       label=f"CERT_SECT_{section:02x}(r{n})")
-        return self.ctrl_in(REQ_RESP, 4096, value=0x8000,
+        return self.ctrl_in(REQ_RESP, 4096, value=CH_IN_CERT,
                             label=f"CERT_SECT_{section:02x}(r{n})")
 
     def _cmd_bootstrap_status(self, n):
         """Send bootstrap status query (19...) -> 68B response."""
-        self.ctrl_out(REQ_CMD, value=1,
+        self.ctrl_out(REQ_CMD, value=CH_INIT,
                       data=bytes.fromhex('1900000000000000'),
                       label=f"BOOT_STATUS(r{n})")
         return self.ctrl_in(REQ_RESP, 0x44, label=f"BOOT_STATUS(r{n})")
@@ -896,7 +899,7 @@ class Sensor:
         One init round: REQ_START + 4 plain commands.
         Returns the bootstrap status response (68B).
         """
-        self.ctrl_out(REQ_START, value=1, label=f"REQ_START(r{n})")
+        self.ctrl_out(REQ_START, value=CH_INIT, label=f"REQ_START(r{n})")
         ack = self.ctrl_in(REQ_INIT_ACK, 1, label=f"REQ_INIT_ACK(r{n})")
         assert ack == b'\x01', f"ACK={ack.hex()}"
 
@@ -936,7 +939,7 @@ class Sensor:
         challenge += b'\x00' * (408 - len(challenge))
         assert len(challenge) == 408
         _hexdump("Challenge", challenge)
-        self.ctrl_out(REQ_CMD, value=1, data=challenge,
+        self.ctrl_out(REQ_CMD, value=CH_INIT, data=challenge,
                       label="CHALLENGE")
         resp = self.ctrl_in(REQ_RESP, 802, label="CHALLENGE_RESP")
         if resp is None or len(resp) < 402:
@@ -1022,7 +1025,7 @@ class SensorTLS(Sensor):
         _hexdump("CH record", ch_rec)
 
         # Send CH: value=4 with 44000000 IOCTL header (confirmed windows driver trace)
-        self.ctrl_out(REQ_CMD, value=4,
+        self.ctrl_out(REQ_CMD, value=CH_TLS,
                       data=IOCTL_HDR + ch_rec,
                       label="TLS_OUT(CH)")
         raw_sh = self.ctrl_in(REQ_RESP, 0x400, label="TLS_IN(CH)")
@@ -1118,7 +1121,7 @@ class SensorTLS(Sensor):
         # Send bundle: value=0 per windows driver trace (wVal=0x0000 confirmed)
         burst = IOCTL_HDR + hs_rec + ccs_rec + fin_rec
         _hexdump("bundle", burst)
-        self.ctrl_out(REQ_CMD, value=0, data=burst,
+        self.ctrl_out(REQ_CMD, value=CH_BUNDLE, data=burst,
                       label="TLS_OUT(BUNDLE)")
         # Device should respond immediately (windows driver does no delay)
         raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
