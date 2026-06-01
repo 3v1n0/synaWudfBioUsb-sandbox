@@ -151,7 +151,7 @@ TemplateInfo   = namedtuple('TemplateInfo',   ['guid', 'sid', 'label', 'subfacto
 RecordInfo     = namedtuple('RecordInfo',     ['handle'])
 SelectInfo     = namedtuple('SelectInfo',     ['handle', 'guid'])
 CaptureStatus  = namedtuple('CaptureStatus',  ['sensor_status', 'reject_detail'])
-CaptureData    = namedtuple('CaptureData',    ['finger_present', 'ctx', 'raw'])
+CaptureData    = namedtuple('CaptureData',    ['finger_present', 'ctx'])
 SensorStatus   = namedtuple('SensorStatus',   ['mode', 'sample', 'quality', 'context'])
 EnrollStatus   = namedtuple('EnrollStatus',   ['status', 'guid', 'sample_cnt',
                                                'progress_sum', 'samples_used', 'size_flag'])
@@ -1720,10 +1720,9 @@ class BiometricSensor(SensorTLS):
         """
         Send CAPTURE_DATA (value=0x0002) and parse the 66-byte response.
 
-        Returns CaptureData(finger_present, ctx, raw):
-          finger_present -- True if finger detected, False otherwise
+        Returns CaptureData(finger_present, ctx) or None on failure:
+          finger_present -- True if finger detected, False if no finger
           ctx           -- LE u16 from resp[-2:], used as enrollment context
-          raw           -- full response bytes (or None on TLS error)
 
         The marker at [18:22] (LE u32) tells if a finger was detected:
           6 = WINBIO_I_MORE_DATA = finger detected
@@ -1733,19 +1732,19 @@ class BiometricSensor(SensorTLS):
         """
         raw = CMD_CAPTURE_DATA.send(self)
         if raw is None or len(raw) < 22:
-            return CaptureData(finger_present=False, ctx=0, raw=raw)
+            return None
         marker = struct.unpack_from('<I', raw, 18)[0]
         finger_present = (marker == 6)
         ctx = struct.unpack('<H', raw[-2:])[0] if len(raw) >= 2 else 0
-        cd = CaptureData(finger_present=finger_present, ctx=ctx, raw=raw)
+        cd = CaptureData(finger_present=finger_present, ctx=ctx)
         _log(f"  {cd}")
         return cd
 
     def _print_sensor_status(self, ctx=0, label=""):
-        """Query and print human-readable SensorStatus."""
+        """Query and log SensorStatus; label identifies the call site."""
         ss = self.get_sensor_status(ctx)
         mode_str = {1: "armed", 2: "data_rdy"}.get(ss.mode, f"0x{ss.mode:04x}")
-        print(f"  {label}SensorStatus(mode={mode_str},"
+        print(f"  {label} SensorStatus(mode={mode_str},"
               f" sample={ss.sample},"
               f" quality=0x{ss.quality:04x},"
               f" context={ss.context})")
@@ -2404,7 +2403,7 @@ class BiometricSensor(SensorTLS):
         # 4. Capture finger
         print("\n  Touch and hold the sensor...")
         cap = self.capture_data()
-        if not cap.raw or not cap.finger_present:
+        if cap is None or not cap.finger_present:
             print("  No finger detected")
             return None
         # 5. Interrupt 1 (capture armed)
@@ -2464,7 +2463,7 @@ class BiometricSensor(SensorTLS):
         print("\n--- Identify ---")
         print("\n  Touch and hold the sensor...")
         cap = self.capture_data()
-        if not cap.raw or not cap.finger_present:
+        if cap is None or not cap.finger_present:
             print("  No finger detected")
             return None
         self._print_sensor_status(cap.ctx, label="capture: ")
@@ -2813,8 +2812,8 @@ class BiometricSensor(SensorTLS):
         _log(f"  _enroll_one_sample started")
 
         cap = self.capture_data()
-        ok = cap.raw is not None and cap.finger_present
-        if cap.raw is None:
+        ok = cap is not None and cap.finger_present
+        if cap is None:
             print("  CAPTURE_DATA failed")
         elif not cap.finger_present:
             print("  No finger detected")
