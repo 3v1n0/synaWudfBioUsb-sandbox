@@ -145,8 +145,9 @@ def _rand(n):
 # ---------------------------------------------------------------------------
 
 # Parsed result of a LOAD_TEMPLATE (a103) response.
-TemplateInfo = namedtuple('TemplateInfo', ['guid', 'sid', 'label', 'subfactor'])
-RecordInfo   = namedtuple('RecordInfo',   ['handle'])
+TemplateInfo   = namedtuple('TemplateInfo',   ['guid', 'sid', 'label', 'subfactor'])
+RecordInfo     = namedtuple('RecordInfo',     ['handle'])
+SelectInfo     = namedtuple('SelectInfo',     ['handle', 'guid'])
 
 REQ_START        = 0x19   # OUT -- phase 1 init signal
 REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
@@ -1360,6 +1361,24 @@ class BiometricSensor(SensorTLS):
             label = raw.rstrip(b'\x00').decode('utf-8', errors='replace') or None
         return TemplateInfo(guid=guid, sid=sid, label=label, subfactor=subfactor)
 
+    def select_record(self, handle, label="SELECT_RECORD"):
+        """
+        Send SELECT_RECORD (a003) for a record handle and parse the response.
+
+        Response layout (52 bytes):
+          [0:2]   status (u16 LE, 0x0000 = ok)
+          [2:4]   flags
+          [4:20]  secondary handle (16B)
+          [20:36] GUID (16B)
+          [36:52] extra (counts / timestamps, not yet decoded)
+
+        Returns SelectInfo(handle, guid) or None on error.
+        """
+        r = CMD_SELECT_RECORD.send(self, handle, label=label)
+        if not r or len(r) < 36 or r[:2] != b'\x00\x00':
+            return None
+        return SelectInfo(handle=r[4:20], guid=r[20:36])
+
     def list_enrolled(self):
         """
         Full list-db sequence. Returns list of (guid, record_data) for
@@ -1420,9 +1439,9 @@ class BiometricSensor(SensorTLS):
         print(f"\nRecords (STORAGE_QUERY_ALL via 9f02): {len(guids)}")
         for i, guid in enumerate(guids):
             rec  = self.fetch_record(guid)
-            r3   = CMD_SELECT_RECORD.send(self, rec.handle) if rec else None
-            tmpl = self.load_template(rec.handle)           if rec else None
-            guid_from_a003 = r3[20:36] if (r3 and len(r3) >= 36) else None
+            r3   = self.select_record(rec.handle) if rec else None
+            tmpl = self.load_template(rec.handle) if rec else None
+            guid_from_a003 = r3.guid if r3 else None
             label_str = f" label='{tmpl.label}'" if tmpl and tmpl.label else ""
             sf_str    = f" subfactor=0x{tmpl.subfactor:02x}" if tmpl else ""
             print(f"  [{i}] GUID {guid.hex()}{label_str}{sf_str}")
@@ -1914,7 +1933,7 @@ class BiometricSensor(SensorTLS):
             if rh_r:
                 rh_prefix_to_guid[rh_r.handle[:8]] = g
         for mgr in managers:
-            r_a3 = CMD_SELECT_RECORD.send(self, mgr, label="A003_mgr")
+            r_a3 = self.select_record(mgr, label="A003_mgr")
             a201_r = CMD_RECORD_TO_ENTRY.send(self, mgr, label="A201_mgr")
             owner_guid = None
             if a201_r and len(a201_r) >= 20 and a201_r[:4] == b'\x00\x00\x00\x00':
@@ -1924,7 +1943,7 @@ class BiometricSensor(SensorTLS):
                     ref = a001_mid[4:12]
                     owner_guid = rh_prefix_to_guid.get(ref)
             print(f"    mgr {mgr.hex()[:16]}..."
-                  f"  a003={r_a3.hex() if r_a3 else 'None'}"
+                  f"  a003={'guid='+r_a3.guid.hex() if r_a3 else 'None'}"
                    f"  owner_guid={owner_guid.hex() if owner_guid else 'unknown'}")
 
     def probe_managers(self):
@@ -2061,7 +2080,7 @@ class BiometricSensor(SensorTLS):
         if not r:
             return False
         entry = r.handle
-        r = CMD_SELECT_RECORD.send(self, entry, label="SELECT_MATCH")
+        r = self.select_record(entry, label="SELECT_MATCH")
         if not r:
             return False
         return self.load_template(entry) is not None
@@ -2362,7 +2381,7 @@ class BiometricSensor(SensorTLS):
         for guid in guids:
             rec = self.fetch_record(guid)
             if rec:
-                CMD_SELECT_RECORD.send(self, rec.handle)
+                self.select_record(rec.handle)
                 self.load_template(rec.handle)
 
         # Delete only manager entries (a001 returns all zeros)
