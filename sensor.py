@@ -3068,6 +3068,11 @@ def main():
     print("Running init phases...")
     sensor.init_device()
 
+    if sensor.serial:
+        fw = sensor.firmware_version
+        fw_str = f"{fw[0]}.{fw[1]}" if fw else "?"
+        print(f"  Serial: {sensor.serial}  Firmware: {fw_str}")
+
     print("REQ_READY...")
     ready = sensor.req_ready()
     _log(f"REQ_READY = {ready.hex()}")
@@ -3116,11 +3121,6 @@ def main():
             print("  Cannot proceed without device key -- stopping")
             sensor.close()
             sys.exit(1)
-
-    if sensor.serial:
-        fw = sensor.firmware_version
-        fw_str = f"{fw[0]}.{fw[1]}" if fw else "?"
-        print(f"  Serial: {sensor.serial}  Firmware: {fw_str}")
 
     # ----- TLS handshake -----
     print("TLS handshake...")
