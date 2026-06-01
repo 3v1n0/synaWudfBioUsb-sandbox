@@ -3088,30 +3088,29 @@ def main():
         print(f"  host_pubkey: {host_pubkey[:8].hex()}...")
         _log(f"  client_privkey_le: {client_privkey_le[:8].hex()}...")
         _log(f"  dev_x_be: {dev_x_be[:8].hex()}...")
-        cr = None
-        # Even with PairingData, check if device wants a challenge
         if ready and int.from_bytes(ready, 'little') != 0:
             print("  Device requests challenge (REQ_READY non-zero)")
             print("  Sending pairing challenge...")
             cr = sensor.send_challenge(host_pubkey, client_privkey_be)
             _log(f"  Updated dev key from challenge: {cr.dev_x_be[:8].hex()}...")
+        else:
+            cr = ChallengeResponse(client_cert=client_cert,
+                                   device_cert=None,
+                                   pub_key32=client_pubkey_x_le,
+                                   dev_x_be=dev_x_be,
+                                   dev_y_be=dev_y_be)
     else:
         print("  No PairingData -- generating fresh host identity")
-        # Generate random host ECDSA key pair (the client identity for TLS)
         _host_privkey_int = int.from_bytes(os.urandom(32), 'big')
         _host_privkey_mod = NIST256p.order - 1
         _host_privkey_int = (_host_privkey_int % _host_privkey_mod) + 1
         _host_privkey_be  = _host_privkey_int.to_bytes(32, 'big')
-        # Compute host public key blob from host pubkey
-        _host_pubkey_Q = NIST256p.generator * _host_privkey_int
+        _host_pubkey_Q    = NIST256p.generator * _host_privkey_int
         _host_pubkey_x_le = _host_pubkey_Q.x().to_bytes(32, 'big')[::-1]
         _host_pubkey_y_le = _host_pubkey_Q.y().to_bytes(32, 'big')[::-1]
         host_pubkey = (b'\x3f\x5f\x17\x00' + _host_pubkey_x_le
                     + b'\x00' * 36 + _host_pubkey_y_le + b'\x00' * 38)
-        client_privkey_be  = _host_privkey_be
-        client_pubkey_x_le = _host_pubkey_x_le
-        client_cert = None
-        dev_x_be = dev_y_be = None
+        client_privkey_be = _host_privkey_be
         print("  Sending pairing challenge...")
         try:
             cr = sensor.send_challenge(host_pubkey, IDENTITY_D_BE)
@@ -3126,10 +3125,8 @@ def main():
     print("TLS handshake...")
     try:
         sensor.connect(host_pubkey, client_privkey_be,
-                       cr.pub_key32   if cr else client_pubkey_x_le,
-                       cr.client_cert if cr else client_cert,
-                       cr.dev_x_be    if cr else dev_x_be,
-                       cr.dev_y_be    if cr else dev_y_be)
+                       cr.pub_key32, cr.client_cert,
+                       cr.dev_x_be, cr.dev_y_be)
     except TlsAlertError as exc:
         print(f"  TLS handshake failed: {exc}")
         sensor.close()
