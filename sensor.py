@@ -252,7 +252,7 @@ class Cmd:
     def send(self, dev, arg=b'', label=None, ctype=TLS_APP_DATA):
         """Build and send via dev.tls_send(); returns response.
         label overrides the default cmd label when provided and non-empty."""
-        return dev.tls_send(self.build(arg), value=self.channel,
+        return dev.tls_send(self.build(arg), channel=self.channel,
                             label=label if label else self.label,
                             ctype=ctype)
 
@@ -802,20 +802,20 @@ class Sensor:
         # device expects both interfaces active from the start.
         self._claim_both_interfaces()
 
-    def ctrl_out(self, req, value=0, data=b'', label=""):
-        _log(f">>> {label} {BM_OUT:02x}{req:02x}{value:04x} "
+    def ctrl_out(self, req, channel=0, data=b'', label=""):
+        _log(f">>> {label} {BM_OUT:02x}{req:02x}{channel:04x} "
              f"data={data[:64].hex()}")
         try:
-            self.dev.ctrl_transfer(BM_OUT, req, value, 0, data,
+            self.dev.ctrl_transfer(BM_OUT, req, channel, 0, data,
                                    timeout=USB_TIMEOUT)
         except Exception as exc:
             _log(f"  ERROR: {exc}")
             raise
 
-    def ctrl_in(self, req, length, value=0, label=""):
-        _log(f"<<< {label} {BM_IN:02x}{req:02x}{value:04x} len={length}")
+    def ctrl_in(self, req, length, channel=0, label=""):
+        _log(f"<<< {label} {BM_IN:02x}{req:02x}{channel:04x} len={length}")
         try:
-            resp = bytes(self.dev.ctrl_transfer(BM_IN, req, value, 0,
+            resp = bytes(self.dev.ctrl_transfer(BM_IN, req, channel, 0,
                                                 length, timeout=USB_TIMEOUT))
             _log(f"  resp ({len(resp)}B): {resp[:64].hex()}")
             return resp
@@ -873,7 +873,7 @@ class Sensor:
 
     def _cmd_device_info(self, n):
         """Send device info query (01...) -> 38B response."""
-        self.ctrl_out(REQ_CMD, value=CH_INIT,
+        self.ctrl_out(REQ_CMD, channel=CH_INIT,
                       data=bytes.fromhex('0100000000000000'),
                       label=f"DEV_INFO(r{n})")
         return self.ctrl_in(REQ_RESP, 0x26, label=f"DEV_INFO(r{n})")
@@ -881,14 +881,14 @@ class Sensor:
     def _cmd_cert_section(self, n, section):
         """Read certificate section (8e <section> 00 02 ...)."""
         data = bytes([0x8e, section, 0, 2]) + b'\x00' * 20
-        self.ctrl_out(REQ_CMD, value=CH_INIT, data=data,
+        self.ctrl_out(REQ_CMD, channel=CH_INIT, data=data,
                       label=f"CERT_SECT_{section:02x}(r{n})")
-        return self.ctrl_in(REQ_RESP, 4096, value=CH_IN_CERT,
+        return self.ctrl_in(REQ_RESP, 4096, channel=CH_IN_CERT,
                             label=f"CERT_SECT_{section:02x}(r{n})")
 
     def _cmd_bootstrap_status(self, n):
         """Send bootstrap status query (19...) -> 68B response."""
-        self.ctrl_out(REQ_CMD, value=CH_INIT,
+        self.ctrl_out(REQ_CMD, channel=CH_INIT,
                       data=bytes.fromhex('1900000000000000'),
                       label=f"BOOT_STATUS(r{n})")
         return self.ctrl_in(REQ_RESP, 0x44, label=f"BOOT_STATUS(r{n})")
@@ -898,7 +898,7 @@ class Sensor:
         One init round: REQ_START + 4 plain commands.
         Returns the bootstrap status response (68B).
         """
-        self.ctrl_out(REQ_START, value=CH_INIT, label=f"REQ_START(r{n})")
+        self.ctrl_out(REQ_START, channel=CH_INIT, label=f"REQ_START(r{n})")
         ack = self.ctrl_in(REQ_INIT_ACK, 1, label=f"REQ_INIT_ACK(r{n})")
         assert ack == b'\x01', f"ACK={ack.hex()}"
 
@@ -938,7 +938,7 @@ class Sensor:
         challenge += b'\x00' * (408 - len(challenge))
         assert len(challenge) == 408
         _hexdump("Challenge", challenge)
-        self.ctrl_out(REQ_CMD, value=CH_INIT, data=challenge,
+        self.ctrl_out(REQ_CMD, channel=CH_INIT, data=challenge,
                       label="CHALLENGE")
         resp = self.ctrl_in(REQ_RESP, 802, label="CHALLENGE_RESP")
         if resp is None or len(resp) < 402:
@@ -1024,7 +1024,7 @@ class SensorTLS(Sensor):
         _hexdump("CH record", ch_rec)
 
         # Send CH: value=4 with 44000000 IOCTL header (confirmed windows driver trace)
-        self.ctrl_out(REQ_CMD, value=CH_TLS,
+        self.ctrl_out(REQ_CMD, channel=CH_TLS,
                       data=IOCTL_HDR + ch_rec,
                       label="TLS_OUT(CH)")
         raw_sh = self.ctrl_in(REQ_RESP, 0x400, label="TLS_IN(CH)")
@@ -1120,7 +1120,7 @@ class SensorTLS(Sensor):
         # Send bundle: value=0 per windows driver trace (wVal=0x0000 confirmed)
         burst = IOCTL_HDR + hs_rec + ccs_rec + fin_rec
         _hexdump("bundle", burst)
-        self.ctrl_out(REQ_CMD, value=CH_PLAIN, data=burst,
+        self.ctrl_out(REQ_CMD, channel=CH_PLAIN, data=burst,
                       label="TLS_OUT(BUNDLE)")
         # Device should respond immediately (windows driver does no delay)
         raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
@@ -1154,7 +1154,7 @@ class SensorTLS(Sensor):
         )
         _log("TLS handshake complete")
 
-    def tls_send(self, plain, value, label="", ctype=TLS_APP_DATA):
+    def tls_send(self, plain, channel, label="", ctype=TLS_APP_DATA):
         """Encrypt plain as TLS record (ctype), send, decrypt response."""
         assert self.tls is not None, "call connect() first"
         _log(f"  tx seq={self.tls.client_seq} plain_len={len(plain)}")
@@ -1162,7 +1162,7 @@ class SensorTLS(Sensor):
         rec  = make_tls_record(ctype, body)
         # Pad to 8-byte alignment (native format)
         pad  = (-len(rec)) % 8
-        self.ctrl_out(REQ_CMD, value=value,
+        self.ctrl_out(REQ_CMD, channel=channel,
                       data=rec + bytes(pad), label=f"TLS_OUT({label})")
         raw = self.ctrl_in(REQ_RESP, 4096, label=f"TLS_IN({label})")
         if not raw:
