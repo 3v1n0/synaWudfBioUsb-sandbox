@@ -166,6 +166,9 @@ DeleteResult   = namedtuple('DeleteResult',   ['status'])
 DeviceInfo     = namedtuple('DeviceInfo',     ['serial', 'firmware_major', 'firmware_minor', 'raw'])
 StorageMeta    = namedtuple('StorageMeta',    ['store_size', 'num_entries'])
 BootStatus     = namedtuple('BootStatus',     ['state', 'raw'])
+PairingState   = namedtuple('PairingState',   ['host_pubkey', 'client_privkey_be',
+                                               'client_pubkey_x_le', 'client_cert',
+                                               'dev_x_be', 'dev_y_be'])
 TlsRecord      = namedtuple('TlsRecord',      ['rtype', 'body'])
 DeviceCert     = namedtuple('DeviceCert',     ['raw', 'body', 'sig_der', 'dev_x_be', 'dev_y_be'])
 ChallengeResponse = namedtuple('ChallengeResponse',
@@ -1376,7 +1379,7 @@ class SensorTLS(Sensor):
                     _log(f"  Server Finished decrypt failed: {exc}")
 
         self.tls = state
-        self._pairing = dict(
+        self._pairing = PairingState(
             host_pubkey=host_pubkey,
             client_privkey_be=client_privkey_be,
             client_pubkey_x_le=client_pubkey_x_le,
@@ -1455,7 +1458,7 @@ class SensorTLS(Sensor):
         print("  Re-initialising device...")
         self.init_device()
         print("  Re-establishing TLS session...")
-        self.connect(**self._pairing)
+        self.connect(**self._pairing._asdict())
         print("  Session ready.")
 
     def cancel_session(self):
