@@ -1666,7 +1666,11 @@ class BiometricSensor(SensorTLS):
         return matched
 
     def _list_entries(self):
-        """Fetch all entry blobs via 9f01. Returns list of 16-byte entries."""
+        """Fetch all entry blobs via 9f01. Returns list of 16-byte entries.
+        Must init storage before FETCH_FIRST (device rejects with TLS
+        Alert 022f otherwise, corrupting the session)."""
+        self.storage_query_init(1)
+        self.storage_query_init(2)
         resp = self.tls_send(
             bytes.fromhex('9f01' + '00' * 19),
             value=2, label="FETCH_FIRST")
@@ -1696,24 +1700,40 @@ class BiometricSensor(SensorTLS):
 
     def erase_database(self):
         """
-        Delete all enrolled records matching b.exe's exact
-        IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE sequence
+        Erase all records matching b.exe's exact clear-db sequence
         (traced with PROTO_TRACE=1 on 2026-05-31):
+
           1. FETCH_FIRST (9f01) → list entries
-          2. For each entry: a001 (SELECT) + a301 (DELETE)
-          3. a401 / a402 / a403 (finalise)
-          4. STORAGE_QUERY_INIT ×2 + STORAGE_QUERY_ALL (verify)
+          2. Find the first (manager) entry — a001 returns all zeros
+          3. a301 DELETE_ENTRY on the manager entry only
+          4. a401 / a402 / a403 (finalise)
+          5. STORAGE_QUERY_INIT ×2 + STORAGE_QUERY_ALL (verify)
+
+        Deleting just the manager entry + finalise clears ALL records.
+        The first entry returned by FETCH_FIRST is a special storage
+        manager (not a normal biometric entry). Deleting all entries
+        individually is unnecessary — the manager + finalise does it.
         """
         entries = self._list_entries()
-        if not entries:
-            print("  No entries (database may be empty)")
-            return True
-        print(f"  Entries: {len(entries)}")
-
-        for ent in entries:
-            if not self.delete_record(ent):
-                print(f"  delete failed for {ent[:8].hex()}")
-                return False
+        if entries:
+            first = entries[0]
+            r = self.tls_send(
+                bytes.fromhex('a001000000') + first,
+                value=2, label="SELECT_FIRST_ENTRY")
+            if r is not None:
+                if r == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00':
+                    print("  First entry is the storage manager (all zeros)")
+                else:
+                    print(f"  First entry has data: {r.hex()}")
+            r = self.tls_send(
+                bytes.fromhex('a301000000') + first,
+                value=2, label="DELETE_MANAGER")
+            if r == b'\x00\x00\x03\x00':
+                print(f"  Manager entry deleted, clearing all records...")
+            else:
+                print(f"  WARNING: delete manager returned {r.hex()}")
+        else:
+            print("  No entries found (database may already be empty)")
 
         return self._finalise_erase()
 
