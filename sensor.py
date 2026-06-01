@@ -1532,7 +1532,8 @@ class BiometricSensor(SensorTLS):
         ctx is the enrollment context byte extracted from CAPTURE_DATA
         response[-2:] (LE u16).  Returns 18-byte response.
         """
-        payload = CMD_SENSOR_STATUS.opcode + bytes([ctx]) + CMD_SENSOR_STATUS.body
+        payload = (CMD_SENSOR_STATUS.opcode + bytes([ctx])
+                   + CMD_SENSOR_STATUS.sep + CMD_SENSOR_STATUS.body)
         return self.tls_send(payload, value=CMD_SENSOR_STATUS.value,
                              label=f"{CMD_SENSOR_STATUS.label}(ctx={ctx})")
 
