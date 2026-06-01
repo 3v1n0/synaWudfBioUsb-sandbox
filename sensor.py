@@ -334,7 +334,7 @@ CMD_QUERY_ENROLL_NEEDS   = Cmd(b'\x39', CH_DATA,
                                label="QUERY_ENROLL_NEEDS", sep=b'')
 CMD_QUERY_ENROLL_SIMPLE  = Cmd(b'\x39', CH_DATA,
                                bytes.fromhex(
-                                   '000000000000000000000020000000'
+                                   '000000000000000020000000'
                                    '00000000000000000000000000000000'
                                    '20000000000000000000000000000000'
                                    '00000000200000000000000000000000'
@@ -342,7 +342,7 @@ CMD_QUERY_ENROLL_SIMPLE  = Cmd(b'\x39', CH_DATA,
                                    '00000000000000000000000020000000'
                                    '00000000000000000000000000000000'
                                    '20000000000000000000000000'),
-                               label="QUERY_ENROLL_SIMPLE", sep=b'')
+                               label="QUERY_ENROLL_SIMPLE")
 CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
                                bytes.fromhex(
                                    'f4010000f4010000077f0020000000'
