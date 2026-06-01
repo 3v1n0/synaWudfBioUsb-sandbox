@@ -25,13 +25,13 @@ Key derivation (confirmed from native Wine trace):
 Certificate body (402 bytes total, device reads 400):
   [0:2]    run_marker = cli_rand[4:6]
   [2:402]  PairingData tag=1 verbatim (400 bytes):
-             [0:142]   HOST_142 (see below)
+             [0:142]   host public key blob (see below)
              [140:142] sep 00 02
              [142:144] u16le len 20 00 (= 32)
              [144:176] pub_key32 (32 bytes, from device pairing)
              [176:400] zero padding
 
-HOST_142 (142 bytes):
+host public key blob (142 bytes):
   [0:4]    3f5f1700
   [4:36]   ECS2 public X (LE, 32 bytes)
   [36:72]  zero padding (36 bytes)
@@ -39,13 +39,13 @@ HOST_142 (142 bytes):
   [104:142] zero padding (38 bytes)
 
 PairingData (local file or Wine registry):
-  tag=1: 400-byte host cert body (HOST_142 + header + pub_key + zeros)
+  tag=1: 400-byte host cert body (host public key blob + header + pub_key + zeros)
   tag=2: 32-byte ECS2 private key D (LE)
   tag=3: 400-byte device cert body (same structure as tag 1)
   tag=4: 420-byte unknown
   tag=0: 2-byte unknown
 
-USB wValue map (confirmed from b.exe trace):
+USB wValue map (confirmed from windows driver trace):
   Init cmds (plain):  OUT value=1 / IN value=0 (cert-section reads: IN value=0x8000)
   ClientHello:        OUT value=4 / IN value=0
   Bundle:             OUT value=0 / IN value=0
@@ -60,7 +60,7 @@ Class hierarchy:
   BiometricSensor -- extends SensorTLS; adds fingerprint commands
 
 Usage:
-  lxc exec kensington-playground -- python3 /path/sensor.py list-db
+  lxc exec kensington-playground -- python3 sensor.py list-db
   SENSOR_TRACE=1 ... python3 sensor.py list-db
 """
 
@@ -112,7 +112,7 @@ USB_ID       = os.environ.get("USB_ID", "047d:00f2")
 USB_TIMEOUT  = 10000   # ms
 SENSOR_TRACE = os.environ.get("SENSOR_TRACE", "0") == "1"
 
-# Deterministic RNG for replay/comparison against b.exe trace
+# Deterministic RNG for replay/comparison against windows driver trace
 _DET_RNG = os.environ.get("PROTO_DETERMINISTIC_RNG", "0") == "1"
 _det_ctr = 0
 
@@ -144,7 +144,7 @@ REQ_ACK      = 0x1a   # IN  -- phase 1 ack
 REQ_CMD      = 0x16   # OUT -- send command
 REQ_RESP     = 0x17   # IN  -- read response
 REQ_READY    = 0x14   # IN  -- ready check
-REQ_SHUTDOWN = 0x1b   # OUT -- vendor reset/shutdown (seen from b.exe)
+REQ_SHUTDOWN = 0x1b   # OUT -- vendor reset/shutdown (seen from windows driver)
 BM_OUT, BM_IN = 0x40, 0xc0
 
 # Pairing-data TLV tag numbers
@@ -760,14 +760,14 @@ class SensorTLS(Sensor):
         # ----- ClientHello -----
         # Extensions: ext_len=0x000c (12 bytes) covering two extensions.
         # supported_groups(0x0004)+ec_point_formats(0x000b).
-        # CH HS body = 71 bytes, total CH = 84 bytes (matched to b.exe trace).
+        # CH HS body = 71 bytes, total CH = 84 bytes (matched to windows driver trace).
         sess_id   = b'\x07' + b'\x00' * 7
         suites    = (b'\xc0\x05' + CIPHER_SUITE
                      + b'\x00\x3d\x00\x8d\x00\xa8\x00\xa9')
         # Extensions: ext_len=0x000a (10) is a device quirk -- it covers
         # supported_groups (6B) + ec_point_formats type+len (4B) only.
         # The ec_point_formats data (\x01\x00) sits outside ext_len field.
-        # CH HS body = 71 bytes, total CH = 84 bytes (matched to b.exe trace).
+        # CH HS body = 71 bytes, total CH = 84 bytes (matched to windows driver trace).
         ext_inner = b'\x00\x04\x00\x02\x00\x17\x00\x0b\x00\x02'  # 10B
         ch_body = (TLS_VER + cli_rand + sess_id
                    + struct.pack('>H', len(suites)) + suites
@@ -779,7 +779,7 @@ class SensorTLS(Sensor):
         state.feed_hs(ch_hs)
         _hexdump("CH record", ch_rec)
 
-        # Send CH: value=4 with 44000000 IOCTL header (confirmed b.exe trace)
+        # Send CH: value=4 with 44000000 IOCTL header (confirmed windows driver trace)
         self.ctrl_out(REQ_CMD, value=4,
                       data=b'\x44\x00\x00\x00' + ch_rec,
                       label="TLS_OUT(CH)")
@@ -869,12 +869,12 @@ class SensorTLS(Sensor):
         state.client_seq = 1   # next encrypted record is seq=1
         fin_rec = make_tls_record(TLS_HANDSHAKE, fin_cipher)
 
-        # Send bundle: value=0 per b.exe trace (wVal=0x0000 confirmed)
+        # Send bundle: value=0 per windows driver trace (wVal=0x0000 confirmed)
         burst = b'\x44\x00\x00\x00' + hs_rec + ccs_rec + fin_rec
         _hexdump("bundle", burst)
         self.ctrl_out(REQ_CMD, value=0, data=burst,
                       label="TLS_OUT(BUNDLE)")
-        # Device should respond immediately (b.exe does no delay)
+        # Device should respond immediately (windows driver does no delay)
         raw_sfin = self.ctrl_in(REQ_RESP, 0x200, label="TLS_IN(BUNDLE)")
 
         # ----- Server CCS + Finished -----
@@ -932,7 +932,7 @@ class SensorTLS(Sensor):
             return None
 
     def close(self):
-        """Send REQ_SHUTDOWN + TLS close_notify (matches b.exe)."""
+        """Send REQ_SHUTDOWN + TLS close_notify (matches windows driver)."""
         try:
             self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
                                    timeout=1000)
@@ -958,7 +958,7 @@ class BiometricSensor(SensorTLS):
     """
     High-level fingerprint database commands over the encrypted TLS channel.
 
-    Command value codes (from b.exe trace):
+    Command value codes (from windows driver trace):
       GET_RECORD_COUNT  -> value=6
       STORAGE_QUERY_INIT -> value=7
       STORAGE_QUERY_ALL  -> value=2
@@ -1384,18 +1384,33 @@ class BiometricSensor(SensorTLS):
         assert len(payload) <= 138, f"commit payload too large: {len(payload)}"
         return payload + b'\x00' * (138 - len(payload))
 
-    def enroll_get_guid(self):
+    def get_enroll_status(self):
         """
-        Send 9602 to get GUID after all samples captured.
-        Returns 16-byte GUID or None.
+        Send 9602 enrollment status query.
+
+        Returns a dict:
+          status:  LE16 at [0:2]  (0 = ok/continuing)
+          guid:    bytes at [2:18] (16B, all-zero if not complete)
+          sample_cnt: LE16 at [22:24] (0 if unavailable)
+          raw:     full response bytes
+
+        When guid is non-zero, enrollment is complete and caller
+        should commit.  When sample_cnt increments vs last call,
+        the capture was accepted by the device.
         """
         resp = self.tls_send(
             bytes.fromhex('9602000000'),
-            value=2, label="ENROLL_GET_GUID")
-        if resp is None or len(resp) < 18:
+            value=2, label="ENROLL_STATUS")
+        if resp is None:
             return None
-        # GUID at [2:18] in 82-byte response
-        return resp[2:18]
+        rlen = len(resp)
+        status = struct.unpack_from('<H', resp, 0)[0] if rlen >= 2 else 0xffff
+        guid = resp[2:18] if rlen >= 18 else b'\x00' * 16
+        if guid == b'\x00' * 16:
+            guid = None
+        sample_cnt = struct.unpack_from('<H', resp, 22)[0] if rlen >= 24 else None
+        return dict(status=status, guid=guid,
+                    sample_cnt=sample_cnt, raw=resp)
 
     def storage_commit(self, payload):
         """
@@ -1526,7 +1541,7 @@ class BiometricSensor(SensorTLS):
         """
         Unpair device: clear local PairingData and reset device state.
 
-        Replicates b.exe reset-ownership: sends IOCTL-equivalent to
+        Replicates windows driver reset-ownership: sends IOCTL-equivalent to
         device, closes TLS, REQ_SHUTDOWN, then deletes pairing.dat.
         No USB unpair command exists on this device — it's a
         software-only operation (registry cleanup on Windows).
@@ -1577,10 +1592,20 @@ class BiometricSensor(SensorTLS):
         """
         Send 9901 match result query.
 
-        Returns (status_code, guid_or_None):
-          status_code = 0x0000 on success/match, 0x0509 for no-match,
-                        or other device error codes.
-          guid_or_None = 16-byte matched GUID or None.
+        Response layout (66 bytes, from Ghidra/static analysis):
+          [0x00:0x02]  status code (u16 LE): 0x0000=match, 0x0509=no-match
+          [0x02:0x12]  GUID (16 bytes)
+          [0x12:0x16]  qm_struct_size (u32 LE, expected 0x24=36)
+          [0x16:0x1e]  extra sizes (2x u32)
+          [0x1e:0x22]  matchScore     (i32 LE)  -- Match-on-Chip result
+          [0x22:0x26]  matchIndex     (u32 LE)
+          [0x26:0x2a]  matchStrength  (u32 LE)
+          [0x2a:0x2e]  templateUpdate (u32 LE)  -- inferred; qm+12 not explicit in decompiled code
+          [0x2e:0x42]  remaining qm fields (20 bytes)
+
+        Returns (status, guid, match_score, match_index,
+                 match_strength, template_update)
+        or None on TLS error.
         """
         r = self.tls_send(
             bytes.fromhex('99010000000000000000000000'),
@@ -1588,13 +1613,21 @@ class BiometricSensor(SensorTLS):
         if not r or len(r) < 2:
             return None
         status = struct.unpack('<H', r[:2])[0]
-        if len(r) >= 18:
-            return status, r[2:18]
-        return status, None
+        guid = r[0x02:0x12] if len(r) >= 18 else None
+
+        match_score = match_index = match_strength = template_update = None
+        if (len(r) >= 0x42
+                and struct.unpack('<I', r[0x12:0x16])[0] == 0x24):
+            match_score     = struct.unpack('<i', r[0x1e:0x22])[0]
+            match_index     = struct.unpack('<I', r[0x22:0x26])[0]
+            match_strength  = struct.unpack('<I', r[0x26:0x2a])[0]
+            template_update = struct.unpack('<I', r[0x2a:0x2e])[0]
+
+        return status, guid, match_score, match_index, match_strength, template_update
 
     def identify_all(self):
         """
-        Full identify-all sequence matching b.exe trace.
+        Full identify-all sequence matching windows driver trace.
         Loads all enrolled records, captures a finger, matches
         against all loaded templates, and returns the matched
         16-byte GUID (or None if no match / error).
@@ -1682,7 +1715,8 @@ class BiometricSensor(SensorTLS):
         if mr is None:
             print("  MATCH_RESULT failed (TLS error)")
             return None
-        status, matched = mr
+        status, matched, score, idx, strength, tupd = mr
+        _log(f"  matchScore={score} matchIndex={idx} matchStrength={strength} templateUpdate={tupd}")
         if status != 0:
             print(f"  No match (status=0x{status:04x})")
             return None
@@ -1738,7 +1772,8 @@ class BiometricSensor(SensorTLS):
         if mr is None:
             print("  MATCH_RESULT failed (TLS error)")
             return None
-        status, matched = mr
+        status, matched, score, idx, strength, tupd = mr
+        _log(f"  matchScore={score} matchIndex={idx} matchStrength={strength} templateUpdate={tupd}")
         if status != 0:
             print(f"  No match (status=0x{status:04x})")
             return None
@@ -1766,7 +1801,7 @@ class BiometricSensor(SensorTLS):
     def erase_database(self):
         """
         Erase all records from device storage using the TLS-level
-        clear sequence (traced from b.exe clear-db 2026-06-01):
+        clear sequence (traced from windows driver clear-db 2026-06-01):
 
           1. STORAGE_QUERY_ALL to get GUIDs (loads templates)
           2. FETCH_FIRST → list of entry handles
@@ -1899,11 +1934,6 @@ class BiometricSensor(SensorTLS):
         return struct.unpack('<H', cap_resp[-2:])[0]
 
     @staticmethod
-    def _has_guid(resp):
-        """True if a 9602 response contains a valid GUID at [2:18]."""
-        return resp is not None and len(resp) >= 18 and resp[2:18] != b'\x00' * 16
-
-    @staticmethod
     def _parse_template_status(resp):
         """
         Parse ENROLL_TEMPLATE (39f4) response.
@@ -1931,7 +1961,7 @@ class BiometricSensor(SensorTLS):
         return ts, pc, rd
 
     def _enroll_one_sample(self, sample_num, max_samples):
-        """One enrollment sample, matching b.exe trace exactly.
+        """One enrollment sample, matching windows driver trace exactly.
 
         Always completes the full 11-command sequence, even on errors,
         to keep device protocol state consistent.  Returns:
@@ -2002,37 +2032,37 @@ class BiometricSensor(SensorTLS):
             _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0]}")
         self.update_enrollment_ack()
 
-        # 9602 enrollment status
-        r9602 = self.tls_send(bytes.fromhex('9602000000'),
-                               value=2, label="ENROLL_STATUS")
-        if self._has_guid(r9602):
-            guid = r9602[2:18]
-            print(f"  GUID: {guid.hex()}")
-            return True, guid
+        es = self.get_enroll_status()
+        if es is None:
+            print("  ENROLL_STATUS failed")
+            return False, None
+        _log(f"  ENROLL_STATUS: status=0x{es['status']:04x}"
+             f" guid={'yes' if es['guid'] else 'no'}"
+             f" sample_cnt={es['sample_cnt']}")
 
-        # 2-byte 9602 response = status code (not GUID)
-        if r9602 is not None and len(r9602) == 2:
-            status_le = struct.unpack('<H', r9602)[0]
-            if r9602 != b'\x00\x00':
-                print(f"  9602 error: status=0x{status_le:04x}")
-                return False, status_le  # terminal; caller aborts
-            # 0x0000 = "not done yet, keep going" (normal)
+        # GUID present → enrollment complete, ready to commit
+        if es['guid']:
+            print(f"  GUID: {es['guid'].hex()}")
+            return True, es['guid']
 
-        # Longer response carries sample count at [22:24] LE16.
-        # If it incremented vs previous sample, the capture was accepted.
-        if r9602 is not None and len(r9602) >= 24:
-            new_cnt = struct.unpack_from('<H', r9602, 22)[0]
+        # Non-zero status = terminal error
+        if es['status'] != 0:
+            print(f"  ENROLL_STATUS error: 0x{es['status']:04x}")
+            return False, es['status']
+
+        # Sample count check — does the device think we made progress?
+        if es['sample_cnt'] is not None:
             prev = getattr(self, '_prev_enroll_cnt', None)
-            self._prev_enroll_cnt = new_cnt
+            self._prev_enroll_cnt = es['sample_cnt']
             if prev is not None:
-                if new_cnt > prev:
+                if es['sample_cnt'] > prev:
                     ok = True
-                    _log(f"  ENROLL count {prev}→{new_cnt}")
+                    _log(f"  ENROLL count {prev}→{es['sample_cnt']}")
                 else:
                     ok = False
-                    _log(f"  ENROLL count stuck at {new_cnt}")
+                    _log(f"  ENROLL count stuck at {es['sample_cnt']}")
             else:
-                _log(f"  ENROLL initial count={new_cnt}")
+                _log(f"  ENROLL initial count={es['sample_cnt']}")
 
         if ok:
             print(f"  Sample {sample_num} OK")
@@ -2153,7 +2183,7 @@ def main():
         _host_privkey_mod = NIST256p.order - 1
         _host_privkey_int = (_host_privkey_int % _host_privkey_mod) + 1
         _host_privkey_be  = _host_privkey_int.to_bytes(32, 'big')
-        # Compute HOST_142 from host pubkey
+        # Compute host public key blob from host pubkey
         _host_pubkey_Q = NIST256p.generator * _host_privkey_int
         _host_pubkey_x_le = _host_pubkey_Q.x().to_bytes(32, 'big')[::-1]
         _host_pubkey_y_le = _host_pubkey_Q.y().to_bytes(32, 'big')[::-1]
