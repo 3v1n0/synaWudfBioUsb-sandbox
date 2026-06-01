@@ -2103,30 +2103,32 @@ class BiometricSensor(SensorTLS):
             print(f"  GUID: {guid.hex()}")
             return True, guid
 
-        # Non-zero status = capture rejected (bad quality, etc.)
-        if status != 0:
-            errs = getattr(self, '_enroll_errors', 0) + 1
-            self._enroll_errors = errs
-            print(f"  Capture rejected by device (status=0x{status:04x})"
-                  f" {errs}/3 — lift and retry")
-            if errs >= 3:
-                print(f"  3 consecutive rejections — aborting enrollment")
-                return False, status
-            return False, None
-
-        # Sample count check — does the device think we made progress?
+        # Sample count check — the device counts accepted samples
+        # in the 9602 response at [22:24].  If it incremented,
+        # this capture was counted regardless of the 9602 status.
+        counted = False
         if sample_cnt is not None:
             prev = getattr(self, '_prev_enroll_cnt', None)
             self._prev_enroll_cnt = sample_cnt
             if prev is not None:
-                if sample_cnt > prev:
-                    ok = True
+                counted = sample_cnt > prev
+                if counted:
                     _log(f"  ENROLL count {prev}→{sample_cnt}")
                 else:
-                    ok = False
                     _log(f"  ENROLL count stuck at {sample_cnt}")
             else:
                 _log(f"  ENROLL initial count={sample_cnt}")
+
+        if counted:
+            ok = True
+            self._enroll_errors = 0
+        else:
+            ok = False
+            if status != 0:
+                print(f"  Capture rejected (status=0x{status:04x})"
+                      f" — lift and retry")
+            else:
+                print(f"  Finger released too early")
 
         if ok:
             self._enroll_errors = 0
