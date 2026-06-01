@@ -1861,6 +1861,65 @@ class BiometricSensor(SensorTLS):
             print("  OK -- no records remain")
         return not remaining
 
+    def clear_local_db(self):
+        """
+        Delete only accessible GUIDs (current pairing namespace).
+
+        Uses the manager-entry deletion approach but filters to
+        GUIDs whose 9f03 returns a valid record handle.  Foreign-
+        namespace GUIDs (from other pairing sessions) are left
+        untouched.  Finalises with a401/a402/a403.
+
+        After this, only GUIDs from other sessions remain in 9f02.
+        """
+        print("  Querying records...")
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        all_guids = self.storage_query_all()
+        accessible = [g for g in all_guids if self._is_accessible_guid(g)]
+        if not accessible:
+            print("  No accessible GUIDs in current namespace")
+            return True
+        print(f"  {len(accessible)} accessible GUID(s) to delete"
+              f" ({len(all_guids) - len(accessible)} foreign, skipped)")
+
+        # Find managers at matching positions
+        entries = self._list_entries()
+        managers = self._find_managers(entries)
+        if len(managers) < len(accessible):
+            print(f"  WARNING: {len(managers)} managers <"
+                  f" {len(accessible)} accessible GUIDs")
+            return False
+
+        targets = managers[:len(accessible)]
+        print(f"  Deleting {len(targets)} manager(s)...")
+        for ent in targets:
+            r = self.tls_send(bytes.fromhex('a301000000') + ent,
+                              value=2, label="DELETE_MANAGER")
+            if r != b'\x00\x00\x03\x00':
+                print(f"  WARNING: delete returned {r.hex()}")
+
+        # Finalise
+        for cmd, label in [('a401', 'FINALISE_1'),
+                           ('a402', 'FINALISE_2'),
+                           ('a403', 'FINALISE_3')]:
+            r = self.tls_send(bytes.fromhex(cmd), value=7, label=label)
+            if r is None:
+                print(f"  {label} failed"); return False
+
+        # Verify
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        remaining = self.storage_query_all()
+        still_accessible = [g for g in remaining
+                            if self._is_accessible_guid(g)]
+        if still_accessible:
+            print(f"  WARNING: {len(still_accessible)} accessible"
+                  f" GUID(s) still present")
+            return False
+        print(f"  OK -- {len(remaining)} foreign GUID(s) remain")
+        return True
+
     def _commit_enrollment(self, guid, label="FP1"):
         """
         Full commit finalization sequence (5 steps + close).
@@ -2127,11 +2186,12 @@ class BiometricSensor(SensorTLS):
 
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in (
-            'list-db', 'list-db-all', 'enroll', 'clear-db', 'identify-all',
-            'identify', 'reset-ownership', 'delete-record'):
+            'list-db', 'list-db-all', 'enroll', 'clear-db',
+            'clear-local-db', 'identify-all', 'identify',
+            'reset-ownership', 'delete-record'):
         print("Usage: sensor.py list-db|list-db-all|enroll|clear-db|"
-              "identify-all|identify|reset-ownership|delete-record "
-              "[guid <hex32>]")
+              "clear-local-db|identify-all|identify|reset-ownership|"
+              "delete-record [guid <hex32>]")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -2234,6 +2294,9 @@ def main():
     elif sys.argv[1] == 'clear-db':
         print("clear-db...")
         sensor.erase_database()
+    elif sys.argv[1] == 'clear-local-db':
+        print("clear-local-db...")
+        sensor.clear_local_db()
     elif sys.argv[1] == 'identify':
         print("identify...")
         guid = sensor.identify()
