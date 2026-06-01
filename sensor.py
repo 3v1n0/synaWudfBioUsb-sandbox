@@ -224,29 +224,25 @@ IOCTL_HDR = b'\x44\x00\x00\x00'
 class Cmd:
     """Descriptor for a fixed-layout app-layer command."""
 
-    def __init__(self, opcode, value, body=b'', label="", ctype=None):
+    def __init__(self, opcode, value, body=b'', label=""):
         """
         opcode -- 1 or 2 bytes identifying the command (cmd + subcmd)
         value  -- TLS channel selector (2, 6 or 7)
         body   -- fixed payload bytes that follow the opcode (may be empty)
         label  -- default trace label; can be overridden in send()
-        ctype  -- TLS content type (default: TLS_APP_DATA); use TLS_ALERT
-                  for close_notify
         """
         self.opcode = opcode
         self.value  = value
         self.body   = body
         self.label  = label
-        self.ctype  = ctype  # resolved to TLS_APP_DATA in send() if None
 
     def build(self, arg=b''):
         """Return the full payload bytes, appending `arg` after opcode+body."""
         return self.opcode + self.body + arg
 
-    def send(self, dev, arg=b'', label=None):
+    def send(self, dev, arg=b'', label=None, ctype=TLS_APP_DATA):
         """Build and send via dev.tls_send(); returns response.
         label overrides the default cmd label when provided and non-empty."""
-        ctype = self.ctype if self.ctype is not None else TLS_APP_DATA
         return dev.tls_send(self.build(arg), value=self.value,
                             label=label if label else self.label,
                             ctype=ctype)
@@ -316,9 +312,8 @@ CMD_STORAGE_QUERY_INIT   = Cmd(b'\x9e\x01', CH_STORE, label="STORAGE_QUERY_INIT"
 CMD_STORAGE_WIPE_1       = Cmd(b'\xa4\x01', CH_STORE, label="STORAGE_WIPE_1")
 CMD_STORAGE_WIPE_2       = Cmd(b'\xa4\x02', CH_STORE, label="STORAGE_WIPE_2")
 CMD_STORAGE_WIPE_3       = Cmd(b'\xa4\x03', CH_STORE, label="STORAGE_WIPE_3")
-# TLS session teardown -- sent as a TLS Alert record, not application data
-CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY",
-                               ctype=TLS_ALERT)
+# TLS session teardown -- must be sent as a TLS Alert record, not app data
+CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY")
 
 # --- Query / template (value=2, fixed 125-byte payloads) ---
 CMD_QUERY_ENROLL_NEEDS   = Cmd(b'\x39', CH_DATA,
@@ -1191,7 +1186,7 @@ class SensorTLS(Sensor):
         # TLS close_notify as Alert record (ctype=0x15)
         if self.tls is not None:
             try:
-                CMD_CLOSE_NOTIFY.send(self)
+                CMD_CLOSE_NOTIFY.send(self, ctype=TLS_ALERT)
             except Exception:
                 pass
         self.tls = None
@@ -1960,7 +1955,7 @@ class BiometricSensor(SensorTLS):
 
     def close_notify(self):
         """Send TLS close_notify alert. Returns response."""
-        return CMD_CLOSE_NOTIFY.send(self)
+        return CMD_CLOSE_NOTIFY.send(self, ctype=TLS_ALERT)
 
     def reset_ownership(self):
         """
