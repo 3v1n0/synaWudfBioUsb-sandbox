@@ -2769,7 +2769,6 @@ def main():
             sensor.discard_enrollment()
         else:
             sensor.cancel_session()
-            return
 
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
