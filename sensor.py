@@ -370,9 +370,8 @@ CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
 # Values 0x01,0x03,0x05,0x07,0x08,0x10,0x20,0x40,0x80 all rejected.
 # Driver hardcodes eventMask=0x180 in CCaptureImage producing 0x06.
 CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,
-                               body=b'\x06' + b'\x00' * 15 +
-                                    b'\x06' + b'\x00' * 19,
-                               sep=b'', label="CAPTURE_DATA")
+                               body=b'\x00' * 13 + b'\x06' + b'\x00' * 19,
+                               sep=b'\x06\x00\x00', label="CAPTURE_DATA")
 # STATUS_EXT param=4: 86 00 <00*31> 04000000 (37B)
 CMD_STATUS_EXT_4         = Cmd(b'\x86', CH_DATA,
                                b'\x00' * 31 + b'\x04\x00\x00\x00',
