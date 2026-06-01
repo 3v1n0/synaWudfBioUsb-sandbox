@@ -162,6 +162,10 @@ TLS_HANDSHAKE = 0x16
 TLS_CHANGE_CS = 0x14
 TLS_APP_DATA  = 0x17
 TLS_ALERT     = 0x15
+
+# TLS alert levels (RFC 5246 section 7.2)
+TLS_ALERT_WARNING = 1
+TLS_ALERT_FATAL   = 2
 CIPHER_SUITE  = b'\xc0\x2e'
 
 # ---------------------------------------------------------------------------
@@ -942,13 +946,14 @@ class SensorTLS(Sensor):
             rbody = raw[5: 5 + rlen]
             try:
                 pt = self.tls.decrypt(TLS_ALERT, rbody)
-                level = {1: 'warning', 2: 'fatal'}.get(pt[0], f'level={pt[0]}')
+                level = {TLS_ALERT_WARNING: 'warning',
+                         TLS_ALERT_FATAL:   'fatal'}.get(pt[0], f'level={pt[0]}')
                 try:
                     desc = ssl.AlertDescription(pt[1]).name
                 except Exception:
                     desc = f'0x{pt[1]:02x}'
                 _log(f"  TLS Alert: {level} {desc}")
-                if pt[0] == 2:  # fatal
+                if pt[0] == TLS_ALERT_FATAL:
                     return None
                 # warning close_notify is expected -- not an error
             except Exception as exc:
