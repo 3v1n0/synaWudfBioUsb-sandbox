@@ -159,7 +159,7 @@ TLS_ALERT     = 0x15
 CIPHER_SUITE  = b'\xc0\x2e'
 
 # ---------------------------------------------------------------------------
-# Fallback device ECDH static key (from ECK1 export in Wine trace)
+# Identity key (P_SHA256 D) — for challenge signature only
 # ---------------------------------------------------------------------------
 
 # Derived from P_SHA256(hardcoded_constants, "HS_KEY_PAIR_GEN")
@@ -183,27 +183,10 @@ def _derive_identity_key():
 IDENTITY_D_LE = _derive_identity_key()
 IDENTITY_D_BE = bytes(reversed(IDENTITY_D_LE))
 
-# Compute host pubkey from D*G
 from ecdsa import NIST256p
-_G = NIST256p.generator
-_host_Q = _G * int.from_bytes(IDENTITY_D_LE, 'little')
-HOST_X_BE = _host_Q.x().to_bytes(32, 'big')
-HOST_Y_BE = _host_Q.y().to_bytes(32, 'big')
 
-# Device static ECDH public key (factory-permanent, from ECK1 export)
-DEV_X_BE = bytes.fromhex(
-    '63df20dd820af4274c9e9a1854f02102'
-    'bc0e1b76b8746817b68c440122df20bf')
-DEV_Y_BE = bytes.fromhex(
-    '4ef37a81815ead6a51b145aadbb3073f'
-    '60bedb82ea38c34324983109df6fc0f3')
-
-# HOST_142 from identity key (for challenge/TLS when no pairing data)
-_HOST_X_LE = bytes(reversed(HOST_X_BE))
-_HOST_Y_LE = bytes(reversed(HOST_Y_BE))
-HOST_142_IDENTITY = (b'\x3f\x5f\x17\x00' + _HOST_X_LE
-                     + b'\x00' * 36 + _HOST_Y_LE + b'\x00' * 38)
-assert len(HOST_142_IDENTITY) == 142
+# Device static ECDH public key is obtained from Tag3 (device cert)
+# during the challenge/pairing flow — never hardcoded.
 
 # ---------------------------------------------------------------------------
 # Logging helpers
@@ -394,8 +377,7 @@ def load_pairing_data():
 
 def get_pairing_fields(tlvs):
     """
-    Extract (host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le)
-    from a PairingData TLV dict.
+    Device ECDH static key must be present in Tag 3.
     """
     cert_data = tlvs.get(1)
     if not cert_data or len(cert_data) < 142:
@@ -404,22 +386,11 @@ def get_pairing_fields(tlvs):
         return None
     host_142    = cert_data[:142]
     eck2_le     = tlvs.get(2, b'\x00' * 32)
-    # Tag 1 layout: HOST_142[0:142] + zeros[142:140] + header[140:144](00 02 20 00)
-    # + pub_key32[144:176](ECS2 public key X, LE) + zeros[176:400]
     eck2_pub_le = (cert_data[144:176]
                    if len(cert_data) >= 176 else b'\x00' * 32)
-    # Device ECDH static key from Tag 3 (host cert), fallback to constants
-    dev_x_be, dev_y_be = DEV_X_BE, DEV_Y_BE
+    # Device ECDH static key from Tag 3 (device certificate)
     host_cert = tlvs.get(3)
-    if (host_cert and len(host_cert) >= 142
-            and host_cert[:4] == b'\x3f\x5f\x17\x00'):
-        x_le = host_cert[4:36]
-        off  = 36
-        while off < 142 and host_cert[off] == 0:
-            off += 1
-        if off < 142:
-            dev_x_be = x_le[::-1]
-            dev_y_be = host_cert[off:off + 32][::-1]
+    dev_x_be, dev_y_be = dev_key_from_tag3(host_cert)
     return host_142, eck2_le, cert_data, dev_x_be, dev_y_be, eck2_pub_le
 
 
@@ -427,9 +398,12 @@ def dev_key_from_tag3(tag3):
     """
     Extract device ECDH static key (x_be, y_be) from a 400-byte Tag3 blob.
     Tag3 layout matches Tag1: header(4) + X_LE(32) + Y_LE(32) + padding.
+    Raises ValueError if tag3 is missing or invalid.
     """
     if not tag3 or len(tag3) < 142 or tag3[:4] != b'\x3f\x5f\x17\x00':
-        return DEV_X_BE, DEV_Y_BE
+        raise ValueError(
+            f"Invalid device cert tag3: {len(tag3) if tag3 else 0}B, "
+            f"header={tag3[:4].hex() if tag3 else 'none'}")
     x_le = tag3[4:36]
     off  = 36
     while off < 142 and tag3[off] == 0:
@@ -1952,11 +1926,6 @@ def main():
                     + b'\x00' * 36 + _host_y_le + b'\x00' * 38)
         eck2_be       = _tag2_d_be  # Tag2 for TLS CertVerify
         eck2_pub_le   = _host_x_le  # pubkey X for cert body
-        dev_x_be      = DEV_X_BE
-        dev_y_be      = DEV_Y_BE
-        # Always send challenge when no pairing data — the device may
-        # accept a fresh pairing signed with P_SHA256 D even if
-        # REQ_READY returns zero (already-paired state).
         print("  Sending pairing challenge...")
         try:
             tag1, tag3 = sensor.send_challenge(host_142, IDENTITY_D_BE)
@@ -1965,14 +1934,11 @@ def main():
             dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
             tag3_for_save = tag3
             print("  Challenge accepted")
-        except RuntimeError as exc:
+        except (RuntimeError, ValueError) as exc:
             print(f"  Challenge failed: {exc}")
-            print("  Falling back to unpaired TLS (may fail)")
-            cert_data_398 = (host_142 + b'\x00\x02'
-                             + struct.pack('<H', 32) + b'\x00' * 32
-                             + b'\x00' * 222)
-            assert len(cert_data_398) == 400, len(cert_data_398)
-            tag3_for_save = None
+            print("  Cannot proceed without device key -- stopping")
+            sensor.close()
+            sys.exit(1)
 
     # ----- TLS handshake -----
     print("TLS handshake...")
@@ -1985,22 +1951,11 @@ def main():
         sys.exit(1)
     print("  TLS OK")
 
-    # ----- Save PairingData if we used fresh keys or got new tags -----
-    if not os.path.exists(PAIRING_FILE):
-        if tag3_for_save is not None:
-            _save_pairing_tlv({1: cert_data_398,
-                               2: bytes(reversed(eck2_be)),
-                               3: tag3_for_save})
-        else:
-            host_x_le = bytes(reversed(dev_x_be))
-            host_y_le = bytes(reversed(dev_y_be))
-            host_cert = (b'\x3f\x5f\x17\x00' + host_x_le
-                         + b'\x00' * 36 + host_y_le + b'\x00' * 296)
-            pub_key = eck2_pub_le or b'\x00' * 32
-            cb = (host_142 + b'\x00\x02' + struct.pack('<H', 32)
-                  + pub_key + b'\x00' * 222)
-            _save_pairing_tlv({1: cb, 2: bytes(reversed(eck2_be)),
-                               3: host_cert})
+    # ----- Save PairingData if we used fresh keys -----
+    if tag3_for_save is not None and not os.path.exists(PAIRING_FILE):
+        _save_pairing_tlv({1: cert_data_398,
+                           2: bytes(reversed(eck2_be)),
+                           3: tag3_for_save})
 
     # ----- Biometric commands -----
     if sys.argv[1] == 'list-db':
