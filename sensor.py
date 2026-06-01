@@ -1776,10 +1776,12 @@ class BiometricSensor(SensorTLS):
                               username=None):
         """
         Dispatch to WinBIO or libfprint commit payload builder.
-        Set COMMIT_WINBIO=1 env var to use WinBIO format (for b.exe compat).
+        WinBIO format is used when COMMIT_WINBIO=1 is set, or when
+        USE_WINE_PAIRING_DATA is set (pairing came from Wine registry,
+        so b.exe compatibility is expected).
         Default is libfprint format.
         """
-        if os.environ.get('COMMIT_WINBIO'):
+        if os.environ.get('COMMIT_WINBIO') or os.environ.get('USE_WINE_PAIRING_DATA'):
             sid   = _rand(16)
             label = (f"FP{os.urandom(2).hex()}")[:7]
             return self._build_commit_payload_winbio(guid, sid, label)
