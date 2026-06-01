@@ -1576,7 +1576,6 @@ class BiometricSensor(SensorTLS):
             _log(f"  CAPTURE_DATA resp: {resp.hex()}")
         return resp, cs.sensor_status, cs.reject_detail
 
-    @staticmethod
     def _print_sensor_status(self, ctx=0, label=""):
         """Query and print human-readable SENSOR_STATUS."""
         ss = self.get_sensor_status(ctx)
@@ -2550,7 +2549,6 @@ class BiometricSensor(SensorTLS):
         print("  Commit done!")
         return True
 
-    @staticmethod
     @staticmethod
     def _extract_ctx(cap_resp):
         """Extract enrollment context from CAPTURE_DATA response[-2:] as LE u16."""
