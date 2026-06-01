@@ -424,6 +424,27 @@ typedef WINAPI DllGetClassObject_t(_In_ REFCLSID rclsid, _In_ REFIID riid, _Out_
 GUID DriverCLSID;
 static bool g_is_synaptics_inf = false;
 
+// ---------------------------------------------------------------------------
+// Experiment helpers: override Purpose/SubFactor via env vars at runtime
+//   CAPTURE_PURPOSE=<n>   overrides params.Purpose in enroll capture
+//                         (identify always uses WINBIO_PURPOSE_IDENTIFY)
+//   COMMIT_SUBFACTOR=<n>  overrides input.SubFactor in commit enrollment
+//                         default: WINBIO_ANSI_381_POS_RH_INDEX_FINGER (2)
+// ---------------------------------------------------------------------------
+static WINBIO_BIOMETRIC_SUBTYPE g_commit_subfactor()
+{
+    const char *v = getenv("COMMIT_SUBFACTOR");
+    if (v) return (WINBIO_BIOMETRIC_SUBTYPE)atoi(v);
+    return WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
+}
+
+static WINBIO_BIR_PURPOSE g_enroll_purpose()
+{
+    const char *v = getenv("CAPTURE_PURPOSE");
+    if (v) return (WINBIO_BIR_PURPOSE)atoi(v);
+    return WINBIO_PURPOSE_ENROLL_FOR_IDENTIFICATION;
+}
+
 // 1BEC7499-8881-4F2B-B01C-A1A907304AFC
 DEFINE_GUID(IID_IDriverEntry, 0x1BEC7499, 0x8881, 0x4F2B, 0xB0, 0x1C, 0xA1, 0xA9, 0x07, 0x30, 0x4A, 0xFC);
 
@@ -1926,7 +1947,7 @@ commitEnrollment()
             input.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
             input.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
         }
-        input.SubFactor = WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
+        input.SubFactor = g_commit_subfactor();
         // input.SubFactor = WINBIO_ANSI_381_POS_RH_MIDDLE_FINGER;
         HLOG_USER("COMMIT_ENROLLMENT using new identity (Type=%lu, SubFactor=%u)\n",
             (unsigned long)input.Identity.Type,
@@ -2082,8 +2103,9 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
         WINBIO_CAPTURE_PARAMETERS params = {0};
 
         params.PayloadSize = sizeof(params);
-        params.Purpose = WINBIO_PURPOSE_ENROLL_FOR_IDENTIFICATION;
+        params.Purpose = g_enroll_purpose();
         // params.Purpose = WINBIO_PURPOSE_ENROLL;
+        HLOG_USER("enroll capture: Purpose=%u\n", (unsigned)params.Purpose);
         configure_capture_format(&params);
         params.Flags = WINBIO_DATA_FLAG_PROCESSED;
 
