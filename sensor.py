@@ -1235,23 +1235,34 @@ class BiometricSensor(SensorTLS):
         Parse 18-byte SENSOR_STATUS response from get_sensor_status().
 
         Structure (from trace analysis):
-          [0:2]   LE16 = 0x0000
-          [2:4]   LE16 = 0x0001 (response type?)
+          [0:2]   LE16 = 0x0000           (status)
+          [2:4]   LE16 = 0x0001           (response type)
           [4:6]   LE16 = 0x0000
-          [6:8]   LE16 = raw field A (varies per sensor state)
-          [8:10]  LE16 = raw field B (cumulative sample counter)
-          [10:14] LE32 = raw field C
-          [14:18] padding
+          [6:8]   LE16 = sensor mode      (1=armed, 2=data captured)
+          [8:10]  LE16 = sample counter   (per-enrollment 1..N, 0 in identify)
+          [10:12] LE16 = quality metric   (firmware-specific bitmask)
+          [12:16] LE32 = context value
+          [16:18] padding
 
-        These fields are NOT mapped to WINBIO_SENSOR_STATUS/REJECT_DETAIL
-        at the USB level. Returns (raw_A, raw_B, raw_C).
+        Returns (mode, sample, quality, context).
         """
-        if resp is None or len(resp) < 10:
-            return 0, 0, 0
-        a = struct.unpack_from('<H', resp, 6)[0]
-        b = struct.unpack_from('<H', resp, 8)[0]
-        c = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
-        return a, b, c
+        if resp is None or len(resp) < 12:
+            return 0, 0, 0, 0
+        mode = struct.unpack_from('<H', resp, 6)[0]
+        sample = struct.unpack_from('<H', resp, 8)[0]
+        quality = struct.unpack_from('<H', resp, 10)[0]
+        context = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
+        return mode, sample, quality, context
+
+    def _print_sensor_status(self, ctx=0, label=""):
+        """Query and print human-readable SENSOR_STATUS."""
+        resp = self.get_sensor_status(ctx)
+        mode, sample, quality, context = self._parse_sensor_status(resp)
+        mode_str = {1: "armed", 2: "data_rdy"}.get(mode, f"0x{mode:04x}")
+        print(f"  {label}Sensor: mode={mode_str}"
+              f" sample={sample} quality=0x{quality:04x}"
+              f" context={context}")
+        return mode, sample, quality, context
 
     def get_sensor_status(self, ctx=0):
         """
@@ -1624,7 +1635,7 @@ class BiometricSensor(SensorTLS):
             return None
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
-        print("  Finger ON")
+        self._print_sensor_status(ctx, label="capture: ")
 
         # 5. Interrupt 1 (capture armed)
         i1 = self.read_interrupt(timeout=60000)
@@ -1632,10 +1643,9 @@ class BiometricSensor(SensorTLS):
             print("  Finger removed")
             return None
         _log(f"  Interrupt 1: {i1.hex()}")
+        self._print_sensor_status(ctx, label="armed: ")
 
         # 6. Pre-capture queries
-        ss = self.get_sensor_status(0)
-        _log(f"  SENSOR_STATUS: {ss.hex() if ss else 'None'}")
         self.query_status_ext(4)
         self.query_enrollment_needs()
 
@@ -1659,7 +1669,7 @@ class BiometricSensor(SensorTLS):
         _log(f"  Interrupt 2: {i2.hex()}")
 
         # 8. Post-capture queries
-        self.get_sensor_status(0)
+        self._print_sensor_status(0, label="captured: ")
         self.query_enrollment_simple()
         self.query_status_ext(4)
         self.update_enrollment_ack()
@@ -1692,13 +1702,13 @@ class BiometricSensor(SensorTLS):
             print("  No finger detected")
             return None
         ctx = self._extract_ctx(cap)
-        print("  Finger ON")
+        self._print_sensor_status(ctx, label="capture: ")
 
         i1 = self.read_interrupt(timeout=60000)
         if i1 is None:
             print("  Finger removed"); return None
+        self._print_sensor_status(ctx, label="armed:   ")
 
-        self.get_sensor_status(0)
         self.query_status_ext(4)
         self.query_enrollment_needs()
 
@@ -1716,7 +1726,7 @@ class BiometricSensor(SensorTLS):
             print("  Finger removed before capture complete")
             return None
 
-        self.get_sensor_status(0)
+        self._print_sensor_status(0, label="captured: ")
         self.query_enrollment_simple()
         self.query_status_ext(4)
         self.update_enrollment_ack()
@@ -1941,7 +1951,7 @@ class BiometricSensor(SensorTLS):
             return False, None
         ctx = self._extract_ctx(cap)
         _log(f"  ctx={ctx}")
-        print("  Finger ON")
+        self._print_sensor_status(ctx, label="capture: ")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
         i1 = self.read_interrupt(timeout=60000)
@@ -1952,11 +1962,9 @@ class BiometricSensor(SensorTLS):
         _log(f"  Interrupt raw: {i1.hex()}")
         print(f"  Interrupt: type=0x{i1_type:02x}"
               f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})")
+        self._print_sensor_status(ctx, label="armed:   ")
 
         # Pre-capture queries (finger is being placed/held)
-        ss_resp = self.get_sensor_status(ctx)
-        ss_q, ql_q, rd_q = self._parse_sensor_status(ss_resp)
-        _log(f"  SENSOR_STATUS: raw_fields=({ss_q},{ql_q},{rd_q})")
         self.query_status_ext(4)
         r = self.query_enrollment_needs()
         if r is None:
@@ -1984,7 +1992,7 @@ class BiometricSensor(SensorTLS):
                   f" ({'capture armed' if i2_type==1 else 'data captured' if i2_type==2 else 'unknown'})")
 
         # Post-capture queries
-        self.get_sensor_status(0)
+        self._print_sensor_status(0, label="captured: ")
         self.query_enrollment_simple()
         ext4b = self.query_status_ext(4)
         if ext4b is not None:
