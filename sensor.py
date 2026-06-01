@@ -995,10 +995,18 @@ class SensorTLS(Sensor):
         Cancel an in-progress operation (identify, enroll, etc.) and
         turn off the sensor LED immediately.
 
-        dev.reset() resets the USB device state and turns the LED off
-        without terminating the TLS session -- subsequent commands
-        (list-db, identify, enroll) work normally after this call.
+        Sends REQ_SHUTDOWN as a best-effort courtesy matching b.exe's
+        shutdown sequence, then dev.reset() which turns the LED off
+        immediately and resets USB state without breaking the device's
+        TLS context for the next connection.
         """
+        try:
+            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
+                                   timeout=1000)
+            self.dev.ctrl_transfer(BM_IN,  REQ_ACK,      0, 0, 2,
+                                   timeout=1000)
+        except Exception as exc:
+            _log(f"  REQ_SHUTDOWN: {exc}")
         print("  Resetting USB device...")
         try:
             self.dev.reset()
