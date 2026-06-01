@@ -1582,7 +1582,6 @@ class BiometricSensor(SensorTLS):
                 return ss, rd
         return 2, 7  # generic reject
 
-    @staticmethod
     def capture_data(self):
         """
         Send CAPTURE_DATA (value=0x0002) and parse the 66-byte response.
@@ -2648,7 +2647,6 @@ class BiometricSensor(SensorTLS):
         print("  Commit done!")
         return True
 
-    @staticmethod
     @staticmethod
     def _parse_template_status(resp):
         """
