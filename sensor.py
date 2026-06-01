@@ -1388,14 +1388,16 @@ class BiometricSensor(SensorTLS):
         """
         Send status_query enrollment status query.
 
-        Returns (status, guid, sample_cnt) or None:
+        Returns (status, guid, sample_cnt, extra) or None:
           status:     LE16 at [0:2]  (0 = ok/continuing)
           guid:       bytes at [2:18] (16B, None if not complete)
           sample_cnt: LE16 at [22:24] (None if unavailable)
+          extra:      dict with extra progress fields or None
 
-        When guid is non-None, enrollment is complete and caller
-        should commit.  When sample_cnt increments vs last call,
-        the capture was accepted by the device.
+        The extra dict contains counters that track enrollment
+        progress.  When ALL counters plateau (no change), the
+        device has extracted enough data and enrollment is
+        ready to finalize.
         """
         resp = self.tls_send(
             bytes.fromhex('9602000000'),
@@ -1408,7 +1410,15 @@ class BiometricSensor(SensorTLS):
         if guid == b'\x00' * 16:
             guid = None
         sample_cnt = struct.unpack_from('<H', resp, 22)[0] if rlen >= 24 else None
-        return status, guid, sample_cnt
+        extra = None
+        if rlen >= 54:
+            extra = {
+                'sample_cnt': sample_cnt,
+                'progress_sum': struct.unpack_from('<H', resp, 24)[0],
+                'samples_used': struct.unpack_from('<H', resp, 52)[0],
+                'size_flag': struct.unpack_from('<I', resp, 48)[0],
+            }
+        return status, guid, sample_cnt, extra
 
     def storage_commit(self, payload):
         """
@@ -2093,49 +2103,72 @@ class BiometricSensor(SensorTLS):
         if enroll is None:
             print("  ENROLL_STATUS failed")
             return False, None
-        status, guid, sample_cnt = enroll
+        status, guid, sample_cnt, extra = enroll
         _log(f"  ENROLL_STATUS: status=0x{status:04x}"
              f" guid={'yes' if guid else 'no'}"
-             f" sample_cnt={sample_cnt}")
+             f" sample_cnt={sample_cnt}"
+             + (f" extra={extra}" if extra else ""))
 
         # GUID present → enrollment complete, ready to commit
         if guid:
             print(f"  GUID: {guid.hex()}")
             return True, guid
 
-        # Sample count check — the device counts accepted samples
-        # in the 9602 response at [22:24].  If it incremented,
-        # this capture was counted regardless of the 9602 status.
-        counted = False
-        if sample_cnt is not None:
-            prev = getattr(self, '_prev_enroll_cnt', None)
-            self._prev_enroll_cnt = sample_cnt
+        # Track progress via the two counters that change only when
+        # the device makes real progress: sample_cnt [22:24] and
+        # progress_sum [24:26].  When both plateau, the device has
+        # extracted enough data.
+        prev = getattr(self, '_prev_enroll_progress', None)
+        changed = False
+        if extra is not None:
             if prev is not None:
-                counted = sample_cnt > prev
-                if counted:
-                    _log(f"  ENROLL count {prev}→{sample_cnt}")
+                changed = (
+                    extra['sample_cnt'] != prev.get('sample_cnt')
+                    or extra['progress_sum'] != prev.get('progress_sum'))
+            else:
+                changed = True
+            self._prev_enroll_progress = extra
+            if not changed:
+                plateau = getattr(self, '_enroll_plateau', 0) + 1
+                self._enroll_plateau = plateau
+                _log(f"  ENROLL plateau count={plateau}")
+            else:
+                self._enroll_plateau = 0
+        elif sample_cnt is not None:
+            sc_prev = getattr(self, '_prev_enroll_cnt', None)
+            self._prev_enroll_cnt = sample_cnt
+            if sc_prev is not None:
+                changed = sample_cnt > sc_prev
+                if changed:
+                    self._enroll_plateau = 0
                 else:
-                    _log(f"  ENROLL count stuck at {sample_cnt}")
+                    plateau = getattr(self, '_enroll_plateau', 0) + 1
+                    self._enroll_plateau = plateau
             else:
-                _log(f"  ENROLL initial count={sample_cnt}")
+                changed = True
 
-        if counted:
-            ok = True
-            self._enroll_errors = 0
-        else:
-            ok = False
-            if status != 0:
-                print(f"  Capture rejected (status=0x{status:04x})"
-                      f" — lift and retry")
-            else:
-                print(f"  Finger released too early")
+        # 3 consecutive no-change → enrollment complete
+        if not changed and getattr(self, '_enroll_plateau', 0) >= 3:
+            print(f"  Enrollment progress plateaued — device cannot extract"
+                  f" more data.  Aborting.")
+            return False, 0x0002
 
-        if ok:
+        if changed:
             self._enroll_errors = 0
             print(f"  Sample {sample_num} OK")
+            return True, None
         else:
-            print(f"  Sample {sample_num} had errors -- not counted")
-        return ok, None
+            errs = (getattr(self, '_enroll_errors', 0) + 1)
+            self._enroll_errors = errs
+            if status != 0:
+                print(f"  Capture rejected (status=0x{status:04x})"
+                      f" {errs}/3 — lift and retry")
+            else:
+                print(f"  Finger released too early {errs}/3")
+            if errs >= 3:
+                print(f"  3 consecutive unproductive captures — aborting")
+                return False, 0x0001
+            return False, None
 
     def enroll(self):
         """
@@ -2163,6 +2196,8 @@ class BiometricSensor(SensorTLS):
         print(f"  ENROLL_BEGIN: {r.hex()}")
 
         self._prev_enroll_cnt = None
+        self._prev_enroll_progress = None
+        self._enroll_plateau = 0
         self._enroll_errors = 0
         max_attempts = 50
         for i in range(1, max_attempts + 1):
