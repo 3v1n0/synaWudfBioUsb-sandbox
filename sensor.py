@@ -146,6 +146,7 @@ def _rand(n):
 
 # Parsed result of a LOAD_TEMPLATE (a103) response.
 TemplateInfo = namedtuple('TemplateInfo', ['guid', 'sid', 'label', 'subfactor'])
+RecordInfo   = namedtuple('RecordInfo',   ['handle'])
 
 REQ_START        = 0x19   # OUT -- phase 1 init signal
 REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
@@ -1316,11 +1317,17 @@ class BiometricSensor(SensorTLS):
 
     def fetch_record(self, guid):
         """
-        Fetch a single record by GUID.
-        Returns raw response bytes, or None on error.
-        An all-zero 4-byte response means the slot is empty.
+        Fetch a record handle by GUID (9f03).
+        Returns RecordInfo(handle) or None if not found / wrong namespace.
+        handle is None if the slot exists but belongs to another pairing.
         """
-        return CMD_FETCH_RECORD.send(self, guid, label=f"FETCH_{guid[:4].hex()}")
+        r = CMD_FETCH_RECORD.send(self, guid, label=f"FETCH_{guid[:4].hex()}")
+        if not r or len(r) < 20 or r[:2] != b'\x00\x00':
+            return None
+        handle = r[4:20]
+        if handle == b'\x00' * 16:
+            return None
+        return RecordInfo(handle=handle)
 
     def load_template(self, handle):
         """
@@ -1367,7 +1374,7 @@ class BiometricSensor(SensorTLS):
         enrolled = []
         for guid in guids:
             rec = self.fetch_record(guid)
-            if rec and rec != b'\x00\x00\x00\x00':
+            if rec:
                 enrolled.append((guid, rec))
 
         if not enrolled:
@@ -1375,8 +1382,7 @@ class BiometricSensor(SensorTLS):
         else:
             print(f"Enrolled fingerprints ({len(enrolled)}):")
             for guid, rec in enrolled:
-                handle = rec[4:20] if len(rec) >= 20 and rec[:2] == b'\x00\x00' else None
-                tmpl   = self.load_template(handle) if handle else None
+                tmpl      = self.load_template(rec.handle) if rec else None
                 label_str = f"  label='{tmpl.label}'" if tmpl and tmpl.label else ""
                 sf_str    = f"  subfactor=0x{tmpl.subfactor:02x}" if tmpl else ""
                 print(f"  {guid.hex()}{label_str}{sf_str}")
@@ -1413,16 +1419,14 @@ class BiometricSensor(SensorTLS):
         guids = self.storage_query_all()
         print(f"\nRecords (STORAGE_QUERY_ALL via 9f02): {len(guids)}")
         for i, guid in enumerate(guids):
-            rec = self.fetch_record(guid)
-            handle = rec[4:20] if (rec and len(rec) > 4
-                                   and rec[0:2] == b'\x00\x00') else None
-            r3   = CMD_SELECT_RECORD.send(self, handle) if handle else None
-            tmpl = self.load_template(handle)           if handle else None
+            rec  = self.fetch_record(guid)
+            r3   = CMD_SELECT_RECORD.send(self, rec.handle) if rec else None
+            tmpl = self.load_template(rec.handle)           if rec else None
             guid_from_a003 = r3[20:36] if (r3 and len(r3) >= 36) else None
             label_str = f" label='{tmpl.label}'" if tmpl and tmpl.label else ""
             sf_str    = f" subfactor=0x{tmpl.subfactor:02x}" if tmpl else ""
             print(f"  [{i}] GUID {guid.hex()}{label_str}{sf_str}")
-            print(f"       9f03 -> handle {handle.hex() if handle else 'N/A'}"
+            print(f"       9f03 -> handle {rec.handle.hex() if rec else 'N/A'}"
                   f" | a003 -> {guid_from_a003.hex() if guid_from_a003 else 'N/A'}"
                   f" | a103 -> {tmpl.guid.hex() if tmpl else 'N/A'}")
             if guid_from_a003 and guid_from_a003 != guid:
@@ -1770,8 +1774,7 @@ class BiometricSensor(SensorTLS):
         accessible GUIDs; shorter responses (e.g. 4B 00000000) mean
         the GUID belongs to a different pairing namespace."""
         rec = self.fetch_record(guid)
-        return (rec is not None and len(rec) >= 20
-                and rec[:2] == b'\x00\x00')
+        return rec is not None
 
     def _record_to_entry(self, record_handle):
         """Map a record handle to its associated entry handle via a201.
@@ -1814,7 +1817,7 @@ class BiometricSensor(SensorTLS):
 
         # Verify GUID is accessible in the current pairing namespace
         r = self.fetch_record(guid)
-        if not r or len(r) < 20 or r[:2] != b'\x00\x00':
+        if not r:
             print(f"  ERROR: GUID {guid.hex()} belongs to a different"
                   f" pairing session -- cannot delete.")
             return False
@@ -1872,10 +1875,10 @@ class BiometricSensor(SensorTLS):
         all_guids = self.storage_query_all()
 
         r = self.fetch_record(guid)
-        if not r or len(r) < 20 or r[:2] != b'\x00\x00':
+        if not r:
             print("  Not accessible (wrong namespace or not found)")
             return
-        record_handle = r[4:20]
+        record_handle = r.handle
         print(f"  record_handle : {record_handle.hex()}")
 
         # a201 chain
@@ -1908,8 +1911,8 @@ class BiometricSensor(SensorTLS):
         rh_prefix_to_guid = {}
         for g in all_guids:
             rh_r = self.fetch_record(g)
-            if rh_r and len(rh_r) >= 20 and rh_r[:2] == b'\x00\x00':
-                rh_prefix_to_guid[rh_r[4:12]] = g
+            if rh_r:
+                rh_prefix_to_guid[rh_r.handle[:8]] = g
         for mgr in managers:
             r_a3 = CMD_SELECT_RECORD.send(self, mgr, label="A003_mgr")
             a201_r = CMD_RECORD_TO_ENTRY.send(self, mgr, label="A201_mgr")
@@ -1962,8 +1965,8 @@ class BiometricSensor(SensorTLS):
         guid_to_rh = {}
         for g in all_guids:
             rr = self.fetch_record(g)
-            if rr and len(rr) >= 20 and rr[:2] == b'\x00\x00':
-                guid_to_rh[g] = rr[4:20]
+            if rr:
+                guid_to_rh[g] = rr.handle
         rh_prefix_to_guid = {rh[:8]: g for g, rh in guid_to_rh.items()}
         print(f"  {len(all_guids)} GUIDs, {len(guid_to_rh)} accessible")
 
@@ -2055,11 +2058,9 @@ class BiometricSensor(SensorTLS):
         Sequence: 9f03 (FETCH_RECORD) → a003 (SELECT) → a103 (LOAD_TEMPLATE)
         """
         r = self.fetch_record(guid)
-        if not r or len(r) < 20:
+        if not r:
             return False
-        entry = r[4:20]
-        if entry == b'\x00' * 16:
-            return False
+        entry = r.handle
         r = CMD_SELECT_RECORD.send(self, entry, label="SELECT_MATCH")
         if not r:
             return False
@@ -2068,9 +2069,8 @@ class BiometricSensor(SensorTLS):
     def _print_match(self, matched):
         """Fetch and print label/subfactor for a matched GUID."""
         print(f"  Match found! GUID: {matched.hex()}")
-        rec    = self.fetch_record(matched)
-        handle = rec[4:20] if (rec and len(rec) >= 20 and rec[:2] == b'\x00\x00') else None
-        tmpl   = self.load_template(handle) if handle else None
+        rec  = self.fetch_record(matched)
+        tmpl = self.load_template(rec.handle) if rec else None
         if tmpl:
             label_str = f"  label='{tmpl.label}'" if tmpl.label else ""
             print(f"  subfactor=0x{tmpl.subfactor:02x}{label_str}")
@@ -2361,10 +2361,9 @@ class BiometricSensor(SensorTLS):
         # Load all templates (host-side prep before delete, per windows driver)
         for guid in guids:
             rec = self.fetch_record(guid)
-            if rec and len(rec) > 4 and rec[4:20] != b'\x00' * 16:
-                handle = rec[4:20]
-                CMD_SELECT_RECORD.send(self, handle)
-                self.load_template(handle)
+            if rec:
+                CMD_SELECT_RECORD.send(self, rec.handle)
+                self.load_template(rec.handle)
 
         # Delete only manager entries (a001 returns all zeros)
         entries = self._list_entries()
