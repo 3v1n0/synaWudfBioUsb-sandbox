@@ -151,6 +151,7 @@ TemplateInfo   = namedtuple('TemplateInfo',   ['guid', 'sid', 'label', 'subfacto
 RecordInfo     = namedtuple('RecordInfo',     ['handle'])
 SelectInfo     = namedtuple('SelectInfo',     ['handle', 'guid'])
 CaptureStatus  = namedtuple('CaptureStatus',  ['sensor_status', 'reject_detail'])
+CaptureData    = namedtuple('CaptureData',    ['sensor_status', 'reject_detail', 'ctx', 'raw'])
 SensorStatus   = namedtuple('SensorStatus',   ['mode', 'sample', 'quality', 'context'])
 EnrollStatus   = namedtuple('EnrollStatus',   ['status', 'guid', 'sample_cnt',
                                                'progress_sum', 'samples_used', 'size_flag'])
@@ -1582,34 +1583,36 @@ class BiometricSensor(SensorTLS):
         return 2, 7  # generic reject
 
     @staticmethod
-    def _parse_capture_response(resp):
+    def capture_data(self):
         """
-        Parse 66-byte CAPTURE_DATA device response.
-        Returns CaptureStatus(sensor_status, reject_detail).
+        Send CAPTURE_DATA (value=0x0002) and parse the 66-byte response.
+
+        Returns CaptureData(sensor_status, reject_detail, ctx, raw):
+          sensor_status -- 1=finger detected, 2=no finger, 3=error/short resp
+          reject_detail -- 0 or 7 (no finger)
+          ctx           -- LE u16 from resp[-2:], used as enrollment context
+          raw           -- full response bytes (or None on TLS error)
 
         The marker at [18:22] (LE u32) tells if a finger was detected:
           6 = WINBIO_I_MORE_DATA = finger detected
           0 = no finger / hardware rejected
-        """
-        if resp is None or len(resp) < 22:
-            return CaptureStatus(3, 0)
-        marker = struct.unpack_from('<I', resp, 18)[0]
-        if marker == 6:
-            return CaptureStatus(1, 0)   # finger detected
-        return CaptureStatus(2, 7)       # no finger
-
-    def capture_data(self):
-        """
-        Send CAPTURE_DATA (value=0x0002).
-        Returns (resp, sensor_status, reject_detail).
-        37-byte fixed payload: 86 06 00*15 06 00*19
+        37-byte fixed payload: 86 06 00*15 06 00*19.
         The 0x06 byte is an opaque device-internal mode field.
         """
-        resp = CMD_CAPTURE_DATA.send(self)
-        cs = self._parse_capture_response(resp)
-        if resp is not None and len(resp) == 66:
-            _log(f"  CAPTURE_DATA resp: {resp.hex()}")
-        return resp, cs.sensor_status, cs.reject_detail
+        raw = CMD_CAPTURE_DATA.send(self)
+        if raw is None or len(raw) < 22:
+            return CaptureData(sensor_status=3, reject_detail=0, ctx=0, raw=raw)
+        if raw is not None and len(raw) == 66:
+            _log(f"  CAPTURE_DATA resp: {raw.hex()}")
+        marker = struct.unpack_from('<I', raw, 18)[0]
+        if marker == 6:
+            sensor_status, reject_detail = 1, 0   # finger detected
+        else:
+            sensor_status, reject_detail = 2, 7   # no finger
+        ctx = struct.unpack('<H', raw[-2:])[0] if len(raw) >= 2 else 0
+        return CaptureData(sensor_status=sensor_status,
+                           reject_detail=reject_detail,
+                           ctx=ctx, raw=raw)
 
     @staticmethod
     def _print_sensor_status(ss, label=""):
@@ -2273,21 +2276,17 @@ class BiometricSensor(SensorTLS):
 
         # 4. Capture finger
         print("\n  Touch and hold the sensor...")
-        cap, sensor_status, _ = self.capture_data()
-        if not cap or sensor_status != 1:
+        cap = self.capture_data()
+        if not cap.raw or cap.sensor_status != 1:
             print("  No finger detected")
             return None
-        ctx = self._extract_ctx(cap)
-        _log(f"  ctx={ctx}")
-        self._print_sensor_status(self.get_sensor_status(ctx), label="capture: ")
-
         # 5. Interrupt 1 (capture armed)
         i1 = self.read_interrupt(timeout=60000)
         if i1 is None:
             print("  Finger removed")
             return None
         _log(f"  Interrupt 1: {i1.hex()}")
-        self._print_sensor_status(self.get_sensor_status(ctx), label="armed: ")
+        self._print_sensor_status(self.get_sensor_status(cap.ctx), label="armed: ")
 
         # 6. Pre-capture queries
         self.query_status_ext(4)
@@ -2337,17 +2336,16 @@ class BiometricSensor(SensorTLS):
         """
         print("\n--- Identify ---")
         print("\n  Touch and hold the sensor...")
-        cap, sensor_status, _ = self.capture_data()
-        if not cap or sensor_status != 1:
+        cap = self.capture_data()
+        if not cap.raw or cap.sensor_status != 1:
             print("  No finger detected")
             return None
-        ctx = self._extract_ctx(cap)
-        self._print_sensor_status(self.get_sensor_status(ctx), label="capture: ")
+        self._print_sensor_status(self.get_sensor_status(cap.ctx), label="capture: ")
 
         i1 = self.read_interrupt(timeout=60000)
         if i1 is None:
             print("  Finger removed"); return None
-        self._print_sensor_status(self.get_sensor_status(ctx), label="armed:   ")
+        self._print_sensor_status(self.get_sensor_status(cap.ctx), label="armed:   ")
 
         self.query_status_ext(4)
         self.query_enrollment_needs()
@@ -2651,12 +2649,6 @@ class BiometricSensor(SensorTLS):
         return True
 
     @staticmethod
-    def _extract_ctx(cap_resp):
-        """Extract enrollment context from CAPTURE_DATA response[-2:] as LE u16."""
-        if cap_resp is None or len(cap_resp) < 2:
-            return 0
-        return struct.unpack('<H', cap_resp[-2:])[0]
-
     @staticmethod
     def _parse_template_status(resp):
         """
@@ -2694,17 +2686,15 @@ class BiometricSensor(SensorTLS):
         print("  Touch and hold the sensor...")
         _log(f"  _enroll_one_sample started")
 
-        cap, sensor_status, reject_detail = self.capture_data()
-        ok = cap is not None and sensor_status == 1
-        if cap is None:
+        cap = self.capture_data()
+        ok = cap.raw is not None and cap.sensor_status == 1
+        if cap.raw is None:
             print("  CAPTURE_DATA failed")
-            cap = b''
-        elif sensor_status != 1:
+        elif cap.sensor_status != 1:
             print("  No finger detected")
             return False, None
-        ctx = self._extract_ctx(cap)
-        _log(f"  ctx={ctx}")
-        self._print_sensor_status(self.get_sensor_status(ctx), label="capture: ")
+        _log(f"  ctx={cap.ctx}")
+        self._print_sensor_status(self.get_sensor_status(cap.ctx), label="capture: ")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
         i1 = self.read_interrupt(timeout=60000)
