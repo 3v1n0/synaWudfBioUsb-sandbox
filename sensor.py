@@ -218,9 +218,6 @@ IOCTL_HDR = b'\x44\x00\x00\x00'
 #   6 = sensor ctrl (status, counters, update-check, ack)
 #   7 = storage/session admin (init, commit, finalise, close)
 
-# 3 zero-byte separator present in almost every command between
-# the opcode and the payload.  Exceptions pass pad=b''.
-_PAD3 = b'\x00\x00\x00'
 #
 # Each Cmd instance exposes a build() method returning the payload bytes.
 # ---------------------------------------------------------------------------
@@ -228,28 +225,28 @@ _PAD3 = b'\x00\x00\x00'
 class Cmd:
     """Descriptor for a fixed-layout app-layer command."""
 
-    def __init__(self, opcode, value, body=b'', label="", pad=_PAD3):
+    def __init__(self, opcode, value, body=b'', label="", sep=b'\x00\x00\x00'):
         """
         opcode -- 1 or 2 bytes identifying the command (cmd + subcmd)
         value  -- TLS channel selector (2, 6 or 7)
-        body   -- fixed payload bytes that follow pad+opcode (may be empty)
+        body   -- fixed payload bytes that follow sep+opcode (may be empty)
         label  -- default trace label; can be overridden in send()
-        pad    -- separator inserted between opcode and body/arg.
-                  Defaults to 3 zero bytes (_PAD3), which the protocol uses
-                  for almost all commands.  Pass b'' for the few commands
-                  that have no separator (UPDATE_ACK, SENSOR_STATUS, etc.).
+        sep    -- separator between opcode and body/arg, meaning unknown.
+                  Defaults to 3 zero bytes (_SEP3), present in almost all
+                  commands.  Pass b'' for commands with no separator, or a
+                  custom value (e.g. SENSOR_STATUS uses b'\x00\x20\x00').
         """
         self.opcode = opcode
         self.value  = value
         self.body   = body
         self.label  = label
-        self.pad    = pad
+        self.sep    = sep
 
     def build(self, arg=b''):
         """Return the full payload bytes.
-        Layout: opcode | pad | body | arg
-        pad is omitted when both body and arg are empty (opcode-only cmds)."""
-        sep = self.pad if (self.body or arg) else b''
+        Layout: opcode | sep | body | arg
+        sep is omitted when both body and arg are empty (opcode-only cmds)."""
+        sep = self.sep if (self.body or arg) else b''
         return self.opcode + sep + self.body + arg
 
     def send(self, dev, arg=b'', label=None, ctype=TLS_APP_DATA):
@@ -273,7 +270,7 @@ CMD_GET_RECORD_COUNT     = Cmd(b'\x82', CH_SENSOR,
                                label="GET_RECORD_COUNT")
 CMD_SENSOR_STATUS        = Cmd(b'\x87', CH_SENSOR,
                                b'\x01\x00\x00\x00',
-                               label="SENSOR_STATUS", pad=b'\x00\x20\x00')
+                               label="SENSOR_STATUS", sep=b'\x00\x20\x00')
 CMD_UPDATE_ENROLL_CHECK  = Cmd(b'\x80\x0c', CH_SENSOR,
                                b'\x01\x00\x00\x00'
                                b'\x01\x00\x00\x08\x01\x01\x01\x00',
@@ -307,9 +304,9 @@ CMD_ENROLL_BEGIN         = Cmd(b'\x96\x01', CH_DATA,
                                b'\x00\x00\x00\x00\x00\x00\x00\x00',
                                label="ENROLL_BEGIN")
 CMD_ENROLL_STATUS        = Cmd(b'\x96\x02', CH_DATA,
-                               b'\x00\x00\x00', label="ENROLL_STATUS", pad=b'')
+                               b'\x00\x00\x00', label="ENROLL_STATUS", sep=b'')
 CMD_ENGINE_COMMIT_ACK    = Cmd(b'\x96\x04', CH_DATA,
-                               b'\x00\x00\x00', label="ENGINE_COMMIT_ACK", pad=b'')
+                               b'\x00\x00\x00', label="ENGINE_COMMIT_ACK", sep=b'')
 CMD_MATCH_RESULT         = Cmd(b'\x99\x01', CH_DATA,
                                b'\x00\x00\x00\x00\x00\x00\x00\x00',
                                label="MATCH_RESULT")
@@ -334,7 +331,7 @@ CMD_QUERY_ENROLL_NEEDS   = Cmd(b'\x39', CH_DATA,
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000'),
-                               label="QUERY_ENROLL_NEEDS", pad=b'')
+                               label="QUERY_ENROLL_NEEDS", sep=b'')
 CMD_QUERY_ENROLL_SIMPLE  = Cmd(b'\x39', CH_DATA,
                                bytes.fromhex(
                                    '000000000000000000000020000000'
@@ -345,7 +342,7 @@ CMD_QUERY_ENROLL_SIMPLE  = Cmd(b'\x39', CH_DATA,
                                    '00000000000000000000000020000000'
                                    '00000000000000000000000000000000'
                                    '20000000000000000000000000'),
-                               label="QUERY_ENROLL_SIMPLE", pad=b'')
+                               label="QUERY_ENROLL_SIMPLE", sep=b'')
 CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
                                bytes.fromhex(
                                    'f4010000f4010000077f0020000000'
@@ -356,7 +353,7 @@ CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000'),
-                               label="ENROLL_TEMPLATE", pad=b'')
+                               label="ENROLL_TEMPLATE", sep=b'')
 
 # STORAGE_COMMIT (9603) payload is variable-length (built by _build_commit_payload)
 # so no fixed Cmd descriptor -- the method builds it directly.
