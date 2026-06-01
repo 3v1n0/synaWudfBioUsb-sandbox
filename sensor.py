@@ -1432,25 +1432,44 @@ class BiometricSensor(SensorTLS):
                 managers.append(ent)
         return managers
 
+    def _is_accessible_guid(self, guid):
+        """Check if a GUID is accessible in the current TLS session.
+        9f03 returns status=0000 with a record handle for accessible
+        GUIDs; non-zero status means it belongs to a different pairing
+        namespace and cannot be deleted through this session."""
+        rec = self.fetch_record(guid)
+        return rec is not None and len(rec) >= 4 and rec[:2] == b'\x00\x00'
+
     def delete_record_by_guid(self, guid):
-        """Delete a single template by GUID.
+        """Delete a single record by GUID.
 
-        The device's manager entries (a001=all-zeros) map 1:1 to
-        GUID slots in the 9f02 index.  We find the manager at the
-        same position as the target GUID, then a301 DELETE_ENTRY it.
+        Uses two-level namespace-aware lookup:
+          1. Fetch all GUIDs from 9f02
+          2. Filter to only those accessible (9f03 returns valid handle)
+          3. Find the target within the accessible subset
+          4. Delete the corresponding manager entry (a301)
 
-        Returns True on success; False if the GUID is not found or
-        deletion fails.  After deletion, storage_query_all() is
-        re-queried to confirm the GUID is gone.
+        Only GUIDs accessible in the current TLS session (enrolled
+        under this pairing) can be deleted.  Cross-namespace GUIDs
+        (from other pairing sessions) are rejected.
 
-        NOTE: a302 DELETE_RECORD is NOT supported (returns 8306).
-        Only manager entry deletion (a301) physically removes data.
+        Returns True on success; False if the GUID is not accessible
+        or deletion fails.
         """
-        guids = self.storage_query_all()
+        all_guids = self.storage_query_all()
+
+        # Filter to only accessible GUIDs (same pairing namespace)
+        guids = [g for g in all_guids if self._is_accessible_guid(g)]
+        if not guids:
+            _log(f"delete_record_by_guid: no accessible GUIDs in"
+                 f" current namespace")
+            return False
+
         try:
             idx = guids.index(guid)
         except ValueError:
-            _log(f"delete_record_by_guid: GUID {guid.hex()} not found")
+            _log(f"delete_record_by_guid: GUID {guid.hex()} not found"
+                 f" or not accessible in current namespace")
             return False
 
         entries = self._list_entries()
