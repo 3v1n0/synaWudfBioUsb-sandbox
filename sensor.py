@@ -1813,7 +1813,7 @@ class BiometricSensor(SensorTLS):
             return False
 
         # Verify GUID is accessible in the current pairing namespace
-        r = CMD_FETCH_RECORD.send(self, guid)
+        r = self.fetch_record(guid)
         if not r or len(r) < 20 or r[:2] != b'\x00\x00':
             print(f"  ERROR: GUID {guid.hex()} belongs to a different"
                   f" pairing session -- cannot delete.")
@@ -1871,7 +1871,7 @@ class BiometricSensor(SensorTLS):
         self.storage_query_init(2)
         all_guids = self.storage_query_all()
 
-        r = CMD_FETCH_RECORD.send(self, guid)
+        r = self.fetch_record(guid)
         if not r or len(r) < 20 or r[:2] != b'\x00\x00':
             print("  Not accessible (wrong namespace or not found)")
             return
@@ -1907,7 +1907,7 @@ class BiometricSensor(SensorTLS):
         # Build record_handle prefix map for accessible GUIDs
         rh_prefix_to_guid = {}
         for g in all_guids:
-            rh_r = CMD_FETCH_RECORD.send(self, g, label="FETCH_RH")
+            rh_r = self.fetch_record(g)
             if rh_r and len(rh_r) >= 20 and rh_r[:2] == b'\x00\x00':
                 rh_prefix_to_guid[rh_r[4:12]] = g
         for mgr in managers:
@@ -1961,7 +1961,7 @@ class BiometricSensor(SensorTLS):
         all_guids = self.storage_query_all()
         guid_to_rh = {}
         for g in all_guids:
-            rr = CMD_FETCH_RECORD.send(self, g)
+            rr = self.fetch_record(g)
             if rr and len(rr) >= 20 and rr[:2] == b'\x00\x00':
                 guid_to_rh[g] = rr[4:20]
         rh_prefix_to_guid = {rh[:8]: g for g, rh in guid_to_rh.items()}
@@ -2054,8 +2054,7 @@ class BiometricSensor(SensorTLS):
         Returns True on success.
         Sequence: 9f03 (FETCH_RECORD) → a003 (SELECT) → a103 (LOAD_TEMPLATE)
         """
-        r = CMD_FETCH_RECORD.send(self, guid,
-                                  label=f"FETCH_MATCH({guid[:4].hex()})")
+        r = self.fetch_record(guid)
         if not r or len(r) < 20:
             return False
         entry = r[4:20]
