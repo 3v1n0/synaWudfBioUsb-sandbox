@@ -1954,20 +1954,22 @@ def main():
         eck2_pub_le   = _host_x_le  # pubkey X for cert body
         dev_x_be      = DEV_X_BE
         dev_y_be      = DEV_Y_BE
-        if ready and int.from_bytes(ready, 'little') != 0:
-            print("  Device requests challenge (REQ_READY non-zero)")
-            print("  Sending pairing challenge...")
-            # Sign with P_SHA256 D (manufacturer key), NOT Tag2
+        # Always send challenge when no pairing data — the device may
+        # accept a fresh pairing signed with P_SHA256 D even if
+        # REQ_READY returns zero (already-paired state).
+        print("  Sending pairing challenge...")
+        try:
             tag1, tag3 = sensor.send_challenge(host_142, IDENTITY_D_BE)
             cert_data_398 = tag1
             eck2_pub_le = tag1[144:176] if len(tag1) >= 176 else b'\x00' * 32
             dev_x_be, dev_y_be = dev_key_from_tag3(tag3)
             tag3_for_save = tag3
-        else:
-            print("  Device already paired, skipping challenge")
-            pub32 = b'\x00' * 32
+            print("  Challenge accepted")
+        except RuntimeError as exc:
+            print(f"  Challenge failed: {exc}")
+            print("  Falling back to unpaired TLS (may fail)")
             cert_data_398 = (host_142 + b'\x00\x02'
-                             + struct.pack('<H', 32) + pub32
+                             + struct.pack('<H', 32) + b'\x00' * 32
                              + b'\x00' * 222)
             assert len(cert_data_398) == 400, len(cert_data_398)
             tag3_for_save = None
