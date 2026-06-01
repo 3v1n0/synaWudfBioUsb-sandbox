@@ -191,9 +191,15 @@ TLS_HS_CERTIFICATE_VERIFY  = 0x0f
 TLS_HS_CLIENT_KEY_EXCHANGE = 0x10
 TLS_HS_FINISHED            = 0x14
 
-# Cipher suites used in ClientHello
-CIPHER_SUITE       = b'\xc0\x2e'  # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-CIPHER_SUITE_C005  = b'\xc0\x05'  # TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA (first in list)
+# Cipher suites advertised in ClientHello (exact order matches Windows driver)
+CS_ECDH_ECDSA_AES256_CBC_SHA      = b'\xc0\x05'
+CS_ECDHE_ECDSA_AES256_GCM_SHA384  = b'\xc0\x2e'  # selected by device
+CS_RSA_AES256_CBC_SHA256           = b'\x00\x3d'
+CS_DHE_PSK_AES256_CBC_SHA          = b'\x00\x8d'
+CS_PSK_AES256_CBC_SHA              = b'\x00\xa8'
+CS_DHE_PSK_AES256_CBC_SHA256       = b'\x00\xa9'
+
+CIPHER_SUITE = CS_ECDHE_ECDSA_AES256_GCM_SHA384  # alias used in key derivation
 
 # 4-byte IOCTL framing header prepended to TLS records sent to device
 IOCTL_HDR = b'\x44\x00\x00\x00'
@@ -811,8 +817,14 @@ class SensorTLS(Sensor):
         # supported_groups(0x0004)+ec_point_formats(0x000b).
         # CH HS body = 71 bytes, total CH = 84 bytes (matched to windows driver trace).
         sess_id   = b'\x07' + b'\x00' * 7
-        suites    = (CIPHER_SUITE_C005 + CIPHER_SUITE
-                     + b'\x00\x3d\x00\x8d\x00\xa8\x00\xa9')
+        suites    = b''.join([
+            CS_ECDH_ECDSA_AES256_CBC_SHA,
+            CS_ECDHE_ECDSA_AES256_GCM_SHA384,
+            CS_RSA_AES256_CBC_SHA256,
+            CS_DHE_PSK_AES256_CBC_SHA,
+            CS_PSK_AES256_CBC_SHA,
+            CS_DHE_PSK_AES256_CBC_SHA256,
+        ])
         # Extensions: ext_len=0x000a (10) is a device quirk -- it covers
         # supported_groups (6B) + ec_point_formats type+len (4B) only.
         # The ec_point_formats data (\x01\x00) sits outside ext_len field.
@@ -897,7 +909,9 @@ class SensorTLS(Sensor):
         _hexdump("Cert HS", cert_hs)
 
         # ----- ClientKeyExchange -----
-        cke_hs = make_hs_message(TLS_HS_CLIENT_KEY_EXCHANGE, b'\x04' + eph_x + eph_y)
+        ec_point_uncompressed = b'\x04'
+        cke_hs = make_hs_message(TLS_HS_CLIENT_KEY_EXCHANGE,
+                                 ec_point_uncompressed + eph_x + eph_y)
         state.feed_hs(cke_hs)
 
         # ----- CertificateVerify -----
