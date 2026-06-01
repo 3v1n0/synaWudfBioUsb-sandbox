@@ -1339,7 +1339,8 @@ class BiometricSensor(SensorTLS):
                     return True
 
         entries = self._list_entries()
-        for ent in entries:
+        for i, ent in enumerate(entries):
+            _log(f"Entry[{i}]: {ent.hex()}")
             r = self.tls_send(
                 bytes.fromhex('a001000000') + ent,
                 value=2, label="SELECT_ENTRY")
