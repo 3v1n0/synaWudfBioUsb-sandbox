@@ -970,7 +970,7 @@ class BiometricSensor(SensorTLS):
     def get_record_count(self):
         """
         Send GET_RECORD_COUNT (8200...).
-        Returns status from response[0:2] (0x0000 = OK).
+        Returns status from response[0:2] (0x0000 = OK), or -1 on error.
         The raw 34-byte response is a fixed status block,
         NOT the actual count.  Use get_storage_count() for
         the real number of records.
@@ -979,7 +979,7 @@ class BiometricSensor(SensorTLS):
             bytes.fromhex('820000000000000207'),
             value=6, label="GET_RECORD_COUNT")
         if resp is None or len(resp) < 2:
-            return 0x800703e5  # WINBIO_E_INVALID_DEVICE_STATE
+            return -1
         return struct.unpack('<H', resp[:2])[0]
 
     def get_storage_count(self):
@@ -1619,13 +1619,9 @@ class BiometricSensor(SensorTLS):
             return False
         ts, pc, rd = self._parse_template_status(resp)
         if ts != 0:
-            err_map = {0x80098018: "WINBIO_E_DATABASE_FULL",
-                       0x800703e5: "WINBIO_E_INVALID_DEVICE_STATE",
-                       0x80067ff5: "WINBIO_E_INCORRECT_SESSION"}
-            err_name = err_map.get(ts, f"0x{ts:08x}")
-            print(f"  ENROLL_TEMPLATE rejected: "
-                  f"TemplateStatus={err_name} "
-                  f"PercentComplete={pc} RejectDetail=0x{rd:x}")
+            print(f"  ENROLL_TEMPLATE rejected:"
+                  f" TemplateStatus=0x{ts:08x}"
+                  f" PercentComplete={pc} RejectDetail=0x{rd:x}")
             return False
         print(f"  Template response: {resp.hex()}")
         _log(f"  TemplateStatus={ts:#x} PC={pc} RD=0x{rd:x}")
@@ -1686,20 +1682,20 @@ class BiometricSensor(SensorTLS):
     def _parse_template_status(resp):
         """
         Parse ENROLL_TEMPLATE (39f4) response.
-        Returns (template_status_hr, percent_complete, reject_detail).
-        template_status_hr == 0 means success.
+        Returns (status, percent_complete, reject_detail).
+        status == 0 means success.
         Response is either `0000` (2B success) or a 66-byte STATUS_EXT-
         like struct with details at offsets:
-          [2:6]  - TemplateStatus (HRESULT, LE u32)
-          [12:16] - PercentComplete (ULONG, LE u32)
-          [8:12]  - RejectDetail (ULONG, LE u32)
+          [2:6]  - TemplateStatus (LE u32)
+          [12:16] - PercentComplete (LE u32)
+          [8:12]  - RejectDetail (LE u32)
         """
         if resp is None or len(resp) < 2:
-            return 0x800703e5, 0, 0
+            return -1, 0, 0
         if resp == b'\x00\x00' or resp == b'\x00\x00\x00\x00':
             return 0, 0, 0
         if len(resp) < 16:
-            return 0x800703e5, 0, 0
+            return -1, 0, 0
         ts_raw = struct.unpack('<I', resp[2:6])[0]
         if ts_raw == 0 or ts_raw == 6:
             ts = 0
