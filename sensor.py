@@ -2027,12 +2027,40 @@ class BiometricSensor(SensorTLS):
                 ok = False
         return ok
 
-    def _finalise_storage(self):
-        """Send a401/a402/a403 finalise sequence after bulk deletion.
+    def erase_database(self):
+        """
+        Erase ALL records and entry handles from device storage.
 
-        Required after erase_database / clear_local_db but NOT after
-        single-record delete_record_by_guid (which omits finalise per
-        traced b.exe clear-db behaviour).
+        Deletes every entry handle returned by 9f01 (FETCH_FIRST) via
+        a301 DELETE_ENTRY. This covers both manager entries (which hold
+        GUID references) and accumulated ghost slot entries. After this,
+        9f02 returns empty and 9f01 returns 0 (firmware re-creates one
+        fresh session entry on the next TLS connect).
+
+        No a401/a402/a403 finalise needed -- confirmed experimentally.
+        """
+        entries = self._list_entries()
+        print(f"  {len(entries)} entries to delete")
+        deleted = 0
+        for e in entries:
+            r = self.tls_send(bytes.fromhex('a301000000') + e,
+                              value=2, label="DELETE_ENTRY")
+            if r is not None:
+                deleted += 1
+        print(f"  {deleted} deleted")
+
+        # Verify
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        remaining = self.storage_query_all()
+        if remaining:
+            print(f"  WARNING: {len(remaining)} GUIDs still present")
+        else:
+            print("  OK -- no records remain")
+        return not remaining
+
+    def _finalise_storage(self):
+        """Send a401/a402/a403 finalise sequence (b.exe clear-db compat).
 
         Returns True on success.
         """
@@ -2045,20 +2073,15 @@ class BiometricSensor(SensorTLS):
                 return False
         return True
 
-    def erase_database(self):
+    def erase_database_compat(self):
         """
-        Erase all records from device storage using the TLS-level
-        clear sequence (traced from windows driver clear-db 2026-06-01):
+        Erase enrolled records using the b.exe clear-db sequence.
 
-          1. STORAGE_QUERY_ALL to get GUIDs (loads templates)
-          2. FETCH_FIRST -> list of entry handles
-          3. a001 for each entry -> detect "manager" entries
-             (response 12 bytes all zeros = 000000000000000000000000)
-          4. a301 DELETE_ENTRY for each manager entry
-          5. a401/a402/a403 (finalise)
-          6. STORAGE_QUERY_INIT x2 + verify
-
-        After this, all records are deleted and 9f02 returns empty.
+        Mirrors what the Windows driver does: loads all templates, then
+        deletes only manager entries (a001=all-zeros) via a301, then
+        finalises with a401/a402/a403. Ghost slot entries are NOT
+        removed (they accumulate over time). Use erase_database() for
+        a full wipe including ghost slots.
         """
         print("  Fetching records...")
         self.storage_query_init(1)
@@ -2066,7 +2089,7 @@ class BiometricSensor(SensorTLS):
         guids = self.storage_query_all()
         print(f"  {len(guids)} GUIDs in index")
 
-        # Load all templates (host-side cleanup before delete)
+        # Load all templates (host-side prep before delete, per b.exe)
         for guid in guids:
             rec = self.fetch_record(guid)
             if rec and len(rec) > 4 and rec[4:20] != b'\x00' * 16:
@@ -2076,7 +2099,7 @@ class BiometricSensor(SensorTLS):
                 self.tls_send(bytes.fromhex('a103000000') + handle,
                               value=2, label=f"LOAD_{guid[:4].hex()}")
 
-        # Find and delete all manager entries (a001 returns all zeros)
+        # Delete only manager entries (a001 returns all zeros)
         entries = self._list_entries()
         print(f"  {len(entries)} entries found")
         managers = self._find_managers(entries)
@@ -2091,49 +2114,21 @@ class BiometricSensor(SensorTLS):
         self.storage_query_init(2)
         remaining = self.storage_query_all()
         if remaining:
-            print(f"  WARNING: {len(remaining)} records still present")
+            print(f"  WARNING: {len(remaining)} GUIDs still present")
         else:
             print("  OK -- no records remain")
         return not remaining
 
-    def purge_entries(self):
+    def clear_local_db(self):
         """
-        Delete ALL entry handles (9f01 list) unconditionally via a301.
+        Delete only GUIDs accessible in the current pairing namespace.
 
-        This clears the 100+ accumulated ghost entries the firmware
-        builds up over enroll/delete cycles. a301 accepts any entry
-        handle (manager or empty slot) -- returns 00000300 for managers
-        with data, 00000100 for empty slots. Both reduce the 9f01 count.
+        Foreign-namespace GUIDs (enrolled under a different pairing
+        session) are left untouched. Iterates manager entries one by
+        one, checking 9f02 after each deletion to detect which GUID
+        disappeared and whether it was ours.
 
-        The device re-creates one fresh entry on the next TLS session,
-        so afterwards 9f01 returns 1 (or 0 during the current session).
-
-        Returns (deleted, remaining) counts.
-        """
-        entries = self._list_entries()
-        print(f"  {len(entries)} entries before purge")
-        deleted = 0
-        for e in entries:
-            r = self.tls_send(bytes.fromhex('a301000000') + e,
-                              value=2, label="PURGE_ENTRY")
-            if r is not None:
-                deleted += 1
-        entries2 = self._list_entries()
-        remaining = len(entries2)
-        print(f"  {deleted} deleted, {remaining} remaining")
-        return deleted, remaining
-
-        """
-        Delete only accessible GUIDs (current pairing namespace).
-
-        Foreign-namespace GUIDs (from other pairing sessions) are
-        left untouched.  Finalises with a401/a402/a403.
-
-        Strategy: enumerate accessible GUIDs first, then delete manager
-        entries one by one.  After each deletion check which accessible
-        GUID disappeared; repeat until none remain.  No GUID->manager
-        mapping is required -- the device's own response tells us when
-        the right manager was hit.
+        Use erase_database() to wipe everything unconditionally.
         """
         print("  Querying records...")
         self.storage_query_init(1)
@@ -2179,8 +2174,6 @@ class BiometricSensor(SensorTLS):
                 all_gone = all_guids_set - after
                 foreign_gone = all_gone - accessible
                 if foreign_gone:
-                    # We deleted a foreign GUID -- this is wrong.
-                    # Report and abort; damage is already done.
                     print(f"  ERROR: deleted a foreign GUID"
                           f" {next(iter(foreign_gone)).hex()} --"
                           f" aborting to avoid further damage")
@@ -2195,8 +2188,6 @@ class BiometricSensor(SensorTLS):
                     progress = True
                     break  # restart manager scan (handles are stale)
                 else:
-                    # Manager deleted but nothing from 9f02 changed --
-                    # unlikely; treat as no progress and try next manager
                     _log(f"  manager {mgr.hex()[:16]} deleted but no"
                          f" GUID disappeared -- continuing")
 
@@ -2204,9 +2195,6 @@ class BiometricSensor(SensorTLS):
                 print("  ERROR: no progress in manager sweep --"
                       " aborting to avoid infinite loop")
                 break
-
-        if not self._finalise_storage():
-            return False
 
         # Verify
         self.storage_query_init(1)
@@ -2527,13 +2515,13 @@ class BiometricSensor(SensorTLS):
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in (
             'list-db', 'list-db-all', 'enroll', 'clear-db',
-            'clear-local-db', 'identify-all', 'identify',
+            'clear-db-compat', 'clear-local-db', 'identify-all', 'identify',
             'reset-ownership', 'delete-record', 'probe-guid',
-            'probe-managers', 'purge-entries'):
+            'probe-managers'):
         print("Usage: sensor.py list-db|list-db-all|enroll|clear-db|"
-              "clear-local-db|identify-all|identify|reset-ownership|"
-              "delete-record [guid <hex32>]|probe-guid <hex32>|"
-              "purge-entries")
+              "clear-db-compat|clear-local-db|identify-all|identify|"
+              "reset-ownership|delete-record [guid <hex32>]|"
+              "probe-guid <hex32>")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -2636,6 +2624,9 @@ def main():
     elif sys.argv[1] == 'clear-db':
         print("clear-db...")
         sensor.erase_database()
+    elif sys.argv[1] == 'clear-db-compat':
+        print("clear-db-compat...")
+        sensor.erase_database_compat()
     elif sys.argv[1] == 'clear-local-db':
         print("clear-local-db...")
         sensor.clear_local_db()
