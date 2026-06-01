@@ -461,6 +461,21 @@ from ecdsa import NIST256p
 # during the challenge/pairing flow - never hardcoded.
 
 # ---------------------------------------------------------------------------
+# Device CA public key (P-256, hardcoded in driver at DAT_180142130)
+# ---------------------------------------------------------------------------
+# Confirmed by tracing BCryptImportKeyPair(ECS1) in bcrypt.dll.
+# The device signs SHA-256(host_pubkey) with the CA private key;
+# the driver verifies with this hardcoded public key to authenticate
+# that the device is genuine Synaptics hardware.
+DEVICE_CA_X = bytes.fromhex(
+    'cb656293b9701806ae3b1a5208e469f4'
+    '65a6a5195bd8b7e39f23650611dcdfdc')
+DEVICE_CA_Y = bytes.fromhex(
+    'a700424ee097b3c159be791089502f40'
+    'ba571eca91b106b4881f19637e44bfdc')
+
+
+# ---------------------------------------------------------------------------
 # Logging helpers
 # ---------------------------------------------------------------------------
 
@@ -758,6 +773,35 @@ def ecdh_shared(priv_be, peer_x_be, peer_y_be):
     return priv.exchange(ec.ECDH(), peer)
 
 
+def verify_ecdsa_sha256(pub_x_be, pub_y_be, message, sig_raw64):
+    """Verify a raw 64-byte ECDSA P-256 signature (r||s) over message.
+
+    message is the raw pre-image; SHA-256 is applied internally.
+    Raises RuntimeError on failure.  Returns True on success.
+    """
+    pub_nums = ec.EllipticCurvePublicNumbers(
+        int.from_bytes(pub_x_be, 'big'),
+        int.from_bytes(pub_y_be, 'big'),
+        ec.SECP256R1())
+    pub_key = pub_nums.public_key(default_backend())
+    r = int.from_bytes(sig_raw64[:32], 'big')
+    s = int.from_bytes(sig_raw64[32:], 'big')
+    def _encode_int(n):
+        b = n.to_bytes(32, 'big').lstrip(b'\x00') or b'\x00'
+        if b[0] & 0x80:
+            b = b'\x00' + b
+        return bytes([0x02, len(b)]) + b
+    r_der = _encode_int(r)
+    s_der = _encode_int(s)
+    sig_der = bytes([0x30, len(r_der) + len(s_der)]) + r_der + s_der
+    from cryptography.exceptions import InvalidSignature
+    try:
+        pub_key.verify(sig_der, message, ec.ECDSA(hashes.SHA256()))
+    except InvalidSignature:
+        raise RuntimeError("ECDSA verify failed")
+    return True
+
+
 def sign_ecdsa_sha256(priv_d_be, digest32):
     """Sign digest32 with P-256 private key. Returns DER signature.
 
@@ -1028,6 +1072,34 @@ class Sensor:
         _log(f"Challenge accepted, client_cert={client_cert[:8].hex()}...")
         if device_cert:
             _log(f"  device_cert={device_cert[:8].hex()}...")
+
+        # Verify device authenticity: device signs SHA-256(device_cert_body)
+        # with the CA private key; we verify with the hardcoded CA pubkey.
+        # device_cert layout (confirmed from hex dump + decompiled code):
+        #   [0:142]   cert body (device's copy of host_pubkey blob, 142B)
+        #             FUN_180051dc0(cert, 0x8e=142, hash_out) hashes this
+        #   [142:144] DER sig length as u16le (typically 70 or 71 bytes)
+        #   [144:144+sig_len] DER-encoded ECDSA signature over SHA256(cert_body)
+        # Confirmed: ca_pub.verify(dev_sig_der, dc[0:142], SHA256) = OK
+        if device_cert and len(device_cert) >= 146:
+            sig_len = struct.unpack_from('<H', device_cert, 142)[0]
+            if 68 <= sig_len <= 72 and len(device_cert) >= 144 + sig_len:
+                dev_sig_der = device_cert[144:144 + sig_len]
+                cert_body   = device_cert[:142]
+                pub_nums = ec.EllipticCurvePublicNumbers(
+                    int.from_bytes(DEVICE_CA_X, 'big'),
+                    int.from_bytes(DEVICE_CA_Y, 'big'),
+                    ec.SECP256R1())
+                ca_pub = pub_nums.public_key(default_backend())
+                from cryptography.exceptions import InvalidSignature
+                try:
+                    ca_pub.verify(dev_sig_der, cert_body,
+                                  ec.ECDSA(hashes.SHA256()))
+                    _log("Device CA signature verified OK")
+                except InvalidSignature:
+                    print("WARNING: device CA verification failed -- "
+                          "device may not be genuine Synaptics hardware")
+
         return client_cert, device_cert
 
 
