@@ -1319,35 +1319,35 @@ class BiometricSensor(SensorTLS):
         """
         Delete a single record by its 16-byte GUID.
 
-        Uses storage position mapping:
-        1. get_storage_count() returns GUIDs in order
-        2. FETCH_FIRST lists storage entries (including empty slots)
-        3. SELECT_ENTRY + DELETE_ENTRY removes the nth valid entry
-           corresponding to the target GUID's position
+        Gets the record entry handle via FETCH_RECORD (9f03), then
+        finds the matching entry in the FETCH_FIRST list and deletes
+        it with SELECT_ENTRY (a001) + DELETE_ENTRY (a301).
 
         Returns True on success.
         """
-        _, _, guids = self.get_storage_count()
-        try:
-            idx = guids.index(guid)
-        except ValueError:
-            print(f"  GUID {guid.hex()} not found in storage")
+        rec = self.fetch_record(guid)
+        if rec is None or len(rec) < 20:
+            print(f"  GUID {guid.hex()} not found")
             return False
+        record_handle = rec[4:20]
 
         entries = self._list_entries()
-        valid_count = -1
         for ent in entries:
-            r = self.tls_send(
-                bytes.fromhex('a001000000') + ent,
-                value=2, label="SELECT_ENTRY")
-            if r is None or len(r) < 12:
-                continue
-            if r[8:12] == b'\x01\x00\x00\x00':
-                valid_count += 1
-                if valid_count == idx:
-                    return self.delete_record(ent)
+            if ent == record_handle:
+                r = self.tls_send(
+                    bytes.fromhex('a001000000') + ent,
+                    value=2, label="SELECT_ENTRY")
+                if r is None:
+                    return False
+                r = self.tls_send(
+                    bytes.fromhex('a301000000') + ent,
+                    value=2, label="DELETE_ENTRY")
+                if r != b'\x00\x00\x03\x00':
+                    return False
+                return True
 
-        print(f"  Entry #{idx} for GUID {guid.hex()} not found")
+        print(f"  Entry handle {record_handle.hex()} not found in"
+              " storage entries")
         return False
 
     def close_notify(self):
