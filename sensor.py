@@ -1319,35 +1319,45 @@ class BiometricSensor(SensorTLS):
         """
         Delete a single record by its 16-byte GUID.
 
-        Gets the record entry handle via FETCH_RECORD (9f03), then
-        finds the matching entry in the FETCH_FIRST list and deletes
-        it with SELECT_ENTRY (a001) + DELETE_ENTRY (a301).
-
-        Returns True on success.
+        Uses FETCH_RECORD (9f03) to get the record entry handle,
+        SELECT_RECORD (a003) to select it, and tries DELETE_RECORD
+        (a302) to remove it as the a30x analogue of a003.
+        If a302 doesn't exist, falls back to enumerating entries
+        via A002 identity matching.
         """
         rec = self.fetch_record(guid)
-        if rec is None or len(rec) < 20:
-            print(f"  GUID {guid.hex()} not found")
-            return False
-        record_handle = rec[4:20]
+        if rec and len(rec) >= 20:
+            entry = rec[4:20]
+            r = self.tls_send(
+                bytes.fromhex('a003000000') + entry,
+                value=2, label="SELECT_RECORD")
+            if r is not None:
+                r = self.tls_send(
+                    bytes.fromhex('a302000000') + entry,
+                    value=2, label="DELETE_RECORD")
+                if r == b'\x00\x00\x03\x00':
+                    return True
 
         entries = self._list_entries()
         for ent in entries:
-            if ent == record_handle:
-                r = self.tls_send(
-                    bytes.fromhex('a001000000') + ent,
-                    value=2, label="SELECT_ENTRY")
-                if r is None:
-                    return False
-                r = self.tls_send(
-                    bytes.fromhex('a301000000') + ent,
-                    value=2, label="DELETE_ENTRY")
-                if r != b'\x00\x00\x03\x00':
-                    return False
-                return True
+            r = self.tls_send(
+                bytes.fromhex('a001000000') + ent,
+                value=2, label="SELECT_ENTRY")
+            if r is None or len(r) < 12:
+                continue
+            if r[8:12] != b'\x01\x00\x00\x00':
+                continue
+            r2 = self.tls_send(
+                bytes.fromhex('a002000000') + ent,
+                value=2, label="GET_ENTRY_INFO")
+            if r2 is None:
+                continue
+            _log(f"A002 response ({len(r2)}B): {r2.hex()}")
+            for off in (0, 2, 4, 6, 8):
+                if len(r2) >= off + 16 and r2[off:off+16] == guid:
+                    return self.delete_record(ent)
 
-        print(f"  Entry handle {record_handle.hex()} not found in"
-              " storage entries")
+        print(f"  GUID {guid.hex()} not found")
         return False
 
     def close_notify(self):
