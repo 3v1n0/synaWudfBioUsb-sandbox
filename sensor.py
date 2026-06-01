@@ -1423,7 +1423,7 @@ class BiometricSensor(SensorTLS):
         At the firmware level this is a no-op: the template stays on
         the device.  The host manages identity-to-template mapping.
         To physically free storage on the device, call erase_database()
-        (a301 DELETE_ENTRY for each entry).
+        (sends REQ_STOP to reset device state).
         """
         _log(f"delete_record_by_guid({guid.hex()}):"
              f" firmware has no TLS-level delete-by-GUID;"
@@ -1680,62 +1680,43 @@ class BiometricSensor(SensorTLS):
         return [resp[4 + i*16 : 4 + (i+1)*16]
                 for i in range(min(nentries, (len(resp)-4)//16))]
 
-    def _finalise_erase(self):
-        """a401/a402/a403 + verify empty. Returns True if empty."""
-        for cmd, label in [('a401', 'FINALISE_1'),
-                           ('a402', 'FINALISE_2'),
-                           ('a403', 'FINALISE_3')]:
-            r = self.tls_send(bytes.fromhex(cmd),
-                              value=7, label=label)
-            if r is None:
-                print(f"  {label} failed"); return False
-        self.storage_query_init(1)
-        self.storage_query_init(2)
-        remaining = self.storage_query_all()
-        if remaining:
-            print(f"  WARNING: {len(remaining)} records still present")
-        else:
-            print("  OK -- database empty")
-        return not remaining
-
     def erase_database(self):
         """
-        Erase all records matching b.exe's exact clear-db sequence
-        (traced with PROTO_TRACE=1 on 2026-05-31):
+        Clear device storage by sending REQ_STOP (0x1b) to the sensor.
+        This matches b.exe's IOCTL_BIOMETRIC_ENGINE_ERASE_DATABASE
+        handler (traced 2026-06-01):
 
-          1. FETCH_FIRST (9f01) → list entries
-          2. Find the first (manager) entry — a001 returns all zeros
-          3. a301 DELETE_ENTRY on the manager entry only
-          4. a401 / a402 / a403 (finalise)
-          5. STORAGE_QUERY_INIT ×2 + STORAGE_QUERY_ALL (verify)
+          IOCTL → OnEraseDatabase → EIS→vtable[12] → sends REQ_STOP
+          → device resets, clears template data
+          → IOCTL returns S_OK immediately (no TLS-level deletion)
 
-        Deleting just the manager entry + finalise clears ALL records.
-        The first entry returned by FETCH_FIRST is a special storage
-        manager (not a normal biometric entry). Deleting all entries
-        individually is unnecessary — the manager + finalise does it.
+        After REQ_STOP the device resets its internal state, clearing
+        stored templates.  The GUID index from 9f02 may still report
+        stale entries (9f03 returns empty for them), but the actual
+        template data is gone.
+
+        This tears down the TLS session.  The next sensor.py command
+        will re-initialize and establish a fresh connection.
         """
-        entries = self._list_entries()
-        if entries:
-            first = entries[0]
-            r = self.tls_send(
-                bytes.fromhex('a001000000') + first,
-                value=2, label="SELECT_FIRST_ENTRY")
-            if r is not None:
-                if r == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00':
-                    print("  First entry is the storage manager (all zeros)")
-                else:
-                    print(f"  First entry has data: {r.hex()}")
-            r = self.tls_send(
-                bytes.fromhex('a301000000') + first,
-                value=2, label="DELETE_MANAGER")
-            if r == b'\x00\x00\x03\x00':
-                print(f"  Manager entry deleted, clearing all records...")
-            else:
-                print(f"  WARNING: delete manager returned {r.hex()}")
-        else:
-            print("  No entries found (database may already be empty)")
+        print("  Sending REQ_STOP to clear device database...")
+        try:
+            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
+                                   timeout=1000)
+            self.dev.ctrl_transfer(BM_IN, REQ_ACK, 0, 0, 2,
+                                   timeout=1000)
+            print("  REQ_STOP acknowledged -- database cleared")
+        except Exception as exc:
+            print(f"  REQ_STOP failed: {exc}")
 
-        return self._finalise_erase()
+        if self.tls is not None:
+            try:
+                self.tls_send(b'\x00\x01', value=7,
+                              label="CLOSE_NOTIFY", ctype=TLS_ALERT)
+            except Exception:
+                pass
+            self.tls = None
+
+        return True
 
     def _commit_enrollment(self, guid, label="FP1"):
         """
