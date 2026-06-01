@@ -992,23 +992,18 @@ class SensorTLS(Sensor):
 
     def cancel_session(self):
         """
-        Shut down the current TLS session and restart it cleanly.
-        Use this for Ctrl+C outside of an active enrollment (identify,
-        list-db, etc.).  Does NOT send the enrollment abort (9604).
+        Cancel an in-progress operation (identify, enroll, etc.) and
+        turn off the sensor LED immediately.
 
-        For enrollment cancellation use discard_enrollment() first,
-        then restart_session().
+        dev.reset() resets the USB device state and turns the LED off
+        without terminating the TLS session -- subsequent commands
+        (list-db, identify, enroll) work normally after this call.
         """
-        print("  Sending REQ_SHUTDOWN...")
+        print("  Resetting USB device...")
         try:
-            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
-                                   timeout=1000)
-            self.dev.ctrl_transfer(BM_IN,  REQ_ACK,      0, 0, 2,
-                                   timeout=1000)
-        except Exception as e:
-            pass
-        self.tls = None
-        self.restart_session()
+            self.dev.reset()
+        except Exception as exc:
+            _log(f"  dev.reset(): {exc}")
 
 
 # ---------------------------------------------------------------------------
