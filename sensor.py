@@ -590,14 +590,27 @@ class Sensor:
 
     def ctrl_in(self, req, length, value=0, label=""):
         _log(f"<<< {label} {BM_IN:02x}{req:02x}{value:04x} len={length}")
-        try:
-            resp = bytes(self.dev.ctrl_transfer(BM_IN, req, value, 0,
-                                                length, timeout=USB_TIMEOUT))
-            _log(f"  resp ({len(resp)}B): {resp[:64].hex()}")
-            return resp
-        except Exception as exc:
-            _log(f"  ERROR: {exc}")
-            raise
+        # Poll in short slices so Python's signal handler can fire between
+        # iterations -- a single long ctrl_transfer blocks KeyboardInterrupt.
+        slice_ms = 200
+        remaining = USB_TIMEOUT
+        while True:
+            t = min(slice_ms, remaining)
+            try:
+                resp = bytes(self.dev.ctrl_transfer(BM_IN, req, value, 0,
+                                                    length, timeout=t))
+                _log(f"  resp ({len(resp)}B): {resp[:64].hex()}")
+                return resp
+            except usb.core.USBError as exc:
+                backend_timeout = getattr(exc, 'backend_error_code', None) == -7
+                if exc.errno == 110 or backend_timeout:
+                    remaining -= t
+                    if remaining <= 0:
+                        _log(f"  TIMEOUT")
+                        raise
+                    continue
+                _log(f"  ERROR: {exc}")
+                raise
 
     INTERRUPT_EP = 0x83  # interrupt IN endpoint (intf 1, vendor)
 
