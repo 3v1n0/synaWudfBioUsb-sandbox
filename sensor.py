@@ -3170,7 +3170,8 @@ def main():
     print("  TLS OK")
 
     # ----- Save PairingData if we used fresh keys -----
-    if cr is not None and not os.path.exists(PAIRING_FILE):
+    if (cr is not None and cr.device_cert is not None
+            and not os.path.exists(PAIRING_FILE)):
         _save_pairing_tlv({TLV_CLIENT_CERT:    cr.client_cert,
                            TLV_CLIENT_PRIVKEY: bytes(reversed(client_privkey_be)),
                            TLV_DEVICE_CERT:    cr.device_cert.raw})
