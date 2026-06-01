@@ -217,6 +217,10 @@ IOCTL_HDR = b'\x44\x00\x00\x00'
 #   2 = data-plane  (engine, storage queries, capture, match, enroll)
 #   6 = sensor ctrl (status, counters, update-check, ack)
 #   7 = storage/session admin (init, commit, finalise, close)
+
+# 3 zero-byte separator present in almost every command between
+# the opcode and the payload.  Exceptions pass pad=b''.
+_PAD3 = b'\x00\x00\x00'
 #
 # Each Cmd instance exposes a build() method returning the payload bytes.
 # ---------------------------------------------------------------------------
@@ -224,21 +228,27 @@ IOCTL_HDR = b'\x44\x00\x00\x00'
 class Cmd:
     """Descriptor for a fixed-layout app-layer command."""
 
-    def __init__(self, opcode, value, body=b'', label=""):
+    def __init__(self, opcode, value, body=b'', label="", pad=_PAD3):
         """
         opcode -- 1 or 2 bytes identifying the command (cmd + subcmd)
         value  -- TLS channel selector (2, 6 or 7)
-        body   -- fixed payload bytes that follow the opcode (may be empty)
+        body   -- fixed payload bytes that follow pad+opcode (may be empty)
         label  -- default trace label; can be overridden in send()
+        pad    -- separator inserted between opcode and body/arg.
+                  Defaults to 3 zero bytes (_PAD3), which the protocol uses
+                  for almost all commands.  Pass b'' for the few commands
+                  that have no separator (UPDATE_ACK, SENSOR_STATUS, etc.).
         """
         self.opcode = opcode
         self.value  = value
         self.body   = body
         self.label  = label
+        self.pad    = pad
 
     def build(self, arg=b''):
-        """Return the full payload bytes, appending `arg` after opcode+body."""
-        return self.opcode + self.body + arg
+        """Return the full payload bytes.
+        Layout: opcode | pad | body | arg"""
+        return self.opcode + self.pad + self.body + arg
 
     def send(self, dev, arg=b'', label=None, ctype=TLS_APP_DATA):
         """Build and send via dev.tls_send(); returns response.
@@ -247,10 +257,6 @@ class Cmd:
                             label=label if label else self.label,
                             ctype=ctype)
 
-
-# 3 zero-pad bytes that separate the 2-byte opcode from the 16-byte argument
-# in all handle/GUID commands (confirmed across every ax/9f command).
-_PAD3 = b'\x00\x00\x00'
 
 # Sensor-control channel
 CH_SENSOR = 6
@@ -261,59 +267,59 @@ CH_STORE  = 7
 
 # --- Sensor / engine control (value=6) ---
 CMD_GET_RECORD_COUNT     = Cmd(b'\x82', CH_SENSOR,
-                               b'\x00\x00\x00\x00\x00\x00\x02\x07',
+                               b'\x00\x00\x00\x02\x07',
                                label="GET_RECORD_COUNT")
 CMD_SENSOR_STATUS        = Cmd(b'\x87', CH_SENSOR,
                                b'\x00\x20\x00\x01\x00\x00\x00',
-                               label="SENSOR_STATUS")
+                               label="SENSOR_STATUS", pad=b'')
 CMD_UPDATE_ENROLL_CHECK  = Cmd(b'\x80\x0c', CH_SENSOR,
-                               b'\x00\x00\x00\x01\x00\x00\x00'
+                               b'\x01\x00\x00\x00'
                                b'\x01\x00\x00\x08\x01\x01\x01\x00',
                                label="UPDATE_ENROLL_CHECK")
 CMD_UPDATE_IDENT_CHECK   = Cmd(b'\x80\x14', CH_SENSOR,
-                               b'\x00\x00\x00\x01\x00\x00\x00'
+                               b'\x01\x00\x00\x00'
                                b'\x01\x00\x00\x08\x01\x01\x01\x00',
                                label="UPDATE_IDENT_CHECK")
-CMD_UPDATE_ACK           = Cmd(b'\x81', CH_SENSOR, label="UPDATE_ACK")
+CMD_UPDATE_ACK           = Cmd(b'\x81', CH_SENSOR, label="UPDATE_ACK", pad=b'')
 
 # --- Storage queries / fetch (value=2, handle arg) ---
-CMD_FETCH_FIRST          = Cmd(b'\x9f\x01', CH_DATA,  _PAD3 + b'\x00' * 16,
+CMD_FETCH_FIRST          = Cmd(b'\x9f\x01', CH_DATA,  b'\x00' * 16,
                                label="FETCH_FIRST")
-CMD_STORAGE_QUERY_ALL    = Cmd(b'\x9f\x02', CH_DATA,  _PAD3 + b'\xff' * 16,
+CMD_STORAGE_QUERY_ALL    = Cmd(b'\x9f\x02', CH_DATA,  b'\xff' * 16,
                                label="STORAGE_QUERY_ALL")
-CMD_FETCH_RECORD         = Cmd(b'\x9f\x03', CH_DATA,  _PAD3,
+CMD_FETCH_RECORD         = Cmd(b'\x9f\x03', CH_DATA,
                                label="FETCH_RECORD")        # + guid/handle
-CMD_SELECT_ENTRY         = Cmd(b'\xa0\x01', CH_DATA,  _PAD3,
+CMD_SELECT_ENTRY         = Cmd(b'\xa0\x01', CH_DATA,
                                label="SELECT_ENTRY")        # + entry handle
-CMD_SELECT_RECORD        = Cmd(b'\xa0\x03', CH_DATA,  _PAD3,
+CMD_SELECT_RECORD        = Cmd(b'\xa0\x03', CH_DATA,
                                label="SELECT_RECORD")       # + record handle
-CMD_LOAD_TEMPLATE        = Cmd(b'\xa1\x03', CH_DATA,  _PAD3,
+CMD_LOAD_TEMPLATE        = Cmd(b'\xa1\x03', CH_DATA,
                                label="LOAD_TEMPLATE")       # + record handle
-CMD_RECORD_TO_ENTRY      = Cmd(b'\xa2\x01', CH_DATA,  _PAD3,
+CMD_RECORD_TO_ENTRY      = Cmd(b'\xa2\x01', CH_DATA,
                                label="RECORD_TO_ENTRY")     # + record handle
-CMD_DELETE_ENTRY         = Cmd(b'\xa3\x01', CH_DATA,  _PAD3,
+CMD_DELETE_ENTRY         = Cmd(b'\xa3\x01', CH_DATA,
                                label="DELETE_ENTRY")        # + entry handle
 
 # --- Enroll lifecycle (value=2) ---
 CMD_ENROLL_BEGIN         = Cmd(b'\x96\x01', CH_DATA,
-                               b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+                               b'\x00\x00\x00\x00\x00\x00\x00\x00',
                                label="ENROLL_BEGIN")
-CMD_ENROLL_STATUS        = Cmd(b'\x96\x02', CH_DATA,  b'\x00\x00\x00',
+CMD_ENROLL_STATUS        = Cmd(b'\x96\x02', CH_DATA,
                                label="ENROLL_STATUS")
-CMD_ENGINE_COMMIT_ACK    = Cmd(b'\x96\x04', CH_DATA,  b'\x00\x00\x00',
+CMD_ENGINE_COMMIT_ACK    = Cmd(b'\x96\x04', CH_DATA,
                                label="ENGINE_COMMIT_ACK")
 CMD_MATCH_RESULT         = Cmd(b'\x99\x01', CH_DATA,
-                               b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+                               b'\x00\x00\x00\x00\x00\x00\x00\x00',
                                label="MATCH_RESULT")
 
 # --- Storage / admin (value=7) ---
-CMD_STORAGE_QUERY_INIT   = Cmd(b'\x9e\x01', CH_STORE, label="STORAGE_QUERY_INIT")
+CMD_STORAGE_QUERY_INIT   = Cmd(b'\x9e\x01', CH_STORE, label="STORAGE_QUERY_INIT", pad=b'')
 # Storage wipe finalise sequence (a401/a402/a403, Windows driver clear-db compat)
-CMD_STORAGE_WIPE_1       = Cmd(b'\xa4\x01', CH_STORE, label="STORAGE_WIPE_1")
-CMD_STORAGE_WIPE_2       = Cmd(b'\xa4\x02', CH_STORE, label="STORAGE_WIPE_2")
-CMD_STORAGE_WIPE_3       = Cmd(b'\xa4\x03', CH_STORE, label="STORAGE_WIPE_3")
+CMD_STORAGE_WIPE_1       = Cmd(b'\xa4\x01', CH_STORE, label="STORAGE_WIPE_1", pad=b'')
+CMD_STORAGE_WIPE_2       = Cmd(b'\xa4\x02', CH_STORE, label="STORAGE_WIPE_2", pad=b'')
+CMD_STORAGE_WIPE_3       = Cmd(b'\xa4\x03', CH_STORE, label="STORAGE_WIPE_3", pad=b'')
 # TLS session teardown -- must be sent as a TLS Alert record, not app data
-CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY")
+CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY",    pad=b'')
 
 # --- Query / template (value=2, fixed 125-byte payloads) ---
 CMD_QUERY_ENROLL_NEEDS   = Cmd(b'\x39', CH_DATA,
@@ -326,7 +332,7 @@ CMD_QUERY_ENROLL_NEEDS   = Cmd(b'\x39', CH_DATA,
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000'),
-                               label="QUERY_ENROLL_NEEDS")
+                               label="QUERY_ENROLL_NEEDS", pad=b'')
 CMD_QUERY_ENROLL_SIMPLE  = Cmd(b'\x39', CH_DATA,
                                bytes.fromhex(
                                    '000000000000000000000020000000'
@@ -337,7 +343,7 @@ CMD_QUERY_ENROLL_SIMPLE  = Cmd(b'\x39', CH_DATA,
                                    '00000000000000000000000020000000'
                                    '00000000000000000000000000000000'
                                    '20000000000000000000000000'),
-                               label="QUERY_ENROLL_SIMPLE")
+                               label="QUERY_ENROLL_SIMPLE", pad=b'')
 CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
                                bytes.fromhex(
                                    'f4010000f4010000077f0020000000'
@@ -348,18 +354,18 @@ CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000000000'
                                    '00000000000000000000000000'),
-                               label="ENROLL_TEMPLATE")
+                               label="ENROLL_TEMPLATE", pad=b'')
 
 # STORAGE_COMMIT (9603) payload is variable-length (built by _build_commit_payload)
 # so no fixed Cmd descriptor -- the method builds it directly.
-CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
+CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT", pad=b'')
 
 # CAPTURE_DATA and STATUS_EXT have a runtime parameter byte inserted at
 # fixed offsets inside the payload, so build() is called by the method.
 #   CAPTURE_DATA (86 <subfactor> 00*15 <subfactor> 00*19, 37B, value=2)
 #   STATUS_EXT   (86 00 00*15 <param> 00*19,        37B, value=2)
-CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,  label="CAPTURE_DATA")
-CMD_STATUS_EXT           = Cmd(b'\x86', CH_DATA,  label="STATUS_EXT")
+CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,  label="CAPTURE_DATA", pad=b'')
+CMD_STATUS_EXT           = Cmd(b'\x86', CH_DATA,  label="STATUS_EXT",   pad=b'')
 
 
 
