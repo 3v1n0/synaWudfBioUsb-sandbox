@@ -1602,17 +1602,17 @@ class BiometricSensor(SensorTLS):
         raw = CMD_CAPTURE_DATA.send(self)
         if raw is None or len(raw) < 22:
             return CaptureData(sensor_status=3, reject_detail=0, ctx=0, raw=raw)
-        if raw is not None and len(raw) == 66:
-            _log(f"  CAPTURE_DATA resp: {raw.hex()}")
         marker = struct.unpack_from('<I', raw, 18)[0]
         if marker == 6:
             sensor_status, reject_detail = 1, 0   # finger detected
         else:
             sensor_status, reject_detail = 2, 7   # no finger
         ctx = struct.unpack('<H', raw[-2:])[0] if len(raw) >= 2 else 0
-        return CaptureData(sensor_status=sensor_status,
-                           reject_detail=reject_detail,
-                           ctx=ctx, raw=raw)
+        cd = CaptureData(sensor_status=sensor_status,
+                         reject_detail=reject_detail,
+                         ctx=ctx, raw=raw)
+        _log(f"  {cd}")
+        return cd
 
     @staticmethod
     def _print_sensor_status(ss, label=""):
@@ -2705,7 +2705,7 @@ class BiometricSensor(SensorTLS):
         _log(f"  Interrupt raw: {i1.hex()}")
         print(f"  Interrupt: type=0x{i1_type:02x}"
               f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})")
-        self._print_sensor_status(self.get_sensor_status(ctx), label="armed:   ")
+        self._print_sensor_status(self.get_sensor_status(cap.ctx), label="armed:   ")
 
         # Pre-capture queries (finger is being placed/held)
         self.query_status_ext(4)
