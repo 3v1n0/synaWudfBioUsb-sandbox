@@ -1287,26 +1287,16 @@ class BiometricSensor(SensorTLS):
       FETCH_RECORD       -> value=2
     """
 
-    def get_record_count(self):
-        """
-        Send GET_RECORD_COUNT (8200...).
-        Returns status from response[0:2] (0x0000 = OK), or -1 on error.
-        The raw 34-byte response is a fixed status block,
-        NOT the actual count.  Use get_storage_count() for
-        the real number of records.
-        """
-        resp = CMD_GET_RECORD_COUNT.send(self)
-        if resp is None or len(resp) < 2:
-            return -1
-        return struct.unpack('<H', resp[:2])[0]
-
     def get_storage_count(self):
         """
         Full storage query sequence to obtain enrolled GUIDs.
         Returns list of 16-byte GUIDs.
         Raises RuntimeError on device error.
         """
-        status = self.get_record_count()
+        resp = CMD_GET_RECORD_COUNT.send(self)
+        if resp is None or len(resp) < 2:
+            raise RuntimeError("GET_RECORD_COUNT: no response")
+        status = struct.unpack('<H', resp[:2])[0]
         if status != 0:
             raise RuntimeError(f"GET_RECORD_COUNT failed: 0x{status:04x}")
         self.storage_query_init(1)
