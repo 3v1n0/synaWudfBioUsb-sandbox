@@ -1340,7 +1340,18 @@ class BiometricSensor(SensorTLS):
         else:
             print(f"Enrolled fingerprints ({len(enrolled)}):")
             for guid, rec in enrolled:
-                print(f"  {guid.hex()}  data={rec.hex()}")
+                handle = rec[4:20] if len(rec) >= 20 and rec[:2] == b'\x00\x00' else None
+                label = None
+                if handle:
+                    r4 = CMD_LOAD_TEMPLATE.send(self, handle)
+                    if r4 and len(r4) >= 125:
+                        idx = r4.find(b'\x02\x03', 110)
+                        if idx >= 0 and len(r4) >= idx + 7:
+                            llen = int.from_bytes(r4[idx+3:idx+7], 'little')
+                            raw = r4[idx+7:idx+7+llen]
+                            label = raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+                label_str = f"  label='{label}'" if label else ""
+                print(f"  {guid.hex()}{label_str}")
 
         return enrolled
 
@@ -2683,7 +2694,7 @@ class BiometricSensor(SensorTLS):
         print("\n--- Enrollment ---")
 
         if not label:
-            label = f"fp{os.urandom(2).hex()}"  # e.g. "fpa3f1" -- 6 chars
+            label = f"FP{os.urandom(2).hex()}"  # e.g. "FPa3f1" -- 6 chars
         else:
             label = label[:7]
         print(f"  Label: '{label}'")
