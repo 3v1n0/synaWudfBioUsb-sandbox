@@ -1926,6 +1926,7 @@ commitEnrollment()
             input.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
         }
         input.SubFactor = WINBIO_ANSI_381_POS_RH_INDEX_FINGER;
+        // input.SubFactor = WINBIO_ANSI_381_POS_RH_MIDDLE_FINGER;
         HLOG_USER("COMMIT_ENROLLMENT using new identity (Type=%lu, SubFactor=%u)\n",
             (unsigned long)input.Identity.Type,
             (unsigned)input.SubFactor);
@@ -2646,41 +2647,54 @@ setMode(WINBIO_SENSOR_MODE mode)
 }
 
 void
-deleteRecord(WINBIO_BIOMETRIC_SUBTYPE SubFactor)
+deleteRecord(WINBIO_IDENTITY *Identity,
+             WINBIO_BIOMETRIC_SUBTYPE SubFactor)
 {
     // DELETE_RECORD: driver expects WDF in/out. Buffer layout:
-    //   [0x00] WINBIO_IDENTITY (0x4c bytes): Type=2/3 identity for matching
+    //   [0x00] WINBIO_IDENTITY (0x4c bytes): Type=1/2/3 identity for matching
     //   [0x4c] WINBIO_BIOMETRIC_SUBTYPE SubFactor
     //   [0x4d] UCHAR Reserved[3]
     //   wire total = 0x50 bytes
-    // Type=3 with Wildcard=0 matches all records with given subfactor
+    //
+    // Identity.Type values:
+    //   WINBIO_ID_TYPE_WILDCARD (1) + Wildcard=0x25066282 → delete all matching
+    //   WINBIO_ID_TYPE_GUID     (2) → delete specific GUID
+    //   WINBIO_ID_TYPE_SID      (3) → delete by SID
     {
         typedef struct _WINBIO_HOST_DELETE_RECORD_WIRE {
             WINBIO_IDENTITY Identity;
             WINBIO_BIOMETRIC_SUBTYPE SubFactor;
             UCHAR Reserved[3];
         } WINBIO_HOST_DELETE_RECORD_WIRE;
-        static_assert(sizeof(WINBIO_HOST_DELETE_RECORD_WIRE) == 0x50, "DeleteRecord wire must be 0x50");
+        static_assert(sizeof(WINBIO_HOST_DELETE_RECORD_WIRE) == 0x50,
+                      "DeleteRecord wire must be 0x50");
 
         WINBIO_HOST_DELETE_RECORD_WIRE wireBuf = {0};
-        wireBuf.Identity.Type = WINBIO_ID_TYPE_WILDCARD;
-        wireBuf.Identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
+        memcpy(&wireBuf.Identity, Identity, sizeof(WINBIO_IDENTITY));
         wireBuf.SubFactor = SubFactor;
 
         WINBIO_BLANK_PAYLOAD obuf = {0};
-        HostMem in((UCHAR*)&wireBuf, sizeof(wireBuf)), out((UCHAR*)&obuf, sizeof(obuf));
-        HostRequest req(WdfRequestOther, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
+        HostMem in((UCHAR*)&wireBuf, sizeof(wireBuf)),
+                out((UCHAR*)&obuf, sizeof(obuf));
+        HostRequest req(WdfRequestOther,
+                        IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, &out, &in);
 
-        HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD (Type=%lu, Wildcard=%lu, subfactor=%u)\r\n",
+        HLOG_USER("about to IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD"
+                  " (Type=%lu, subfactor=%u)\r\n",
             (unsigned long)wireBuf.Identity.Type,
-            (unsigned long)wireBuf.Identity.Value.Wildcard,
             (unsigned)wireBuf.SubFactor);
-        hostQueue->ioctl->OnDeviceIoControl(hostQueue, &req, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, 0, 0);
+        if (wireBuf.Identity.Type == WINBIO_ID_TYPE_WILDCARD) {
+            HLOG_USER("  Wildcard=%lu\r\n",
+                (unsigned long)wireBuf.Identity.Value.Wildcard);
+        }
+        hostQueue->ioctl->OnDeviceIoControl(
+            hostQueue, &req, IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD, 0, 0);
         while(!req.complete)
             Sleep(200);
 
         HLOG_USER("DELETE_RECORD: hresult=0x%lx (%s)\r\n",
-            (unsigned long)req.completionStatus, hresult_to_sting(req.completionStatus));
+            (unsigned long)req.completionStatus,
+            hresult_to_sting(req.completionStatus));
         HLOG_DEBUG("  PayloadSize=%lu WinBioHresult=0x%lx (%s)\n",
             obuf.PayloadSize, (unsigned long)obuf.WinBioHresult,
             hresult_to_sting(obuf.WinBioHresult));
@@ -3391,10 +3405,35 @@ parseInfFile(const char *infPath, GUID *clsid, char *dllName, size_t dllNameSize
     return clsidOk && foundDll;
 }
 
+static int
+hex_to_byte(char c)
+{
+    if(c >= '0' && c <= '9') return c - '0';
+    if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int
+parse_hex_bytes(const char *s, unsigned char *buf, int max_len)
+{
+    int len = (int)strlen(s);
+    if(len % 2 != 0) return -1;
+    int out_len = len / 2;
+    if(out_len > max_len) return -1;
+    for(int i = 0; i < out_len; i++) {
+        int hi = hex_to_byte(s[i*2]);
+        int lo = hex_to_byte(s[i*2+1]);
+        if(hi < 0 || lo < 0) return -1;
+        buf[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return out_len;
+}
+
 void
 usage(const char *prog)
 {
-    printf("Usage: %s <nop|enroll|identify|identify-all|reset|reset-ownership|get-template <id>|set-led [on|off]|list-db|clear-db|delete-record>\n", prog);
+    printf("Usage: %s <nop|enroll|identify|identify-all|reset|reset-ownership|get-template <id>|set-led [on|off]|list-db|clear-db|delete-record [subfactor|guid <hex>|sid <hex>]>\n", prog);
 }
 
 static void
@@ -3441,7 +3480,18 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "delete-record") == 0) {
         if(argc < 3) {
-            printf("Usage: %s delete-record <subfactor>\n", argv[0]);
+            printf("Usage: %s delete-record [<subfactor>|guid <hex32>|sid <hex>]\n", argv[0]);
+            return 3;
+        }
+        if(argc >= 4 && strcasecmp(argv[2], "guid") == 0) {
+            if((int)strlen(argv[3]) != 32) {
+                printf("GUID must be 32 hex characters\n");
+                return 3;
+            }
+        } else if(argc >= 4 && strcasecmp(argv[2], "sid") == 0) {
+            // any even-length hex string is OK
+        } else if(argc >= 4) {
+            printf("Unknown qualifier '%s' (expected 'guid' or 'sid')\n", argv[2]);
             return 3;
         }
     }
@@ -3636,7 +3686,33 @@ main(int argc, char *argv[])
         setIndicator(ledState);
     }
     else if(strcasecmp(argv[1], "delete-record") == 0) {
-        deleteRecord((WINBIO_BIOMETRIC_SUBTYPE) atoi(argv[2]));
+        WINBIO_IDENTITY identity;
+        memset(&identity, 0, sizeof(identity));
+        WINBIO_BIOMETRIC_SUBTYPE subfactor = WINBIO_SUBTYPE_ANY;
+        if(argc >= 4 && strcasecmp(argv[2], "guid") == 0) {
+            unsigned char guid_bytes[16];
+            if(parse_hex_bytes(argv[3], guid_bytes, 16) != 16) {
+                HLOG_USER("Invalid GUID hex: %s\n", argv[3]);
+                return 3;
+            }
+            identity.Type = WINBIO_ID_TYPE_GUID;
+            memcpy(&identity.Value.TemplateGuid, guid_bytes, 16);
+        } else if(argc >= 4 && strcasecmp(argv[2], "sid") == 0) {
+            unsigned char sid_bytes[SECURITY_MAX_SID_SIZE];
+            int sid_len = parse_hex_bytes(argv[3], sid_bytes, SECURITY_MAX_SID_SIZE);
+            if(sid_len < 0) {
+                HLOG_USER("Invalid SID hex: %s\n", argv[3]);
+                return 3;
+            }
+            identity.Type = WINBIO_ID_TYPE_SID;
+            identity.Value.AccountSid.Size = (ULONG)sid_len;
+            memcpy(identity.Value.AccountSid.Data, sid_bytes, sid_len);
+        } else {
+            identity.Type = WINBIO_ID_TYPE_WILDCARD;
+            identity.Value.Wildcard = WINBIO_IDENTITY_WILDCARD;
+            subfactor = (WINBIO_BIOMETRIC_SUBTYPE)atoi(argv[2]);
+        }
+        deleteRecord(&identity, subfactor);
         listDatabase();
     }
     else if(strcasecmp(argv[1], "list-db") == 0) {

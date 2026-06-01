@@ -362,11 +362,12 @@ def load_pairing_data():
     Load PairingData TLV dict from local file or Wine registry.
     Returns {tag: bytes} or None.
     """
-    tlvs = _load_pairing_from_file()
-    if tlvs is not None:
-        return tlvs
+    use_wine = "USE_WINE_PAIRING_DATA" in os.environ
 
-    if "USE_WINE_PAIRING_DATA" not in os.environ:
+    if not use_wine:
+        tlvs = _load_pairing_from_file()
+        if tlvs is not None:
+            return tlvs
         return None
 
     blob = _load_pairing_blob_from_registry()
@@ -1317,6 +1318,22 @@ class BiometricSensor(SensorTLS):
             value=2, label="DELETE_ENTRY")
         return r == b'\x00\x00\x03\x00'
 
+    def delete_record_by_guid(self, guid):
+        """
+        Delete a single record by its 16-byte GUID.
+
+        Uses FETCH_RECORD (9f03) to look up the entry handle by GUID,
+        then SELECT_ENTRY + DELETE_ENTRY to remove it.
+        Returns True on success.
+        """
+        resp = self.tls_send(
+            bytes.fromhex('9f03' + '00' * 3) + guid,
+            value=2, label=f"FETCH_{guid[:4].hex()}")
+        if resp is None or len(resp) < 20:
+            return False
+        entry = resp[4:20]
+        return self.delete_record(entry)
+
     def close_notify(self):
         """Send TLS close_notify (value=7). Returns response."""
         return self.tls_send(
@@ -1874,9 +1891,9 @@ class BiometricSensor(SensorTLS):
 def main():
     if len(sys.argv) < 2 or sys.argv[1] not in (
             'list-db', 'enroll', 'clear-db', 'identify-all', 'identify',
-            'reset-ownership'):
+            'reset-ownership', 'delete-record'):
         print("Usage: sensor.py list-db|enroll|clear-db|identify-all|identify"
-              "|reset-ownership")
+              "|reset-ownership|delete-record [guid <hex32>]")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -1993,6 +2010,20 @@ def main():
             print(f"Result: matched {guid.hex()}")
         else:
             print("Result: no match / error")
+    elif sys.argv[1] == 'delete-record':
+        if len(sys.argv) < 4 or sys.argv[2] != 'guid':
+            print("Usage: sensor.py delete-record guid <hex32>")
+            sys.exit(1)
+        guid_hex = sys.argv[3]
+        if len(guid_hex) != 32:
+            print("GUID must be 32 hex characters")
+            sys.exit(1)
+        guid = bytes.fromhex(guid_hex)
+        print(f"Deleting record {guid_hex}...")
+        ok = sensor.delete_record_by_guid(guid)
+        print(f"  {'OK' if ok else 'FAILED'}")
+        if not ok:
+            sys.exit(1)
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
     print("Done.")
