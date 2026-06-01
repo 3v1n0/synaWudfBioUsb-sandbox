@@ -225,10 +225,10 @@ IOCTL_HDR = b'\x44\x00\x00\x00'
 class Cmd:
     """Descriptor for a fixed-layout app-layer command."""
 
-    def __init__(self, opcode, value, body=b'', label="", sep=b'\x00\x00\x00'):
+    def __init__(self, opcode, channel, body=b'', label="", sep=b'\x00\x00\x00'):
         """
         opcode -- 1 or 2 bytes identifying the command (cmd + subcmd)
-        value  -- TLS channel selector (2, 6 or 7)
+        channel  -- TLS channel selector (2, 6 or 7)
         body   -- fixed payload bytes that follow sep+opcode (may be empty)
         label  -- default trace label; can be overridden in send()
         sep    -- separator between opcode and body/arg, meaning unknown.
@@ -237,7 +237,7 @@ class Cmd:
                   custom value (e.g. SENSOR_STATUS uses b'\x00\x20\x00').
         """
         self.opcode = opcode
-        self.value  = value
+        self.channel = channel
         self.body   = body
         self.label  = label
         self.sep    = sep
@@ -252,7 +252,7 @@ class Cmd:
     def send(self, dev, arg=b'', label=None, ctype=TLS_APP_DATA):
         """Build and send via dev.tls_send(); returns response.
         label overrides the default cmd label when provided and non-empty."""
-        return dev.tls_send(self.build(arg), value=self.value,
+        return dev.tls_send(self.build(arg), value=self.channel,
                             label=label if label else self.label,
                             ctype=ctype)
 
@@ -1547,7 +1547,7 @@ class BiometricSensor(SensorTLS):
         """
         payload = (CMD_SENSOR_STATUS.opcode + bytes([ctx])
                    + CMD_SENSOR_STATUS.sep + CMD_SENSOR_STATUS.body)
-        return self.tls_send(payload, value=CMD_SENSOR_STATUS.value,
+        return self.tls_send(payload, value=CMD_SENSOR_STATUS.channel,
                              label=f"{CMD_SENSOR_STATUS.label}(ctx={ctx})")
 
     def update_enrollment_check(self):
@@ -1663,7 +1663,7 @@ class BiometricSensor(SensorTLS):
         Saves identity (GUID, SID, label) to device storage.
         Returns response bytes or None.
         """
-        return self.tls_send(payload, value=CMD_STORAGE_COMMIT.value,
+        return self.tls_send(payload, value=CMD_STORAGE_COMMIT.channel,
                              label=CMD_STORAGE_COMMIT.label)
 
     def engine_commit_ack(self):
