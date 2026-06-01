@@ -157,6 +157,15 @@ MatchResult    = namedtuple('MatchResult',    ['status', 'guid', 'score', 'index
                                                'strength', 'template_update'])
 TemplateStatus = namedtuple('TemplateStatus', ['status', 'percent_complete', 'reject_detail'])
 
+StatusExt      = namedtuple('StatusExt',      ['progress'])
+EntryInfo      = namedtuple('EntryInfo',      ['flags', 'record_ref'])
+RecordToEntry  = namedtuple('RecordToEntry',  ['entry_handle'])
+DeleteResult   = namedtuple('DeleteResult',   ['status'])
+
+# DeleteResult.status values
+DELETE_STATUS_EMPTY = 0x00000100   # entry had no data
+DELETE_STATUS_OK    = 0x00000300   # entry deleted successfully
+
 NULL_GUID = b'\x00' * 16   # 16 zero bytes -- "no GUID" sentinel
 
 REQ_START        = 0x19   # OUT -- phase 1 init signal
@@ -1322,8 +1331,8 @@ class BiometricSensor(SensorTLS):
         while off + 16 <= len(resp):
             guids.append(resp[off: off + 16])
             off += 16
-        _log(f"QUERY_ALL: {len(guids)} slots "
-             f"(header claims {slot_count})")
+        _log(f"QUERY_ALL: {len(guids)} slots (header claims {slot_count})")
+        assert len(guids) == slot_count, f"slot count mismatch: {len(guids)} vs {slot_count}"
         return guids
 
     def fetch_record(self, guid):
@@ -1394,14 +1403,14 @@ class BiometricSensor(SensorTLS):
         Full list-db sequence. Returns list of (guid, record_data) for
         all non-empty slots. Prints results to stdout.
         """
-        sc = self.get_storage_count(); status, count, guids = sc.status, sc.count, sc.guids
-        print(f"Storage count: status=0x{status:04x} count={count}")
-        if not guids:
+        sc = self.get_storage_count()
+        print(f"Storage count: status=0x{sc.status:04x} count={sc.count}")
+        if not sc.guids:
             print("No storage slots found.")
             return []
 
         enrolled = []
-        for guid in guids:
+        for guid in sc.guids:
             rec = self.fetch_record(guid)
             if rec:
                 enrolled.append((guid, rec))
@@ -1478,9 +1487,9 @@ class BiometricSensor(SensorTLS):
                   f" slots={n_slots}"
                   f" slot_handles={[h.hex() for h in slot_handles]}")
             if n_slots > 0:
-                a001 = CMD_SELECT_ENTRY.send(self, ent)
-                print(f"       a001(entry)={a001.hex() if a001 else 'None'}"
-                      f" ({len(a001) if a001 else 0}B)")
+                ei = self.select_entry(ent)
+                print(f"       a001(entry)={ei}"
+                      f" ({12}B)")
                 # Show that slot handles are NOT resolvable to GUIDs
                 for j, sh in enumerate(slot_handles[:2]):
                     rx = CMD_SELECT_RECORD.send(self, sh)
@@ -1640,9 +1649,15 @@ class BiometricSensor(SensorTLS):
         Extended status query (value=0x0002, 37 bytes).
         86 00 <00*15> <param> <00*19>
         param=4 for initial/post capture, param=1 for quality check.
+        Returns StatusExt(progress) where progress is the LE16 counter
+        from the last 2 bytes of the 66-byte response.
         """
         cmd = CMD_STATUS_EXT_4 if param == 4 else CMD_STATUS_EXT_1
-        return cmd.send(self)
+        resp = cmd.send(self)
+        if resp is None or len(resp) < 2:
+            return StatusExt(0)
+        progress = struct.unpack('<H', resp[-2:])[0]
+        return StatusExt(progress)
 
     def query_enrollment_simple(self):
         """
@@ -1769,20 +1784,19 @@ class BiometricSensor(SensorTLS):
         from get_storage_count() GUIDs.
         Returns True on success.
         """
-        r = CMD_SELECT_ENTRY.send(self, entry)
-        if r is None:
+        if self.select_entry(entry) is None:
             return False
-        r = CMD_DELETE_ENTRY.send(self, entry)
-        return r == b'\x00\x00\x03\x00'
+        dr = self.delete_entry(entry)
+        return dr is not None and dr.status == DELETE_STATUS_OK
 
     def _find_managers(self, entries):
         """Given a list of 16-byte entry handles from FETCH_FIRST,
-        return the subset whose a001 response is 12 zero bytes
+        return the subset whose a001 record_ref is all zeros
         (manager entries). Each manager owns exactly one GUID slot."""
         managers = []
         for ent in entries:
-            r = CMD_SELECT_ENTRY.send(self, ent)
-            if r == b'\x00' * 12:
+            ei = self.select_entry(ent)
+            if ei is not None and ei.record_ref == b'\x00' * 8:
                 managers.append(ent)
         return managers
 
@@ -1801,12 +1815,36 @@ class BiometricSensor(SensorTLS):
           [0:4]  status (0000 0000 = OK)
           [4:20] entry handle (16B)
 
-        Returns 16-byte entry handle on success, None on failure.
+        Returns RecordToEntry(entry_handle) or None on failure.
         """
         r = CMD_RECORD_TO_ENTRY.send(self, record_handle)
         if r is None or len(r) < 20 or r[:4] != b'\x00\x00\x00\x00':
             return None
-        return r[4:20]
+        return RecordToEntry(r[4:20])
+
+    def select_entry(self, entry):
+        """Select an entry handle via a001.
+        Returns EntryInfo(flags, record_ref) or None on error.
+          flags      -- LE32 at [0:4]  (0x00000001 = occupied)
+          record_ref -- bytes [4:12]   (first 8B of record handle, zeros = manager)
+        """
+        r = CMD_SELECT_ENTRY.send(self, entry)
+        if r is None or len(r) < 12:
+            return None
+        flags      = struct.unpack_from('<I', r, 0)[0]
+        record_ref = r[4:12]
+        return EntryInfo(flags, record_ref)
+
+    def delete_entry(self, entry, label="DELETE_ENTRY"):
+        """Delete an entry handle via a301.
+        Returns DeleteResult(status) or None on error.
+          status == DELETE_STATUS_OK    (0x00000300) -> deleted successfully
+          status == DELETE_STATUS_EMPTY (0x00000100) -> entry was already empty
+        """
+        r = CMD_DELETE_ENTRY.send(self, entry, label=label)
+        if r is None or len(r) < 4:
+            return None
+        return DeleteResult(struct.unpack_from('<I', r, 0)[0])
 
     def delete_record_by_guid(self, guid, force=False):
         """Attempt to delete a single record by GUID.
@@ -1866,8 +1904,8 @@ class BiometricSensor(SensorTLS):
         managers = self._find_managers(entries)
         _log(f"  {len(managers)} managers found; probing...")
         for mgr in managers:
-            r_del = CMD_DELETE_ENTRY.send(self, mgr, label="PROBE_DELETE")
-            if r_del != b'\x00\x00\x03\x00':
+            dr = self.delete_entry(mgr, label="PROBE_DELETE")
+            if dr is None or dr.status != DELETE_STATUS_OK:
                 continue
             self.storage_query_init(1)
             self.storage_query_init(2)
@@ -1900,23 +1938,23 @@ class BiometricSensor(SensorTLS):
         print(f"  record_handle : {record_handle.hex()}")
 
         # a201 chain
-        r2 = CMD_RECORD_TO_ENTRY.send(self, record_handle, label="A201_rh")
-        if r2 and len(r2) >= 20 and r2[:4] == b'\x00\x00\x00\x00':
-            entry1 = r2[4:20]
-            r3 = CMD_SELECT_ENTRY.send(self, entry1, label="A001_e1")
-            is_mgr1 = (r3 == ZEROS12)
+        r2 = self._record_to_entry(record_handle)
+        if r2 is not None:
+            entry1 = r2.entry_handle
+            ei1 = self.select_entry(entry1)
+            is_mgr1 = (ei1 is not None and ei1.record_ref == b'\x00' * 8)
             print(f"  entry1 (a201) : {entry1.hex()}  manager={is_mgr1}")
-            print(f"  a001(entry1)  : {r3.hex() if r3 else 'None'}")
+            print(f"  a001(entry1)  : {ei1}")
 
-            r4 = CMD_RECORD_TO_ENTRY.send(self, entry1, label="A201_e1")
-            if r4 and len(r4) >= 20 and r4[:4] == b'\x00\x00\x00\x00':
-                entry2 = r4[4:20]
-                r5 = CMD_SELECT_ENTRY.send(self, entry2, label="A001_e2")
-                is_mgr2 = (r5 == ZEROS12)
+            r4 = self._record_to_entry(entry1)
+            if r4 is not None:
+                entry2 = r4.entry_handle
+                ei2 = self.select_entry(entry2)
+                is_mgr2 = (ei2 is not None and ei2.record_ref == b'\x00' * 8)
                 print(f"  entry2 (chain): {entry2.hex()}  manager={is_mgr2}")
-                print(f"  a001(entry2)  : {r5.hex() if r5 else 'None'}")
+                print(f"  a001(entry2)  : {ei2}")
             else:
-                print(f"  a201(entry1)  : {r4.hex() if r4 else 'None'} (no chain)")
+                print(f"  a201(entry1)  : None (no chain)")
 
         # Try a003 on each manager -- a003 returns GUID at [16:32] for records;
         # if it works on managers too, we can identify manager->GUID mapping.
@@ -1933,17 +1971,16 @@ class BiometricSensor(SensorTLS):
                 rh_prefix_to_guid[rh_r.handle[:8]] = g
         for mgr in managers:
             r_a3 = self.select_record(mgr, label="A003_mgr")
-            a201_r = CMD_RECORD_TO_ENTRY.send(self, mgr, label="A201_mgr")
+            a201_r = self._record_to_entry(mgr)
             owner_guid = None
-            if a201_r and len(a201_r) >= 20 and a201_r[:4] == b'\x00\x00\x00\x00':
-                mid_entry = a201_r[4:20]
-                a001_mid = CMD_SELECT_ENTRY.send(self, mid_entry, label="A001_mid")
-                if a001_mid and len(a001_mid) >= 12:
-                    ref = a001_mid[4:12]
-                    owner_guid = rh_prefix_to_guid.get(ref)
+            if a201_r is not None:
+                mid_entry = a201_r.entry_handle
+                ei_mid = self.select_entry(mid_entry)
+                if ei_mid is not None:
+                    owner_guid = rh_prefix_to_guid.get(ei_mid.record_ref)
             print(f"    mgr {mgr.hex()[:16]}..."
                   f"  a003={'guid='+r_a3.guid.hex() if r_a3 else 'None'}"
-                   f"  owner_guid={owner_guid.hex() if owner_guid else 'unknown'}")
+                  f"  owner_guid={owner_guid.hex() if owner_guid else 'unknown'}")
 
     def probe_managers(self):
         """Map every manager entry to its owned GUID (non-destructive).
@@ -1965,11 +2002,13 @@ class BiometricSensor(SensorTLS):
 
         managers, non_mgr = [], []
         for ent in entries:
-            r = CMD_SELECT_ENTRY.send(self, ent, label="A001")
-            if r == b'\x00' * 12:
+            ei = self.select_entry(ent)
+            if ei is None:
+                pass
+            elif ei.record_ref == b'\x00' * 8:
                 managers.append(ent)
-            elif r and len(r) >= 12:
-                non_mgr.append((ent, r[4:12]))
+            else:
+                non_mgr.append((ent, ei.record_ref))
         print(f"  {len(managers)} managers, {len(non_mgr)} non-manager entries")
 
         ref_to_ents = defaultdict(list)
@@ -2137,14 +2176,14 @@ class BiometricSensor(SensorTLS):
         print("\n--- Identify All ---")
 
         # 1. Load all enrolled records into matching engine
-        sc = self.get_storage_count(); status, count, guids = sc.status, sc.count, sc.guids
-        _log(f"Storage count: status=0x{status:04x} count={count}")
-        if status != 0:
-            print(f"  Storage query failed: 0x{status:04x}")
+        sc = self.get_storage_count()
+        _log(f"Storage count: status=0x{sc.status:04x} count={sc.count}")
+        if sc.status != 0:
+            print(f"  Storage query failed: 0x{sc.status:04x}")
             return None
 
         loaded = 0
-        for guid in guids:
+        for guid in sc.guids:
             if guid == NULL_GUID:
                 continue
             print(f"  Loading {guid.hex()}...")
@@ -2161,7 +2200,7 @@ class BiometricSensor(SensorTLS):
         # 3. List entries + SELECT per entry
         entries = self._list_entries()
         for ent in entries:
-            CMD_SELECT_ENTRY.send(self, ent)
+            self.select_entry(ent)
 
         # 4. Capture finger
         print("\n  Touch and hold the sensor...")
@@ -2186,9 +2225,7 @@ class BiometricSensor(SensorTLS):
         self.query_enrollment_needs()
 
         ext1 = self.query_status_ext(1)
-        if ext1 and len(ext1) >= 2:
-            qual = struct.unpack('<H', ext1[-2:])[0]
-            print(f"  Progress: {qual}")
+        print(f"  Progress: {ext1.progress}")
 
         # UPDATE_CHECK with 8014 (identify variant)
         r = CMD_UPDATE_IDENT_CHECK.send(self, label="UPDATE_IDENTIFY_CHECK")
@@ -2247,9 +2284,7 @@ class BiometricSensor(SensorTLS):
         self.query_enrollment_needs()
 
         ext1 = self.query_status_ext(1)
-        if ext1 and len(ext1) >= 2:
-            qual = struct.unpack('<H', ext1[-2:])[0]
-            print(f"  Progress: {qual}")
+        print(f"  Progress: {ext1.progress}")
 
         CMD_UPDATE_IDENT_CHECK.send(self, label="UPDATE_IDENTIFY_CHECK")
 
@@ -2278,7 +2313,7 @@ class BiometricSensor(SensorTLS):
         return mr.guid
 
     def _list_entries(self):
-        """Fetch all entry blobs via 9f01. Returns list of 16-byte entries.
+        """Fetch all entry blobs via 9f01. Returns list of 16-byte handles.
         Must init storage before FETCH_FIRST (device rejects with TLS
         Alert 022f otherwise, corrupting the session)."""
         self.storage_query_init(1)
@@ -2307,10 +2342,9 @@ class BiometricSensor(SensorTLS):
                 ok = False
                 continue
             ent = managers[idx]
-            r = CMD_DELETE_ENTRY.send(self, ent, label="DELETE_MANAGER")
-            if r != b'\x00\x00\x03\x00':
-                print(f"  WARNING: delete[{idx}] returned"
-                      f" {r.hex() if r else 'None'}")
+            dr = self.delete_entry(ent, label="DELETE_MANAGER")
+            if dr is None or dr.status != DELETE_STATUS_OK:
+                print(f"  WARNING: delete[{idx}] returned {dr}")
                 ok = False
         return ok
 
@@ -2330,8 +2364,8 @@ class BiometricSensor(SensorTLS):
         print(f"  {len(entries)} entries to delete")
         deleted = 0
         for e in entries:
-            r = CMD_DELETE_ENTRY.send(self, e)
-            if r is not None:
+            dr = self.delete_entry(e)
+            if dr is not None:
                 deleted += 1
         print(f"  {deleted} deleted")
 
@@ -2441,10 +2475,9 @@ class BiometricSensor(SensorTLS):
 
             progress = False
             for mgr in managers:
-                r_del = CMD_DELETE_ENTRY.send(self, mgr, label="DELETE_MANAGER")
-                if r_del != b'\x00\x00\x03\x00':
-                    _log(f"  a301 returned"
-                         f" {r_del.hex() if r_del else 'None'} -- skip")
+                dr = self.delete_entry(mgr, label="DELETE_MANAGER")
+                if dr is None or dr.status != DELETE_STATUS_OK:
+                    _log(f"  a301 returned {dr} -- skip")
                     continue
                 # Check what disappeared from the full GUID set
                 self.storage_query_init(1)
@@ -2623,12 +2656,7 @@ class BiometricSensor(SensorTLS):
             print("  QUERY_ENROLL_NEEDS failed")
 
         ext1 = self.query_status_ext(1)
-        if ext1 is not None:
-            qual = ext1[-2:]
-            print(f"  Progress: {struct.unpack('<H', qual)[0]}")
-        else:
-            print("  STATUS_EXT(1) failed (finger read error)")
-            ok = False
+        print(f"  Progress: {ext1.progress}")
 
         self.update_enrollment_check()
 
@@ -2745,11 +2773,11 @@ class BiometricSensor(SensorTLS):
         print(f"  Label: '{label}'")
 
         # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
-        sc = self.get_storage_count(); status, count = sc.status, sc.count
-        print(f"  DB records: {count}")
-        if status != 0:
-            print(f"  Storage query status=0x{status:04x}")
-        if count >= 10:
+        sc = self.get_storage_count()
+        print(f"  DB records: {sc.count}")
+        if sc.status != 0:
+            print(f"  Storage query status=0x{sc.status:04x}")
+        if sc.count >= 10:
             ans = input("  Database is full! Try anyway? [y/N] ").strip().lower()
             if ans != 'y':
                 print("  Enrollment cancelled.")
