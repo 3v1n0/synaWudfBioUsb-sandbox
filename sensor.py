@@ -960,7 +960,8 @@ class SensorTLS(Sensor):
                                    timeout=1000)
             self.dev.ctrl_transfer(BM_IN, REQ_ACK, 0, 0, 2,
                                    timeout=1000)
-        except Exception:
+        except Exception as exc:
+            _log(f"  REQ_SHUTDOWN: {exc}")
             pass
         # TLS close_notify as Alert record (ctype=0x15)
         if self.tls is not None:
@@ -995,11 +996,15 @@ class SensorTLS(Sensor):
         Cancel an in-progress operation (identify, enroll, etc.) and
         turn off the sensor LED immediately.
 
-        dev.reset() resets USB state and turns the LED off without
-        breaking the device's TLS context for the next connection.
-        REQ_SHUTDOWN is intentionally omitted -- it causes a pipe error
-        on Linux pyusb when called mid-session.
+        Sends REQ_SHUTDOWN (OUT only -- REQ_ACK IN causes pipe error
+        on Linux mid-session), then dev.reset() to turn LED off and
+        reset USB state without breaking the device's TLS context.
         """
+        try:
+            self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
+                                   timeout=1000)
+        except Exception as exc:
+            _log(f"  REQ_SHUTDOWN: {exc}")
         print("  Resetting USB device...")
         try:
             self.dev.reset()
