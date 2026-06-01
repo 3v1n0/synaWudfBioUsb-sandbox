@@ -3103,8 +3103,8 @@ def main():
         _host_pubkey_y_le = _host_pubkey_Q.y().to_bytes(32, 'big')[::-1]
         host_pubkey = (b'\x3f\x5f\x17\x00' + _host_pubkey_x_le
                     + b'\x00' * 36 + _host_pubkey_y_le + b'\x00' * 38)
-        client_privkey_be = _host_privkey_be   # for TLS CertVerify
-        client_pubkey_x_le = _host_pubkey_x_le  # pubkey X for cert body
+        client_privkey_be  = _host_privkey_be
+        client_pubkey_x_le = _host_pubkey_x_le
         client_cert = None
         dev_x_be = dev_y_be = None
         print("  Sending pairing challenge...")
@@ -3117,13 +3117,6 @@ def main():
             sensor.close()
             sys.exit(1)
 
-    # Overlay cr fields if a challenge was sent
-    if cr is not None:
-        client_cert        = cr.client_cert
-        client_pubkey_x_le = cr.pub_key32
-        dev_x_be           = cr.dev_x_be
-        dev_y_be           = cr.dev_y_be
-
     if sensor.serial:
         fw = sensor.firmware_version
         fw_str = f"{fw[0]}.{fw[1]}" if fw else "?"
@@ -3132,8 +3125,11 @@ def main():
     # ----- TLS handshake -----
     print("TLS handshake...")
     try:
-        sensor.connect(host_pubkey, client_privkey_be, client_pubkey_x_le,
-                       client_cert, dev_x_be, dev_y_be)
+        sensor.connect(host_pubkey, client_privkey_be,
+                       cr.pub_key32   if cr else client_pubkey_x_le,
+                       cr.client_cert if cr else client_cert,
+                       cr.dev_x_be    if cr else dev_x_be,
+                       cr.dev_y_be    if cr else dev_y_be)
     except TlsAlertError as exc:
         print(f"  TLS handshake failed: {exc}")
         sensor.close()
