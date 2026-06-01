@@ -225,16 +225,6 @@ TLS_CHANGE_CS = 0x14
 TLS_APP_DATA  = 0x17
 TLS_ALERT     = 0x15
 
-# ---------------------------------------------------------------------------
-# TLS constants
-# ---------------------------------------------------------------------------
-
-TLS_VER       = b'\x03\x03'
-TLS_HANDSHAKE = 0x16
-TLS_CHANGE_CS = 0x14
-TLS_APP_DATA  = 0x17
-TLS_ALERT     = 0x15
-
 # TLS record header: type(1) + version(2) + length(2) -- RFC 5246 s6.2.1
 TLS_RECORD_HEADER_LEN = 5
 
