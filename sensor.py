@@ -3083,17 +3083,13 @@ def main():
         print(f"  host_pubkey: {host_pubkey[:8].hex()}...")
         _log(f"  client_privkey_le: {client_privkey_le[:8].hex()}...")
         _log(f"  dev_x_be: {dev_x_be[:8].hex()}...")
-        device_cert_for_save = None
+        cr = None
         # Even with PairingData, check if device wants a challenge
         if ready and int.from_bytes(ready, 'little') != 0:
             print("  Device requests challenge (REQ_READY non-zero)")
             print("  Sending pairing challenge...")
             cr = sensor.send_challenge(host_pubkey, client_privkey_be)
-            dev_x_be, dev_y_be = cr.dev_x_be, cr.dev_y_be
-            client_cert = cr.client_cert
-            client_pubkey_x_le = cr.pub_key32
-            device_cert_for_save = cr.device_cert
-            _log(f"  Updated dev key from challenge: {dev_x_be[:8].hex()}...")
+            _log(f"  Updated dev key from challenge: {cr.dev_x_be[:8].hex()}...")
     else:
         print("  No PairingData -- generating fresh host identity")
         # Generate random host ECDSA key pair (the client identity for TLS)
@@ -3109,19 +3105,24 @@ def main():
                     + b'\x00' * 36 + _host_pubkey_y_le + b'\x00' * 38)
         client_privkey_be = _host_privkey_be   # for TLS CertVerify
         client_pubkey_x_le = _host_pubkey_x_le  # pubkey X for cert body
+        client_cert = None
+        dev_x_be = dev_y_be = None
         print("  Sending pairing challenge...")
         try:
             cr = sensor.send_challenge(host_pubkey, IDENTITY_D_BE)
-            client_cert = cr.client_cert
-            client_pubkey_x_le = cr.pub_key32
-            dev_x_be, dev_y_be = cr.dev_x_be, cr.dev_y_be
-            device_cert_for_save = cr.device_cert
             print("  Challenge accepted")
         except (RuntimeError, ValueError) as exc:
             print(f"  Challenge failed: {exc}")
             print("  Cannot proceed without device key -- stopping")
             sensor.close()
             sys.exit(1)
+
+    # Overlay cr fields if a challenge was sent
+    if cr is not None:
+        client_cert        = cr.client_cert
+        client_pubkey_x_le = cr.pub_key32
+        dev_x_be           = cr.dev_x_be
+        dev_y_be           = cr.dev_y_be
 
     if sensor.serial:
         fw = sensor.firmware_version
@@ -3140,10 +3141,10 @@ def main():
     print("  TLS OK")
 
     # ----- Save PairingData if we used fresh keys -----
-    if device_cert_for_save is not None and not os.path.exists(PAIRING_FILE):
-        _save_pairing_tlv({TLV_CLIENT_CERT:    client_cert,
+    if cr is not None and not os.path.exists(PAIRING_FILE):
+        _save_pairing_tlv({TLV_CLIENT_CERT:    cr.client_cert,
                            TLV_CLIENT_PRIVKEY: bytes(reversed(client_privkey_be)),
-                           TLV_DEVICE_CERT:    device_cert_for_save.raw})
+                           TLV_DEVICE_CERT:    cr.device_cert.raw})
 
     # ----- Biometric commands -----
     try:
