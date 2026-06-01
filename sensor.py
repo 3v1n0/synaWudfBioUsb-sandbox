@@ -1577,9 +1577,20 @@ class BiometricSensor(SensorTLS):
         return resp, cs.sensor_status, cs.reject_detail
 
     @staticmethod
-    def _parse_sensor_status(resp):
+    def _print_sensor_status(self, ctx=0, label=""):
+        """Query and print human-readable SENSOR_STATUS."""
+        ss = self.get_sensor_status(ctx)
+        mode_str = {1: "armed", 2: "data_rdy"}.get(ss.mode, f"0x{ss.mode:04x}")
+        print(f"  {label}Sensor: mode={mode_str}"
+              f" sample={ss.sample} quality=0x{ss.quality:04x}"
+              f" context={ss.context}")
+        return ss
+
+    def get_sensor_status(self, ctx=0):
         """
-        Parse 18-byte SENSOR_STATUS response from get_sensor_status().
+        Query sensor status (CH_SENSOR, 9 bytes).
+        ctx is the enrollment context byte extracted from CAPTURE_DATA
+        response[-2:] (LE u16).
 
         Structure (from trace analysis):
           [0:2]   LE16 = 0x0000           (status)
@@ -1591,38 +1602,21 @@ class BiometricSensor(SensorTLS):
           [12:16] LE32 = context value
           [16:18] padding
 
-        Returns (mode, sample, quality, context).
-        """
-        if resp is None or len(resp) < 12:
-            return SensorStatus(0, 0, 0, 0)
-        mode = struct.unpack_from('<H', resp, 6)[0]
-        sample = struct.unpack_from('<H', resp, 8)[0]
-        quality = struct.unpack_from('<H', resp, 10)[0]
-        context = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
-        return SensorStatus(mode, sample, quality, context)
-
-    def _print_sensor_status(self, ctx=0, label=""):
-        """Query and print human-readable SENSOR_STATUS."""
-        resp = self.get_sensor_status(ctx)
-        ss = self._parse_sensor_status(resp)
-        mode_str = {1: "armed", 2: "data_rdy"}.get(ss.mode, f"0x{ss.mode:04x}")
-        print(f"  {label}Sensor: mode={mode_str}"
-              f" sample={ss.sample} quality=0x{ss.quality:04x}"
-              f" context={ss.context}")
-        return ss
-
-    def get_sensor_status(self, ctx=0):
-        """
-        Query sensor status (CH_SENSOR, 9 bytes).
-        ctx is the enrollment context byte extracted from CAPTURE_DATA
-        response[-2:] (LE u16).  Returns 18-byte response.
+        Returns SensorStatus(mode, sample, quality, context).
         """
         cmd = Cmd(CMD_SENSOR_STATUS.opcode + bytes([ctx]),
                   CMD_SENSOR_STATUS.channel,
                   body=CMD_SENSOR_STATUS.body,
                   sep=CMD_SENSOR_STATUS.sep,
                   label=f"{CMD_SENSOR_STATUS.label}(ctx={ctx})")
-        return cmd.send(self)
+        resp = cmd.send(self)
+        if resp is None or len(resp) < 12:
+            return SensorStatus(0, 0, 0, 0)
+        mode    = struct.unpack_from('<H', resp,  6)[0]
+        sample  = struct.unpack_from('<H', resp,  8)[0]
+        quality = struct.unpack_from('<H', resp, 10)[0]
+        context = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
+        return SensorStatus(mode, sample, quality, context)
 
     def update_enrollment_check(self):
         """
