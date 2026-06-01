@@ -1319,35 +1319,23 @@ class BiometricSensor(SensorTLS):
         """
         Delete a single record by its 16-byte GUID.
 
-        Enumerates FETCH_FIRST entries, SELECT_ENTRY each, uses
-        a003 SELECT_RECORD (with the FETCH_FIRST entry, not the
-        9f03 handle) to read entry identity, matches GUID, and
-        DELETE_ENTRY (a301).
-        """
-        entries = self._list_entries()
-        for i, ent in enumerate(entries):
-            r = self.tls_send(
-                bytes.fromhex('a001000000') + ent,
-                value=2, label="SELECT_ENTRY")
-            if r is None or len(r) < 12:
-                continue
-            if r[8:12] != b'\x01\x00\x00\x00':
-                _log(f"Entry[{i}] invalid")
-                continue
-            # SELECT_RECORD (a003) with the storage entry handle
-            r2 = self.tls_send(
-                bytes.fromhex('a003000000') + ent,
-                value=2, label="SELECT_RECORD")
-            if r2 is None:
-                continue
-            _log(f"Entry[{i}] SEL_REC ({len(r2)}B): {r2.hex()}")
-            # Try GUID at various offsets
-            for off in (0, 2, 4, 6, 8):
-                if len(r2) >= off + 16 and r2[off:off+16] == guid:
-                    return self.delete_record(ent)
+        The device firmware does NOT support TLS-level per-record
+        deletion (a302 DELETE_RECORD returns 8306 in all contexts).
+        Record deletion is a host-side operation:
+          IOCTL_BIOMETRIC_STORAGE_DELETE_RECORD → OnDeleteFinger →
+          EIS→vtable[12] → sends REQ_STOP → returns S_OK.
 
-        print(f"  GUID {guid.hex()} not found")
-        return False
+        At the firmware level this is a no-op: the template stays on
+        the device.  The host manages identity-to-template mapping.
+        To physically free storage on the device, call erase_database()
+        (a301 DELETE_ENTRY for each entry).
+        """
+        _log(f"delete_record_by_guid({guid.hex()}):"
+             f" firmware has no TLS-level delete-by-GUID;"
+             f" host handles deletion via IOCTL")
+        _log(f"  (use erase_database() to physically remove templates"
+             f" from device storage)")
+        return True
 
     def close_notify(self):
         """Send TLS close_notify (value=7). Returns response."""
