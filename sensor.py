@@ -247,8 +247,10 @@ class Cmd:
 
     def build(self, arg=b''):
         """Return the full payload bytes.
-        Layout: opcode | pad | body | arg"""
-        return self.opcode + self.pad + self.body + arg
+        Layout: opcode | pad | body | arg
+        pad is omitted when both body and arg are empty (opcode-only cmds)."""
+        sep = self.pad if (self.body or arg) else b''
+        return self.opcode + sep + self.body + arg
 
     def send(self, dev, arg=b'', label=None, ctype=TLS_APP_DATA):
         """Build and send via dev.tls_send(); returns response.
@@ -270,8 +272,8 @@ CMD_GET_RECORD_COUNT     = Cmd(b'\x82', CH_SENSOR,
                                b'\x00\x00\x00\x02\x07',
                                label="GET_RECORD_COUNT")
 CMD_SENSOR_STATUS        = Cmd(b'\x87', CH_SENSOR,
-                               b'\x00\x20\x00\x01\x00\x00\x00',
-                               label="SENSOR_STATUS", pad=b'')
+                               b'\x01\x00\x00\x00',
+                               label="SENSOR_STATUS", pad=b'\x00\x20\x00')
 CMD_UPDATE_ENROLL_CHECK  = Cmd(b'\x80\x0c', CH_SENSOR,
                                b'\x01\x00\x00\x00'
                                b'\x01\x00\x00\x08\x01\x01\x01\x00',
@@ -280,7 +282,7 @@ CMD_UPDATE_IDENT_CHECK   = Cmd(b'\x80\x14', CH_SENSOR,
                                b'\x01\x00\x00\x00'
                                b'\x01\x00\x00\x08\x01\x01\x01\x00',
                                label="UPDATE_IDENT_CHECK")
-CMD_UPDATE_ACK           = Cmd(b'\x81', CH_SENSOR, label="UPDATE_ACK", pad=b'')
+CMD_UPDATE_ACK           = Cmd(b'\x81', CH_SENSOR, label="UPDATE_ACK")
 
 # --- Storage queries / fetch (value=2, handle arg) ---
 CMD_FETCH_FIRST          = Cmd(b'\x9f\x01', CH_DATA,  b'\x00' * 16,
@@ -305,21 +307,21 @@ CMD_ENROLL_BEGIN         = Cmd(b'\x96\x01', CH_DATA,
                                b'\x00\x00\x00\x00\x00\x00\x00\x00',
                                label="ENROLL_BEGIN")
 CMD_ENROLL_STATUS        = Cmd(b'\x96\x02', CH_DATA,
-                               label="ENROLL_STATUS")
+                               b'\x00\x00\x00', label="ENROLL_STATUS", pad=b'')
 CMD_ENGINE_COMMIT_ACK    = Cmd(b'\x96\x04', CH_DATA,
-                               label="ENGINE_COMMIT_ACK")
+                               b'\x00\x00\x00', label="ENGINE_COMMIT_ACK", pad=b'')
 CMD_MATCH_RESULT         = Cmd(b'\x99\x01', CH_DATA,
                                b'\x00\x00\x00\x00\x00\x00\x00\x00',
                                label="MATCH_RESULT")
 
 # --- Storage / admin (value=7) ---
-CMD_STORAGE_QUERY_INIT   = Cmd(b'\x9e\x01', CH_STORE, label="STORAGE_QUERY_INIT", pad=b'')
+CMD_STORAGE_QUERY_INIT   = Cmd(b'\x9e\x01', CH_STORE, label="STORAGE_QUERY_INIT")
 # Storage wipe finalise sequence (a401/a402/a403, Windows driver clear-db compat)
-CMD_STORAGE_WIPE_1       = Cmd(b'\xa4\x01', CH_STORE, label="STORAGE_WIPE_1", pad=b'')
-CMD_STORAGE_WIPE_2       = Cmd(b'\xa4\x02', CH_STORE, label="STORAGE_WIPE_2", pad=b'')
-CMD_STORAGE_WIPE_3       = Cmd(b'\xa4\x03', CH_STORE, label="STORAGE_WIPE_3", pad=b'')
+CMD_STORAGE_WIPE_1       = Cmd(b'\xa4\x01', CH_STORE, label="STORAGE_WIPE_1")
+CMD_STORAGE_WIPE_2       = Cmd(b'\xa4\x02', CH_STORE, label="STORAGE_WIPE_2")
+CMD_STORAGE_WIPE_3       = Cmd(b'\xa4\x03', CH_STORE, label="STORAGE_WIPE_3")
 # TLS session teardown -- must be sent as a TLS Alert record, not app data
-CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY",    pad=b'')
+CMD_CLOSE_NOTIFY         = Cmd(b'\x00\x01', CH_STORE, label="CLOSE_NOTIFY")
 
 # --- Query / template (value=2, fixed 125-byte payloads) ---
 CMD_QUERY_ENROLL_NEEDS   = Cmd(b'\x39', CH_DATA,
@@ -358,14 +360,14 @@ CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
 
 # STORAGE_COMMIT (9603) payload is variable-length (built by _build_commit_payload)
 # so no fixed Cmd descriptor -- the method builds it directly.
-CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT", pad=b'')
+CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
 
 # CAPTURE_DATA and STATUS_EXT have a runtime parameter byte inserted at
 # fixed offsets inside the payload, so build() is called by the method.
 #   CAPTURE_DATA (86 <subfactor> 00*15 <subfactor> 00*19, 37B, value=2)
 #   STATUS_EXT   (86 00 00*15 <param> 00*19,        37B, value=2)
-CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,  label="CAPTURE_DATA", pad=b'')
-CMD_STATUS_EXT           = Cmd(b'\x86', CH_DATA,  label="STATUS_EXT",   pad=b'')
+CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,  label="CAPTURE_DATA")
+CMD_STATUS_EXT           = Cmd(b'\x86', CH_DATA,  label="STATUS_EXT")
 
 
 
