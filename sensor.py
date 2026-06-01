@@ -139,12 +139,13 @@ def _rand(n):
 # USB request codes
 # ---------------------------------------------------------------------------
 
-REQ_START    = 0x19   # OUT -- phase 1 init signal
-REQ_ACK      = 0x1a   # IN  -- phase 1 ack
-REQ_CMD      = 0x16   # OUT -- send command
-REQ_RESP     = 0x17   # IN  -- read response
-REQ_READY    = 0x14   # IN  -- ready check
-REQ_SHUTDOWN = 0x1b   # OUT -- vendor reset/shutdown (seen from windows driver)
+REQ_START        = 0x19   # OUT -- phase 1 init signal
+REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
+REQ_CMD          = 0x16   # OUT -- send command
+REQ_RESP         = 0x17   # IN  -- read response
+REQ_READY        = 0x14   # IN  -- ready check (also used as REQ_SHUTDOWN_ACK)
+REQ_SHUTDOWN     = 0x1b   # OUT -- vendor shutdown
+REQ_SHUTDOWN_ACK = 0x14   # IN  -- shutdown acknowledgment (same code as REQ_READY)
 BM_OUT, BM_IN = 0x40, 0xc0
 
 # Pairing-data TLV tag numbers
@@ -675,7 +676,7 @@ class Sensor:
         Returns the bootstrap status response (68B).
         """
         self.ctrl_out(REQ_START, value=1, label=f"REQ_START(r{n})")
-        ack = self.ctrl_in(REQ_ACK, 1, label=f"REQ_ACK(r{n})")
+        ack = self.ctrl_in(REQ_INIT_ACK, 1, label=f"REQ_INIT_ACK(r{n})")
         assert ack == b'\x01', f"ACK={ack.hex()}"
 
         self._cmd_device_info(n)
@@ -958,8 +959,8 @@ class SensorTLS(Sensor):
         try:
             self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
                                    timeout=1000)
-            # Post-shutdown read uses REQ_READY (0x14), not REQ_ACK (0x1a)
-            self.dev.ctrl_transfer(BM_IN, REQ_READY, 0, 0, 2,
+            # Post-shutdown read uses REQ_SHUTDOWN_ACK (0x14)
+            self.dev.ctrl_transfer(BM_IN, REQ_SHUTDOWN_ACK, 0, 0, 2,
                                    timeout=1000)
         except Exception as exc:
             _log(f"  REQ_SHUTDOWN: {exc}")
@@ -1834,7 +1835,7 @@ class BiometricSensor(SensorTLS):
         try:
             self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
                                    timeout=1000)
-            self.dev.ctrl_transfer(BM_IN, REQ_READY, 0, 0, 2,
+            self.dev.ctrl_transfer(BM_IN, REQ_SHUTDOWN_ACK, 0, 0, 2,
                                    timeout=1000)
         except Exception as exc:
             _log(f"  REQ_SHUTDOWN: {exc}")
@@ -2768,7 +2769,8 @@ def main():
             sensor.discard_enrollment()
         else:
             sensor.cancel_session()
-        return
+            return
+
     # ----- Cleanup: close TLS session gracefully -----
     sensor.close()
     print("Done.")
