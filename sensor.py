@@ -2096,7 +2096,33 @@ class BiometricSensor(SensorTLS):
             print("  OK -- no records remain")
         return not remaining
 
-    def clear_local_db(self):
+    def purge_entries(self):
+        """
+        Delete ALL entry handles (9f01 list) unconditionally via a301.
+
+        This clears the 100+ accumulated ghost entries the firmware
+        builds up over enroll/delete cycles. a301 accepts any entry
+        handle (manager or empty slot) -- returns 00000300 for managers
+        with data, 00000100 for empty slots. Both reduce the 9f01 count.
+
+        The device re-creates one fresh entry on the next TLS session,
+        so afterwards 9f01 returns 1 (or 0 during the current session).
+
+        Returns (deleted, remaining) counts.
+        """
+        entries = self._list_entries()
+        print(f"  {len(entries)} entries before purge")
+        deleted = 0
+        for e in entries:
+            r = self.tls_send(bytes.fromhex('a301000000') + e,
+                              value=2, label="PURGE_ENTRY")
+            if r is not None:
+                deleted += 1
+        entries2 = self._list_entries()
+        remaining = len(entries2)
+        print(f"  {deleted} deleted, {remaining} remaining")
+        return deleted, remaining
+
         """
         Delete only accessible GUIDs (current pairing namespace).
 
@@ -2503,10 +2529,11 @@ def main():
             'list-db', 'list-db-all', 'enroll', 'clear-db',
             'clear-local-db', 'identify-all', 'identify',
             'reset-ownership', 'delete-record', 'probe-guid',
-            'probe-managers'):
+            'probe-managers', 'purge-entries'):
         print("Usage: sensor.py list-db|list-db-all|enroll|clear-db|"
               "clear-local-db|identify-all|identify|reset-ownership|"
-              "delete-record [guid <hex32>]|probe-guid <hex32>")
+              "delete-record [guid <hex32>]|probe-guid <hex32>|"
+              "purge-entries")
         sys.exit(1)
 
     print("Connecting to sensor...")
@@ -2629,6 +2656,9 @@ def main():
     elif sys.argv[1] == 'list-db-all':
         print("list-db-all...")
         sensor.list_all()
+    elif sys.argv[1] == 'purge-entries':
+        print("purge-entries...")
+        sensor.purge_entries()
     elif sys.argv[1] == 'delete-record':
         # Usage: delete-record [--force] guid <hex32>
         args = sys.argv[2:]
