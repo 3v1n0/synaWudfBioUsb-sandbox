@@ -166,6 +166,9 @@ DeleteResult   = namedtuple('DeleteResult',   ['status'])
 DeviceInfo     = namedtuple('DeviceInfo',     ['serial', 'firmware_major', 'firmware_minor', 'raw'])
 StorageMeta    = namedtuple('StorageMeta',    ['store_size', 'num_entries'])
 BootStatus     = namedtuple('BootStatus',     ['state', 'raw'])
+ChallengeResponse = namedtuple('ChallengeResponse',
+                               ['client_cert', 'device_cert',
+                                'pub_key32', 'dev_x_be', 'dev_y_be'])
 
 # DeleteResult.status values
 DELETE_STATUS_EMPTY = 0x00000100   # entry had no data
@@ -1073,13 +1076,53 @@ class Sensor:
     def req_ready(self):
         return self.ctrl_in(REQ_READY, 2, label="REQ_READY")
 
+    def _verify_device_cert(self, device_cert):
+        """
+        Verify the device certificate returned by the challenge response.
+
+        Raises RuntimeError if device_cert is missing, too short, or if the
+        CA signature check fails.
+
+        device_cert layout (400B, confirmed from decompiled driver):
+          [0:142]        cert body (device's copy of host_pubkey blob)
+          [142:144]      DER sig length as u16le (typically 70-72B)
+          [144:144+slen] DER ECDSA sig over SHA256(cert_body[0:142])
+        """
+        if not device_cert or len(device_cert) < 146:
+            raise RuntimeError(
+                f"Device cert missing or too short: "
+                f"{len(device_cert) if device_cert else 0}B")
+        sig_len = struct.unpack_from('<H', device_cert, 142)[0]
+        if not (68 <= sig_len <= 72) or len(device_cert) < 144 + sig_len:
+            raise RuntimeError(
+                f"Device cert DER sig length invalid: {sig_len}")
+        dev_sig_der = device_cert[144:144 + sig_len]
+        cert_body   = device_cert[:142]
+        pub_nums = ec.EllipticCurvePublicNumbers(
+            int.from_bytes(DEVICE_CA_X, 'big'),
+            int.from_bytes(DEVICE_CA_Y, 'big'),
+            ec.SECP256R1())
+        ca_pub = pub_nums.public_key(default_backend())
+        from cryptography.exceptions import InvalidSignature
+        try:
+            ca_pub.verify(dev_sig_der, cert_body, ec.ECDSA(hashes.SHA256()))
+            print("  Device CA signature verified OK")
+        except InvalidSignature:
+            raise RuntimeError(
+                "Device CA verification failed -- "
+                "device may not be genuine Synaptics hardware")
+
     def send_challenge(self, host_pubkey, sign_privkey_be):
         """
-        Send 408-byte pairing challenge.
+        Send 408-byte pairing challenge and parse the response.
 
         The challenge proves ownership of the host ECS2 signing key.
         Device responds with 802 bytes: status(2) + client_cert(400)
-        + device_cert(400).  Returns (client_cert, device_cert).
+        + device_cert(400).
+
+        Returns ChallengeResponse(client_cert, device_cert, pub_key32,
+        dev_x_be, dev_y_be).  Raises RuntimeError on any failure,
+        including a missing or unauthenticated device cert.
         """
         sig = sign_ecdsa_sha256(sign_privkey_be,
                                 hashlib.sha256(host_pubkey).digest())
@@ -1090,48 +1133,27 @@ class Sensor:
         self.ctrl_out(REQ_CMD, channel=CH_INIT, data=challenge,
                       label="CHALLENGE")
         resp = self.ctrl_in(REQ_RESP, 802, label="CHALLENGE_RESP")
-        if resp is None or len(resp) < 402:
+        if resp is None or len(resp) < 802:
             raise RuntimeError(
                 f"Challenge response too short: {len(resp) if resp else 0}B")
         status = struct.unpack('<H', resp[:2])[0]
         if status != 0:
             raise RuntimeError(
                 f"Challenge rejected: status=0x{status:04x}")
-        client_cert  = resp[2:402]
-        device_cert  = resp[402:802] if len(resp) >= 802 else None
+        client_cert = resp[2:402]
+        device_cert = resp[402:802]
         _log(f"Challenge accepted, client_cert={client_cert[:8].hex()}...")
-        if device_cert:
-            _log(f"  device_cert={device_cert[:8].hex()}...")
+        _log(f"  device_cert={device_cert[:8].hex()}...")
 
-        # Verify device authenticity: device signs SHA-256(device_cert_body)
-        # with the CA private key; we verify with the hardcoded CA pubkey.
-        # device_cert layout (confirmed from hex dump + decompiled code):
-        #   [0:142]   cert body (device's copy of host_pubkey blob, 142B)
-        #             FUN_180051dc0(cert, 0x8e=142, hash_out) hashes this
-        #   [142:144] DER sig length as u16le (typically 70 or 71 bytes)
-        #   [144:144+sig_len] DER-encoded ECDSA signature over SHA256(cert_body)
-        # Confirmed: ca_pub.verify(dev_sig_der, dc[0:142], SHA256) = OK
-        if device_cert and len(device_cert) >= 146:
-            sig_len = struct.unpack_from('<H', device_cert, 142)[0]
-            if 68 <= sig_len <= 72 and len(device_cert) >= 144 + sig_len:
-                dev_sig_der = device_cert[144:144 + sig_len]
-                cert_body   = device_cert[:142]
-                pub_nums = ec.EllipticCurvePublicNumbers(
-                    int.from_bytes(DEVICE_CA_X, 'big'),
-                    int.from_bytes(DEVICE_CA_Y, 'big'),
-                    ec.SECP256R1())
-                ca_pub = pub_nums.public_key(default_backend())
-                from cryptography.exceptions import InvalidSignature
-                try:
-                    ca_pub.verify(dev_sig_der, cert_body,
-                                  ec.ECDSA(hashes.SHA256()))
-                    _log("Device CA signature verified OK")
-                except InvalidSignature:
-                    raise RuntimeError(
-                        "Device CA verification failed -- "
-                        "device may not be genuine Synaptics hardware")
+        self._verify_device_cert(device_cert)
 
-        return client_cert, device_cert
+        pub_key32  = client_cert[144:176]
+        dev_x_be, dev_y_be = dev_key_from_tag3(device_cert)
+        return ChallengeResponse(client_cert=client_cert,
+                                 device_cert=device_cert,
+                                 pub_key32=pub_key32,
+                                 dev_x_be=dev_x_be,
+                                 dev_y_be=dev_y_be)
 
 
 # ---------------------------------------------------------------------------
@@ -3055,14 +3077,11 @@ def main():
         if ready and int.from_bytes(ready, 'little') != 0:
             print("  Device requests challenge (REQ_READY non-zero)")
             print("  Sending pairing challenge...")
-            challenge_cert, challenge_device_cert = sensor.send_challenge(
-                host_pubkey, client_privkey_be)
-            # Device certificate has fresh device key - override stored values
-            dev_x_be, dev_y_be = dev_key_from_tag3(challenge_device_cert)
-            client_cert = challenge_cert
-            client_pubkey_x_le = (challenge_cert[144:176]
-                                   if len(challenge_cert) >= 176 else b'\x00' * 32)
-            device_cert_for_save = challenge_device_cert
+            cr = sensor.send_challenge(host_pubkey, client_privkey_be)
+            dev_x_be, dev_y_be = cr.dev_x_be, cr.dev_y_be
+            client_cert = cr.client_cert
+            client_pubkey_x_le = cr.pub_key32
+            device_cert_for_save = cr.device_cert
             _log(f"  Updated dev key from challenge: {dev_x_be[:8].hex()}...")
     else:
         print("  No PairingData -- generating fresh host identity")
@@ -3081,13 +3100,11 @@ def main():
         client_pubkey_x_le = _host_pubkey_x_le  # pubkey X for cert body
         print("  Sending pairing challenge...")
         try:
-            challenge_cert, challenge_device_cert = sensor.send_challenge(
-                host_pubkey, IDENTITY_D_BE)
-            client_cert = challenge_cert
-            client_pubkey_x_le = (challenge_cert[144:176]
-                                   if len(challenge_cert) >= 176 else b'\x00' * 32)
-            dev_x_be, dev_y_be = dev_key_from_tag3(challenge_device_cert)
-            device_cert_for_save = challenge_device_cert
+            cr = sensor.send_challenge(host_pubkey, IDENTITY_D_BE)
+            client_cert = cr.client_cert
+            client_pubkey_x_le = cr.pub_key32
+            dev_x_be, dev_y_be = cr.dev_x_be, cr.dev_y_be
+            device_cert_for_save = cr.device_cert
             print("  Challenge accepted")
         except (RuntimeError, ValueError) as exc:
             print(f"  Challenge failed: {exc}")
