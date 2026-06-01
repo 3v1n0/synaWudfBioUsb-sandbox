@@ -1367,7 +1367,7 @@ class BiometricSensor(SensorTLS):
     def _build_commit_payload(self, guid, sid, label):
         """
         Build 138-byte commit payload (padded to match device expectations).
-        guid  -- 16 bytes from 9602 response
+        guid  -- 16 bytes from status_query response
         sid   -- 16 bytes (generated)
         label -- string for identity label
         """
@@ -1386,7 +1386,7 @@ class BiometricSensor(SensorTLS):
 
     def get_enroll_status(self):
         """
-        Send 9602 enrollment status query.
+        Send status_query enrollment status query.
 
         Returns (status, guid, sample_cnt) or None:
           status:     LE16 at [0:2]  (0 = ok/continuing)
@@ -2044,10 +2044,12 @@ class BiometricSensor(SensorTLS):
             print(f"  GUID: {guid.hex()}")
             return True, guid
 
-        # Non-zero status = terminal error
+        # Non-zero status = capture rejected (bad quality, etc.)
+        # This is transient — the caller should retry, not abort.
         if status != 0:
-            print(f"  ENROLL_STATUS error: 0x{status:04x}")
-            return False, status
+            print(f"  Capture rejected by device (status=0x{status:04x})"
+                  f" — lift and retry")
+            return False, None
 
         # Sample count check — does the device think we made progress?
         if sample_cnt is not None:
@@ -2100,8 +2102,8 @@ class BiometricSensor(SensorTLS):
             ok, guid = self._enroll_one_sample(i, max_attempts)
             if not ok:
                 if isinstance(guid, int):
-                    # Terminal error (e.g. 9602 returned error code)
-                    print(f"  9602 returned error code=0x{guid:04x}")
+                    # Terminal error (e.g. status_query returned error code)
+                    print(f"  status_query returned error code=0x{guid:04x}")
                     _, cnt, _ = self.get_storage_count()
                     if cnt >= 10:
                         print(f"  Database has {cnt} records "
