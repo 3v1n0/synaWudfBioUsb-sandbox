@@ -1157,12 +1157,13 @@ class SensorTLS(Sensor):
             try:
                 pt = self.tls.decrypt(TLS_ALERT, rbody)
                 alert = TlsAlertError(pt[0], pt[1])
-                _log(f"  {alert}")
                 if pt[0] == TLS_ALERT_FATAL:
-                    return None
-                # warning (e.g. close_notify) is expected -- not an error
+                    raise alert
+                _log(f"  {alert}")  # warning (e.g. close_notify) -- not an error
+            except TlsAlertError:
+                raise
             except Exception as exc:
-                _log(f"  TLS Alert (decrypt failed): {raw.hex()} {exc}")
+                raise RuntimeError(f"TLS Alert (decrypt failed): {raw.hex()}") from exc
             return None
         rtype = raw[0]
         rlen  = struct.unpack('>H', raw[3:5])[0]
@@ -2882,6 +2883,10 @@ def main():
         elif sys.argv[1] == 'probe-managers':
             print("probe-managers...")
             sensor.probe_managers()
+    except TlsAlertError as exc:
+        print(f"\nDevice sent fatal TLS alert: {exc}")
+        sensor.close()
+        sys.exit(1)
     except (KeyboardInterrupt, usb.core.USBError) as exc:
         print(f"\nInterrupted (USBError errno={getattr(exc, 'errno', None)})."
               if isinstance(exc, usb.core.USBError) else "\nInterrupted.")
