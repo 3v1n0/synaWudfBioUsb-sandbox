@@ -151,7 +151,8 @@ SelectInfo     = namedtuple('SelectInfo',     ['handle', 'guid'])
 StorageCount   = namedtuple('StorageCount',   ['status', 'count', 'guids'])
 CaptureStatus  = namedtuple('CaptureStatus',  ['sensor_status', 'reject_detail'])
 SensorStatus   = namedtuple('SensorStatus',   ['mode', 'sample', 'quality', 'context'])
-EnrollStatus   = namedtuple('EnrollStatus',   ['status', 'guid', 'sample_cnt', 'extra'])
+EnrollStatus   = namedtuple('EnrollStatus',   ['status', 'guid', 'sample_cnt',
+                                               'progress_sum', 'samples_used', 'size_flag'])
 MatchResult    = namedtuple('MatchResult',    ['status', 'guid', 'score', 'index',
                                                'strength', 'template_update'])
 TemplateStatus = namedtuple('TemplateStatus', ['status', 'percent_complete', 'reject_detail'])
@@ -1707,35 +1708,31 @@ class BiometricSensor(SensorTLS):
         """
         Send status_query enrollment status query.
 
-        Returns (status, guid, sample_cnt, extra) or None:
+        Returns EnrollStatus(status, guid, sample_cnt, progress_sum,
+                             samples_used, size_flag) or None:
           status:     LE16 at [0:2]  (0 = ok/continuing)
           guid:       bytes at [2:18] (16B, None if not complete)
           sample_cnt: LE16 at [22:24] (None if unavailable)
-          extra:      dict with extra progress fields or None
+          progress_sum: LE16 at [24:26] (None if unavailable)
+          samples_used: LE16 at [52:54] (None if unavailable)
+          size_flag:    LE32 at [48:52] (None if unavailable)
 
-        The extra dict contains counters that track enrollment
-        progress.  When ALL counters plateau (no change), the
-        device has extracted enough data and enrollment is
-        ready to finalize.
+        progress_sum and sample_cnt plateau when the device has
+        extracted enough data and enrollment is ready to finalize.
         """
         resp = CMD_ENROLL_STATUS.send(self)
         if resp is None:
             return None
         rlen = len(resp)
-        status = struct.unpack_from('<H', resp, 0)[0] if rlen >= 2 else 0xffff
-        guid = resp[2:18] if rlen >= 18 else b'\x00' * 16
+        status       = struct.unpack_from('<H', resp, 0)[0] if rlen >= 2 else 0xffff
+        guid         = resp[2:18] if rlen >= 18 else b'\x00' * 16
         if guid == b'\x00' * 16:
             guid = None
-        sample_cnt = struct.unpack_from('<H', resp, 22)[0] if rlen >= 24 else None
-        extra = None
-        if rlen >= 54:
-            extra = {
-                'sample_cnt': sample_cnt,
-                'progress_sum': struct.unpack_from('<H', resp, 24)[0],
-                'samples_used': struct.unpack_from('<H', resp, 52)[0],
-                'size_flag': struct.unpack_from('<I', resp, 48)[0],
-            }
-        return EnrollStatus(status, guid, sample_cnt, extra)
+        sample_cnt   = struct.unpack_from('<H', resp, 22)[0] if rlen >= 24 else None
+        progress_sum = struct.unpack_from('<H', resp, 24)[0] if rlen >= 54 else None
+        samples_used = struct.unpack_from('<H', resp, 52)[0] if rlen >= 54 else None
+        size_flag    = struct.unpack_from('<I', resp, 48)[0] if rlen >= 54 else None
+        return EnrollStatus(status, guid, sample_cnt, progress_sum, samples_used, size_flag)
 
     def storage_commit(self, payload):
         """
@@ -2667,7 +2664,10 @@ class BiometricSensor(SensorTLS):
         print(f"  ENROLL_STATUS: status=0x{enroll.status:04x}"
               f" guid={'yes' if enroll.guid else 'no'}"
               f" sample_cnt={enroll.sample_cnt}"
-              + (f" extra={enroll.extra}" if enroll.extra else ""))
+              + (f" progress_sum={enroll.progress_sum}"
+                 f" samples_used={enroll.samples_used}"
+                 f" size_flag={enroll.size_flag}"
+                 if enroll.progress_sum is not None else ""))
 
         # GUID present → enrollment complete, ready to commit
         if enroll.guid:
@@ -2680,25 +2680,25 @@ class BiometricSensor(SensorTLS):
         # extracted enough data.
         prev = getattr(self, '_prev_enroll_progress', None)
         changed = False
-        if enroll.extra is not None:
+        if enroll.progress_sum is not None:
             if prev is not None:
                 changed = (
-                    enroll.extra['sample_cnt'] != prev.get('sample_cnt')
-                    or enroll.extra['progress_sum'] != prev.get('progress_sum'))
+                    enroll.sample_cnt != prev[0]
+                    or enroll.progress_sum != prev[1])
             else:
                 changed = True
-            self._prev_enroll_progress = enroll.extra
+            self._prev_enroll_progress = (enroll.sample_cnt, enroll.progress_sum)
             if not changed:
                 plateau = getattr(self, '_enroll_plateau', 0) + 1
                 self._enroll_plateau = plateau
                 _log(f"  ENROLL plateau count={plateau}")
             else:
                 self._enroll_plateau = 0
-        elif sample_cnt is not None:
+        elif enroll.sample_cnt is not None:
             sc_prev = getattr(self, '_prev_enroll_cnt', None)
-            self._prev_enroll_cnt = sample_cnt
+            self._prev_enroll_cnt = enroll.sample_cnt
             if sc_prev is not None:
-                changed = sample_cnt > sc_prev
+                changed = enroll.sample_cnt > sc_prev
                 if changed:
                     self._enroll_plateau = 0
                 else:
@@ -2708,9 +2708,9 @@ class BiometricSensor(SensorTLS):
                 changed = True
 
         # 0x0680 = WINBIO_E_DATABASE_FULL
-        if status == 0x0680:
-            print(f"  Database full (status=0x{status:04x})")
-            return False, status
+        if enroll.status == 0x0680:
+            print(f"  Database full (status=0x{enroll.status:04x})")
+            return False, enroll.status
 
         # 3 consecutive no-change → enrollment complete
         if not changed and getattr(self, '_enroll_plateau', 0) >= 3:
