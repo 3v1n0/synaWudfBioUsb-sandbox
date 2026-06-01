@@ -64,7 +64,7 @@ Usage:
   SENSOR_TRACE=1 ... python3 sensor.py list-db
 """
 
-import os, sys, struct, hashlib, hmac as _hmac, re
+import os, sys, struct, hashlib, hmac as _hmac, re, ssl
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import ec, utils as ec_utils
 from cryptography.hazmat.primitives import hashes
@@ -943,13 +943,10 @@ class SensorTLS(Sensor):
             try:
                 pt = self.tls.decrypt(TLS_ALERT, rbody)
                 level = {1: 'warning', 2: 'fatal'}.get(pt[0], f'level={pt[0]}')
-                desc  = {0: 'close_notify', 10: 'unexpected_message',
-                         20: 'bad_record_mac', 40: 'handshake_failure',
-                         42: 'bad_certificate', 47: 'illegal_parameter',
-                         48: 'unknown_ca', 50: 'decode_error',
-                         51: 'decrypt_error', 70: 'protocol_version',
-                         80: 'internal_error', 90: 'user_canceled',
-                         100: 'no_renegotiation'}.get(pt[1], f'desc=0x{pt[1]:02x}')
+                try:
+                    desc = ssl.AlertDescription(pt[1]).name
+                except Exception:
+                    desc = f'0x{pt[1]:02x}'
                 _log(f"  TLS Alert: {level} {desc}")
                 if pt[0] == 2:  # fatal
                     return None
