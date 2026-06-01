@@ -65,6 +65,7 @@ Usage:
 """
 
 import os, sys, struct, hashlib, hmac as _hmac, re, ssl
+from collections import namedtuple
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import ec, utils as ec_utils
 from cryptography.hazmat.primitives import hashes
@@ -142,6 +143,9 @@ def _rand(n):
 # ---------------------------------------------------------------------------
 # USB request codes
 # ---------------------------------------------------------------------------
+
+# Parsed result of a LOAD_TEMPLATE (a103) response.
+TemplateInfo = namedtuple('TemplateInfo', ['guid', 'sid', 'label'])
 
 REQ_START        = 0x19   # OUT -- phase 1 init signal
 REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
@@ -1318,6 +1322,35 @@ class BiometricSensor(SensorTLS):
         """
         return CMD_FETCH_RECORD.send(self, guid, label=f"FETCH_{guid[:4].hex()}")
 
+    def load_template(self, handle):
+        """
+        Send LOAD_TEMPLATE (a103) for a record handle and parse the response.
+
+        Response layout (133 bytes):
+          [0:2]    status (u16 LE, 0x0000 = ok)
+          [2:14]   fixed header (matches commit header sans opcode)
+          [14:30]  GUID (16B)
+          [30:40]  identity prefix
+          [40:56]  SID (16B)
+          [56:112] reserved zeros + pad + TLV1
+          [112:118] TLV1 (020001000000)
+          [118:]   label TLV: 0203 00 <len LE32> <label+NUL>
+
+        Returns TemplateInfo(guid, sid, label) or None on error.
+        """
+        r = CMD_LOAD_TEMPLATE.send(self, handle)
+        if not r or len(r) < 56:
+            return None
+        guid  = r[14:30]
+        sid   = r[40:56]
+        label = None
+        idx   = r.find(b'\x02\x03', 110)
+        if idx >= 0 and len(r) >= idx + 7:
+            llen = int.from_bytes(r[idx+3:idx+7], 'little')
+            raw  = r[idx+7:idx+7+llen]
+            label = raw.rstrip(b'\x00').decode('utf-8', errors='replace') or None
+        return TemplateInfo(guid=guid, sid=sid, label=label)
+
     def list_enrolled(self):
         """
         Full list-db sequence. Returns list of (guid, record_data) for
@@ -1341,16 +1374,8 @@ class BiometricSensor(SensorTLS):
             print(f"Enrolled fingerprints ({len(enrolled)}):")
             for guid, rec in enrolled:
                 handle = rec[4:20] if len(rec) >= 20 and rec[:2] == b'\x00\x00' else None
-                label = None
-                if handle:
-                    r4 = CMD_LOAD_TEMPLATE.send(self, handle)
-                    if r4 and len(r4) >= 125:
-                        idx = r4.find(b'\x02\x03', 110)
-                        if idx >= 0 and len(r4) >= idx + 7:
-                            llen = int.from_bytes(r4[idx+3:idx+7], 'little')
-                            raw = r4[idx+7:idx+7+llen]
-                            label = raw.rstrip(b'\x00').decode('utf-8', errors='replace')
-                label_str = f"  label='{label}'" if label else ""
+                tmpl   = self.load_template(handle) if handle else None
+                label_str = f"  label='{tmpl.label}'" if tmpl and tmpl.label else ""
                 print(f"  {guid.hex()}{label_str}")
 
         return enrolled
@@ -1388,27 +1413,17 @@ class BiometricSensor(SensorTLS):
             rec = self.fetch_record(guid)
             handle = rec[4:20] if (rec and len(rec) > 4
                                    and rec[0:2] == b'\x00\x00') else None
-            r3 = (CMD_SELECT_RECORD.send(self, handle)
-                  if handle else None)
-            r4 = (CMD_LOAD_TEMPLATE.send(self, handle)
-                  if handle else None)
-            tmpl_guid = r4[14:30] if (r4 and len(r4) >= 30) else None
-            tmpl_label = None
-            if r4 and len(r4) >= 125:
-                idx = r4.find(b'\x02\x03', 110)
-                if idx >= 0 and len(r4) >= idx + 7:
-                    llen = int.from_bytes(r4[idx+3:idx+7], 'little')
-                    raw = r4[idx+7:idx+7+llen]
-                    tmpl_label = raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+            r3   = CMD_SELECT_RECORD.send(self, handle) if handle else None
+            tmpl = self.load_template(handle)           if handle else None
             guid_from_a003 = r3[20:36] if (r3 and len(r3) >= 36) else None
-            label_str = f" label='{tmpl_label}'" if tmpl_label else ""
+            label_str = f" label='{tmpl.label}'" if tmpl and tmpl.label else ""
             print(f"  [{i}] GUID {guid.hex()}{label_str}")
             print(f"       9f03 -> handle {handle.hex() if handle else 'N/A'}"
                   f" | a003 -> {guid_from_a003.hex() if guid_from_a003 else 'N/A'}"
-                  f" | a103 -> {tmpl_guid.hex() if tmpl_guid else 'N/A'}")
+                  f" | a103 -> {tmpl.guid.hex() if tmpl else 'N/A'}")
             if guid_from_a003 and guid_from_a003 != guid:
                 print(f"       WARN: a003 GUID mismatch!")
-            if tmpl_guid and tmpl_guid != guid:
+            if tmpl and tmpl.guid != guid:
                 print(f"       WARN: template GUID mismatch!")
 
         # 3. FETCH_FIRST entries + 9f03(entry) for per-entry slots
@@ -2040,8 +2055,7 @@ class BiometricSensor(SensorTLS):
         r = CMD_SELECT_RECORD.send(self, entry, label="SELECT_MATCH")
         if not r:
             return False
-        r = CMD_LOAD_TEMPLATE.send(self, entry)
-        return r is not None
+        return self.load_template(entry) is not None
 
     def match_result(self):
         """
@@ -2332,7 +2346,7 @@ class BiometricSensor(SensorTLS):
             if rec and len(rec) > 4 and rec[4:20] != b'\x00' * 16:
                 handle = rec[4:20]
                 CMD_SELECT_RECORD.send(self, handle)
-                CMD_LOAD_TEMPLATE.send(self, handle)
+                self.load_template(handle)
 
         # Delete only manager entries (a001 returns all zeros)
         entries = self._list_entries()
