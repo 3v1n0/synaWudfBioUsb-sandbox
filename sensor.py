@@ -2066,6 +2066,16 @@ class BiometricSensor(SensorTLS):
             return False
         return self.load_template(entry) is not None
 
+    def _print_match(self, matched):
+        """Fetch and print label/subfactor for a matched GUID."""
+        print(f"  Match found! GUID: {matched.hex()}")
+        rec    = self.fetch_record(matched)
+        handle = rec[4:20] if (rec and len(rec) >= 20 and rec[:2] == b'\x00\x00') else None
+        tmpl   = self.load_template(handle) if handle else None
+        if tmpl:
+            label_str = f"  label='{tmpl.label}'" if tmpl.label else ""
+            print(f"  subfactor=0x{tmpl.subfactor:02x}{label_str}")
+
     def match_result(self):
         """
         Send 9901 match result query.
@@ -2195,7 +2205,7 @@ class BiometricSensor(SensorTLS):
         if matched is None or matched == b'\x00' * 16:
             print("  MATCH_RESULT returned zero GUID")
             return None
-        print(f"  Match found! GUID: {matched.hex()}")
+        self._print_match(matched)
         return matched
 
     def identify(self):
@@ -2250,7 +2260,7 @@ class BiometricSensor(SensorTLS):
         if matched is None or matched == b'\x00' * 16:
             print("  MATCH_RESULT returned zero GUID")
             return None
-        print(f"  Match found! GUID: {matched.hex()}")
+        self._print_match(matched)
         return matched
 
     def _list_entries(self):
