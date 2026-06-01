@@ -1391,15 +1391,9 @@ class SensorTLS(Sensor):
         self.ctrl_out(REQ_CMD, channel=channel,
                       data=rec + bytes(pad), label=f"TLS_OUT({label})")
         raw = self.ctrl_in(REQ_RESP, 4096, label=f"TLS_IN({label})")
-        if not raw:
-            return None
-        if len(raw) < 5:
-            _log(f"  TLS({label}) short response ({len(raw)}B): {raw.hex()}")
-            return None
-
-        recs = list(iter_tls_records(raw))
+        recs = list(iter_tls_records(raw or b''))
         if not recs:
-            _log(f"  TLS({label}) truncated or empty response")
+            _log(f"  TLS({label}) empty or short response")
             return None
         rec = recs[0]
         if rec.rtype == TLS_ALERT:
