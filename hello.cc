@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cassert>
 #include <map>
+#include <csignal>
 
 // #define _Analysis_mode_(...)
 // #define _Notliteral_
@@ -2021,6 +2022,8 @@ reset()
     }
 }
 
+void discardEnrollment(); // forward declaration
+
 void
 enroll(WINBIO_SENSOR_STATUS sensorStatus)
 {
@@ -2062,8 +2065,18 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
 
     Sleep(100);
 
+    // Discard enrollment on Ctrl+C
+    static volatile bool enroll_interrupted = false;
+    signal(SIGINT, [](int) { enroll_interrupted = true; });
+
     // keep going until template is complete
     for(int t=0;t<70;t++) {
+        if(enroll_interrupted) {
+            HLOG_USER("Enroll interrupted -- discarding enrollment\n");
+            discardEnrollment();
+            signal(SIGINT, SIG_DFL);
+            return;
+        }
         char obuf[1024*100];
         WINBIO_CAPTURE_DATA *data = (WINBIO_CAPTURE_DATA *)obuf;
         WINBIO_CAPTURE_PARAMETERS params = {0};
@@ -2229,6 +2242,7 @@ enroll(WINBIO_SENSOR_STATUS sensorStatus)
 
     Sleep(1000);
 
+    signal(SIGINT, SIG_DFL);
     commitEnrollment();
 }
 
@@ -3510,7 +3524,8 @@ main(int argc, char *argv[])
             strcasecmp(argv[1], "reset-ownership") == 0 ||
             strcasecmp(argv[1], "reset") == 0 ||
             strcasecmp(argv[1], "nop") == 0 ||
-            strcasecmp(argv[1], "calibrate") == 0) {
+            strcasecmp(argv[1], "calibrate") == 0 ||
+            strcasecmp(argv[1], "discard-enrollment") == 0) {
         // valid, no extra args needed
     }
     else {
@@ -3736,6 +3751,9 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "calibrate") == 0) {
         calibrate();
+    }
+    else if(strcasecmp(argv[1], "discard-enrollment") == 0) {
+        discardEnrollment();
     }
 
     HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to release hw\r\n");
