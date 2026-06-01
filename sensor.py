@@ -1610,9 +1610,14 @@ class BiometricSensor(SensorTLS):
         '020001000000')
 
     def _enroll_label_bytes(self, label_str):
-        """Build label TLV: tag 0x0302 + LE length + null-terminated utf-8."""
+        """
+        Build identity label TLV for commit payload.
+        Wire format: tag(2B LE=0x0203) + 0x00 + len(4B LE) + label + NUL.
+        Max label_str length: 7 chars (8B with NUL fits in fixed 136B payload).
+        """
+        assert len(label_str) <= 7, f"label too long: {label_str!r}"
         raw = label_str.encode("utf-8", errors="replace") + b"\x00"
-        return bytes.fromhex('020300') + struct.pack('<I', len(raw)) + raw
+        return b'\x02\x03\x00' + struct.pack('<I', len(raw)) + raw
 
     def _build_commit_payload(self, guid, sid, label):
         """
@@ -2678,7 +2683,7 @@ class BiometricSensor(SensorTLS):
         print("\n--- Enrollment ---")
 
         if not label:
-            label = input("  Label (max 7 chars): ").strip()[:7] or "finger"
+            label = f"fp{os.urandom(2).hex()}"  # e.g. "fpa3f1" -- 6 chars
         else:
             label = label[:7]
         print(f"  Label: '{label}'")
