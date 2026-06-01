@@ -1281,10 +1281,16 @@ class SensorTLS(Sensor):
                 state.feed_hs(hmsg)
                 if ht == TLS_HS_SERVER_HELLO:
                     srv_rand = hmsg[6:38]
+                    _log(f"  ServerHello: srv_rand={srv_rand.hex()}")
                 elif ht == TLS_HS_CERTIFICATE_REQUEST:
-                    pass
+                    # Device requests a client cert; we send it in the
+                    # bundle below -- no parameters needed from this msg
+                    _log("  CertificateRequest: client cert will be sent")
                 elif ht == TLS_HS_SERVER_HELLO_DONE:
-                    pass
+                    # Signals end of server hello flight; no data to parse
+                    _log("  ServerHelloDone: proceeding to key exchange")
+                else:
+                    _log(f"  HS msg type=0x{ht:02x} len={hl} (unhandled)")
                 hoff += 4 + hl
         if srv_rand is None:
             raise RuntimeError("ServerHello not received or parsed")
