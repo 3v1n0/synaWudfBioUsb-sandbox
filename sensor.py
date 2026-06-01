@@ -1540,25 +1540,20 @@ class BiometricSensor(SensorTLS):
                   f" (only {len(managers)} managers)")
             return False
 
-        target_manager = managers[guid_idx]
-        _log(f"  deleting manager[{guid_idx}]={target_manager.hex()}")
-        r3 = self.tls_send(bytes.fromhex('a301000000') + target_manager,
-                           value=2, label="DELETE_MANAGER")
-        _log(f"  DELETE_MANAGER response: {r3.hex() if r3 else 'None'}")
-        if r3 == b'\x00\x00\x03\x00':
-            # Verify GUID is gone
-            self.storage_query_init(1)
-            self.storage_query_init(2)
-            after = self.storage_query_all()
-            if guid not in after:
-                _log("  GUID successfully removed")
-                return True
-            print(f"  WARNING: a301 returned 00000300 but GUID still present"
-                  f" -- positional mapping may be off")
-        else:
-            _log(f"  a301 returned {r3.hex() if r3 else 'None'}"
-                 f" (expected 00000300)")
+        _log(f"  deleting manager[{guid_idx}]={managers[guid_idx].hex()}")
+        ok = self._delete_managers_at_indices([guid_idx], managers)
 
+        # Verify GUID is gone
+        self.storage_query_init(1)
+        self.storage_query_init(2)
+        after = self.storage_query_all()
+        if ok and guid not in after:
+            _log("  GUID successfully removed")
+            return True
+
+        if ok:
+            print(f"  WARNING: a301 returned 00000300 but GUID still"
+                  f" present -- positional mapping may be off")
         print(f"  ERROR: failed to delete GUID {guid.hex()}")
         return False
 
@@ -1829,18 +1824,61 @@ class BiometricSensor(SensorTLS):
         return [resp[4 + i*16 : 4 + (i+1)*16]
                 for i in range(min(nentries, (len(resp)-4)//16))]
 
+    def _delete_managers_at_indices(self, indices, managers):
+        """Delete manager entries at the given positional indices.
+
+        indices  -- list of int, positions within the managers list
+        managers -- ordered list of 16-byte manager entry handles
+                    (same order as GUIDs in 9f02 response)
+
+        Returns True if all deletions returned 00000300; False otherwise.
+        """
+        ok = True
+        for idx in indices:
+            if idx >= len(managers):
+                print(f"  ERROR: manager index {idx} out of range"
+                      f" ({len(managers)} managers)")
+                ok = False
+                continue
+            ent = managers[idx]
+            r = self.tls_send(bytes.fromhex('a301000000') + ent,
+                              value=2, label="DELETE_MANAGER")
+            if r != b'\x00\x00\x03\x00':
+                print(f"  WARNING: delete[{idx}] returned"
+                      f" {r.hex() if r else 'None'}")
+                ok = False
+        return ok
+
+    def _finalise_storage(self):
+        """Send a401/a402/a403 finalise sequence after bulk deletion.
+
+        Required after erase_database / clear_local_db but NOT after
+        single-record delete_record_by_guid (which omits finalise per
+        traced b.exe clear-db behaviour).
+
+        Returns True on success.
+        """
+        for cmd, label in [('a401', 'FINALISE_1'),
+                           ('a402', 'FINALISE_2'),
+                           ('a403', 'FINALISE_3')]:
+            r = self.tls_send(bytes.fromhex(cmd), value=7, label=label)
+            if r is None:
+                print(f"  {label} failed")
+                return False
+        return True
+
     def erase_database(self):
         """
         Erase all records from device storage using the TLS-level
         clear sequence (traced from windows driver clear-db 2026-06-01):
 
           1. STORAGE_QUERY_ALL to get GUIDs (loads templates)
-          2. FETCH_FIRST → list of entry handles
-          3. a001 for each entry → detect "manager" entries
+          2. FETCH_FIRST -> list of entry handles
+          3. a001 for each entry -> detect "manager" entries
              (response 12 bytes all zeros = 000000000000000000000000)
           4. a301 DELETE_ENTRY for each manager entry
           5. a401/a402/a403 (finalise)
-          6. STORAGE_QUERY_INIT ×2 + close
+          6. STORAGE_QUERY_INIT x2 + verify
 
         After this, all records are deleted and 9f02 returns empty.
         """
@@ -1860,29 +1898,15 @@ class BiometricSensor(SensorTLS):
                 self.tls_send(bytes.fromhex('a103000000') + handle,
                               value=2, label=f"LOAD_{guid[:4].hex()}")
 
-        # Find and delete manager entries (a001 returns all zeros)
+        # Find and delete all manager entries (a001 returns all zeros)
         entries = self._list_entries()
         print(f"  {len(entries)} entries found")
-        managers = []
-        for ent in entries:
-            r = self.tls_send(bytes.fromhex('a001000000') + ent,
-                              value=2, label="SELECT_ENTRY")
-            if r == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00':
-                managers.append(ent)
+        managers = self._find_managers(entries)
         print(f"  {len(managers)} manager entries to delete")
-        for ent in managers:
-            r = self.tls_send(bytes.fromhex('a301000000') + ent,
-                              value=2, label="DELETE_MANAGER")
-            if r != b'\x00\x00\x03\x00':
-                print(f"  WARNING: delete returned {r.hex()}")
+        self._delete_managers_at_indices(range(len(managers)), managers)
 
-        # Finalise
-        for cmd, label in [('a401', 'FINALISE_1'),
-                           ('a402', 'FINALISE_2'),
-                           ('a403', 'FINALISE_3')]:
-            r = self.tls_send(bytes.fromhex(cmd), value=7, label=label)
-            if r is None:
-                print(f"  {label} failed"); return False
+        if not self._finalise_storage():
+            return False
 
         # Verify
         self.storage_query_init(1)
@@ -1898,10 +1922,11 @@ class BiometricSensor(SensorTLS):
         """
         Delete only accessible GUIDs (current pairing namespace).
 
-        Uses the manager-entry deletion approach but filters to
-        GUIDs whose 9f03 returns a valid record handle.  Foreign-
-        namespace GUIDs (from other pairing sessions) are left
-        untouched.  Finalises with a401/a402/a403.
+        Uses the same positional manager-entry mapping as
+        delete_record_by_guid: for each accessible GUID, find its
+        index in the 9f02 response and delete managers[index].
+        Foreign-namespace GUIDs (from other pairing sessions) are
+        left untouched.  Finalises with a401/a402/a403.
 
         After this, only GUIDs from other sessions remain in 9f02.
         """
@@ -1909,36 +1934,30 @@ class BiometricSensor(SensorTLS):
         self.storage_query_init(1)
         self.storage_query_init(2)
         all_guids = self.storage_query_all()
-        accessible = [g for g in all_guids if self._is_accessible_guid(g)]
-        if not accessible:
+
+        # Identify accessible GUIDs and their positions in 9f02
+        accessible_indices = [
+            i for i, g in enumerate(all_guids)
+            if self._is_accessible_guid(g)
+        ]
+        if not accessible_indices:
             print("  No accessible GUIDs in current namespace")
             return True
-        print(f"  {len(accessible)} accessible GUID(s) to delete"
-              f" ({len(all_guids) - len(accessible)} foreign, skipped)")
+        print(f"  {len(accessible_indices)} accessible GUID(s) to delete"
+              f" ({len(all_guids) - len(accessible_indices)}"
+              f" foreign, skipped)")
 
-        # Find managers at matching positions
+        # Build ordered manager list (position i -> managers[i] == GUID i)
         entries = self._list_entries()
         managers = self._find_managers(entries)
-        if len(managers) < len(accessible):
-            print(f"  WARNING: {len(managers)} managers <"
-                  f" {len(accessible)} accessible GUIDs")
+        _log(f"  {len(managers)} manager entries found")
+
+        if not self._delete_managers_at_indices(accessible_indices,
+                                                managers):
+            print("  WARNING: one or more deletions failed")
+
+        if not self._finalise_storage():
             return False
-
-        targets = managers[:len(accessible)]
-        print(f"  Deleting {len(targets)} manager(s)...")
-        for ent in targets:
-            r = self.tls_send(bytes.fromhex('a301000000') + ent,
-                              value=2, label="DELETE_MANAGER")
-            if r != b'\x00\x00\x03\x00':
-                print(f"  WARNING: delete returned {r.hex()}")
-
-        # Finalise
-        for cmd, label in [('a401', 'FINALISE_1'),
-                           ('a402', 'FINALISE_2'),
-                           ('a403', 'FINALISE_3')]:
-            r = self.tls_send(bytes.fromhex(cmd), value=7, label=label)
-            if r is None:
-                print(f"  {label} failed"); return False
 
         # Verify
         self.storage_query_init(1)
