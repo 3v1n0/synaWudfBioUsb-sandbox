@@ -2236,7 +2236,7 @@ class BiometricSensor(SensorTLS):
         if mr is None:
             print("  MATCH_RESULT failed (TLS error)")
             return None
-        _log(f"  matchScore={mr.score} matchIndex={mr.index} matchStrength={mr.strength} templateUpdate={mr.template_update}")
+        _log(f"  match: {mr}")
         if mr.status != 0:
             print(f"  No match (status=0x{mr.status:04x})")
             return None
@@ -2288,7 +2288,7 @@ class BiometricSensor(SensorTLS):
         if mr is None:
             print("  MATCH_RESULT failed (TLS error)")
             return None
-        _log(f"  matchScore={mr.score} matchIndex={mr.index} matchStrength={mr.strength} templateUpdate={mr.template_update}")
+        _log(f"  match: {mr}")
         if mr.status != 0:
             print(f"  No match (status=0x{mr.status:04x})")
             return None
