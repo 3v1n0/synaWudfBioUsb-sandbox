@@ -145,7 +145,7 @@ def _rand(n):
 # ---------------------------------------------------------------------------
 
 # Parsed result of a LOAD_TEMPLATE (a103) response.
-TemplateInfo = namedtuple('TemplateInfo', ['guid', 'sid', 'label'])
+TemplateInfo = namedtuple('TemplateInfo', ['guid', 'sid', 'label', 'subfactor'])
 
 REQ_START        = 0x19   # OUT -- phase 1 init signal
 REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
@@ -1341,15 +1341,17 @@ class BiometricSensor(SensorTLS):
         r = CMD_LOAD_TEMPLATE.send(self, handle)
         if not r or len(r) < 56:
             return None
-        guid  = r[14:30]
-        sid   = r[40:56]
-        label = None
-        idx   = r.find(b'\x02\x03', 110)
+        guid      = r[14:30]
+        sid       = r[40:56]
+        # TLV1: tag=0x0002(2B LE) + len=0x0001(2B LE) + val(1B) + pad(1B)
+        subfactor = r[116] if len(r) >= 117 else 0
+        label     = None
+        idx       = r.find(b'\x02\x03', 110)
         if idx >= 0 and len(r) >= idx + 7:
-            llen = int.from_bytes(r[idx+3:idx+7], 'little')
-            raw  = r[idx+7:idx+7+llen]
+            llen  = int.from_bytes(r[idx+3:idx+7], 'little')
+            raw   = r[idx+7:idx+7+llen]
             label = raw.rstrip(b'\x00').decode('utf-8', errors='replace') or None
-        return TemplateInfo(guid=guid, sid=sid, label=label)
+        return TemplateInfo(guid=guid, sid=sid, label=label, subfactor=subfactor)
 
     def list_enrolled(self):
         """
@@ -1376,7 +1378,8 @@ class BiometricSensor(SensorTLS):
                 handle = rec[4:20] if len(rec) >= 20 and rec[:2] == b'\x00\x00' else None
                 tmpl   = self.load_template(handle) if handle else None
                 label_str = f"  label='{tmpl.label}'" if tmpl and tmpl.label else ""
-                print(f"  {guid.hex()}{label_str}")
+                sf_str    = f"  subfactor=0x{tmpl.subfactor:02x}" if tmpl else ""
+                print(f"  {guid.hex()}{label_str}{sf_str}")
 
         return enrolled
 
@@ -1417,7 +1420,8 @@ class BiometricSensor(SensorTLS):
             tmpl = self.load_template(handle)           if handle else None
             guid_from_a003 = r3[20:36] if (r3 and len(r3) >= 36) else None
             label_str = f" label='{tmpl.label}'" if tmpl and tmpl.label else ""
-            print(f"  [{i}] GUID {guid.hex()}{label_str}")
+            sf_str    = f" subfactor=0x{tmpl.subfactor:02x}" if tmpl else ""
+            print(f"  [{i}] GUID {guid.hex()}{label_str}{sf_str}")
             print(f"       9f03 -> handle {handle.hex() if handle else 'N/A'}"
                   f" | a003 -> {guid_from_a003.hex() if guid_from_a003 else 'N/A'}"
                   f" | a103 -> {tmpl.guid.hex() if tmpl else 'N/A'}")
@@ -1645,20 +1649,25 @@ class BiometricSensor(SensorTLS):
         raw = label_str.encode("utf-8", errors="replace") + b"\x00"
         return b'\x02\x03\x00' + struct.pack('<I', len(raw)) + raw
 
-    def _build_commit_payload(self, guid, sid, label):
+    def _build_commit_payload(self, guid, sid, label, subfactor=None):
         """
         Build commit payload (arg to CMD_STORAGE_COMMIT, 136 bytes).
-        guid  -- 16 bytes from enroll_status response
-        sid   -- 16 bytes (generated)
-        label -- string for identity label
+        guid      -- 16 bytes from enroll_status response
+        sid       -- 16 bytes (generated)
+        label     -- string for identity label
+        subfactor -- TLV1 value byte (default 0 = WINBIO_SUBTYPE_ANY);
+                     set via COMMIT_SUBFACTOR env var for testing
         """
+        if subfactor is None:
+            subfactor = int(os.environ.get('COMMIT_SUBFACTOR', '0'), 0)
+        tlv1 = b'\x02\x00\x01\x00' + bytes([subfactor]) + b'\x00'
         payload = (self.COMMIT_HEADER
                    + b'\x00' + guid
                    + self.COMMIT_IDENTITY_PREFIX
                    + sid
                    + b'\x00' * 48
                    + self.COMMIT_PAD
-                   + self.COMMIT_TLV1
+                   + tlv1
                    + self._enroll_label_bytes(label))
         # Pad to 136 bytes (total wire = 138 with 2-byte opcode 9603).
         assert len(payload) <= 136, f"commit payload too large: {len(payload)}"
