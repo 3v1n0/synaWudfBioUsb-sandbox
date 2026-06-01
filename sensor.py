@@ -1382,8 +1382,16 @@ class BiometricSensor(SensorTLS):
             r4 = (CMD_LOAD_TEMPLATE.send(self, handle)
                   if handle else None)
             tmpl_guid = r4[14:30] if (r4 and len(r4) >= 30) else None
+            tmpl_label = None
+            if r4 and len(r4) >= 125:
+                idx = r4.find(b'\x02\x03', 110)
+                if idx >= 0 and len(r4) >= idx + 7:
+                    llen = int.from_bytes(r4[idx+3:idx+7], 'little')
+                    raw = r4[idx+7:idx+7+llen]
+                    tmpl_label = raw.rstrip(b'\x00').decode('utf-8', errors='replace')
             guid_from_a003 = r3[20:36] if (r3 and len(r3) >= 36) else None
-            print(f"  [{i}] GUID {guid.hex()}")
+            label_str = f" label='{tmpl_label}'" if tmpl_label else ""
+            print(f"  [{i}] GUID {guid.hex()}{label_str}")
             print(f"       9f03 -> handle {handle.hex() if handle else 'N/A'}"
                   f" | a003 -> {guid_from_a003.hex() if guid_from_a003 else 'N/A'}"
                   f" | a103 -> {tmpl_guid.hex() if tmpl_guid else 'N/A'}")
@@ -1601,7 +1609,7 @@ class BiometricSensor(SensorTLS):
     COMMIT_TLV1 = bytes.fromhex(
         '020001000000')
 
-    def _enroll_label_bytes(self, label_str="FP1-00000000-0-00000000-none"):
+    def _enroll_label_bytes(self, label_str):
         """Build label TLV: tag 0x0302 + LE length + null-terminated utf-8."""
         raw = label_str.encode("utf-8", errors="replace") + b"\x00"
         return bytes.fromhex('020300') + struct.pack('<I', len(raw)) + raw
@@ -2661,13 +2669,19 @@ class BiometricSensor(SensorTLS):
                 return False, 0x0001
             return False, None
 
-    def enroll(self):
+    def enroll(self, label=None):
         """
         Full enrollment flow (interactive).
         Checks DB capacity first, then completes each sample fully.
         Errors (no finger, bad scan) are skipped without counting.
         """
         print("\n--- Enrollment ---")
+
+        if not label:
+            label = input("  Label (max 7 chars): ").strip()[:7] or "finger"
+        else:
+            label = label[:7]
+        print(f"  Label: '{label}'")
 
         # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
         status, count, _ = self.get_storage_count()
@@ -2711,7 +2725,7 @@ class BiometricSensor(SensorTLS):
                 continue        # transient error -- wait for next touch
             if guid is not None:
                 self._enroll_active = False
-                ok2 = self._commit_enrollment(guid=guid, label="FP1")
+                ok2 = self._commit_enrollment(guid=guid, label=label)
                 if not ok2:
                     _, cnt, _ = self.get_storage_count()
                     print(f"  DB records after failed commit: {cnt}")
@@ -2837,7 +2851,8 @@ def main():
             print("list-db...")
             sensor.list_enrolled()
         elif sys.argv[1] == 'enroll':
-            sensor.enroll()
+            label = sys.argv[2] if len(sys.argv) > 2 else None
+            sensor.enroll(label=label)
         elif sys.argv[1] == 'clear-db':
             print("clear-db...")
             sensor.erase_database()
