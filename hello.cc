@@ -3509,7 +3509,8 @@ main(int argc, char *argv[])
             strcasecmp(argv[1], "get-template") == 0 ||
             strcasecmp(argv[1], "reset-ownership") == 0 ||
             strcasecmp(argv[1], "reset") == 0 ||
-            strcasecmp(argv[1], "nop") == 0) {
+            strcasecmp(argv[1], "nop") == 0 ||
+            strcasecmp(argv[1], "calibrate") == 0) {
         // valid, no extra args needed
     }
     else {
@@ -3732,6 +3733,9 @@ main(int argc, char *argv[])
     }
     else if(strcasecmp(argv[1], "nop") == 0) {
         nop();
+    }
+    else if(strcasecmp(argv[1], "calibrate") == 0) {
+        calibrate();
     }
 
     HLOG_USER(">>>>>>>>>>>>>>>>>>>>>>> about to release hw\r\n");
