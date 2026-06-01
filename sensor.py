@@ -912,11 +912,22 @@ class Sensor:
     # --- Init protocol ---
 
     def _cmd_device_info(self, n):
-        """Send device info query (01...) -> 38B response."""
+        """
+        Send device info query -> 38B response.
+
+        Response layout (38 bytes):
+          [0:2]   status (0x0000 = ok)
+          [10]    firmware major version
+          [11]    firmware minor version
+          [18:24] serial number (6 bytes, formatted as %02X each)
+        """
         self.ctrl_out(REQ_CMD, channel=CH_INIT,
                       data=bytes.fromhex('0100000000000000'),
                       label=f"DEV_INFO(r{n})")
-        return self.ctrl_in(REQ_RESP, 0x26, label=f"DEV_INFO(r{n})")
+        r = self.ctrl_in(REQ_RESP, 0x26, label=f"DEV_INFO(r{n})")
+        if r and len(r) >= 24:
+            self.firmware_version = (r[10], r[11])
+            self.serial = r[18:24].hex().upper()
 
     def _cmd_cert_section(self, n, section):
         """Read certificate section (8e <section> 00 02 ...)."""
@@ -1008,8 +1019,10 @@ class SensorTLS(Sensor):
 
     def __init__(self):
         super().__init__()
-        self.tls = None
-        self._pairing = None  # set by connect(); used by restart_session()
+        self.tls             = None
+        self._pairing        = None  # set by connect(); used by restart_session()
+        self.serial          = None  # set by _cmd_device_info()
+        self.firmware_version = None # set by _cmd_device_info(); tuple (major, minor)
 
     def connect(self, host_pubkey, client_privkey_be, client_pubkey_x_le,
                 client_cert, dev_x_be, dev_y_be):
@@ -2967,6 +2980,11 @@ def main():
             print("  Cannot proceed without device key -- stopping")
             sensor.close()
             sys.exit(1)
+
+    if sensor.serial:
+        fw = sensor.firmware_version
+        fw_str = f"{fw[0]}.{fw[1]}" if fw else "?"
+        print(f"  Serial: {sensor.serial}  Firmware: {fw_str}")
 
     # ----- TLS handshake -----
     print("TLS handshake...")
