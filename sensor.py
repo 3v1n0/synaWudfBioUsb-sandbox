@@ -2507,10 +2507,10 @@ class BiometricSensor(SensorTLS):
         except KeyboardInterrupt:
             # Device requires 9604 + close_notify to cleanly abort an
             # in-progress enrollment session (confirmed from b.exe trace).
-            # After close_notify the Windows driver sends REQ_SHUTDOWN
-            # (0x1b) which causes the device to turn off the LED and
-            # reinitialise. On Linux pyusb this may raise a pipe error
-            # but the device still processes the command.
+            # The LED is controlled by a proprietary structured command
+            # via a background thread in the Windows driver -- not a simple
+            # plain USB byte we can replicate. Resetting the device is the
+            # cleanest way to turn it off from Linux.
             print("\n  Enrollment interrupted -- sending discard to device...")
             try:
                 self.engine_commit_ack()
@@ -2520,18 +2520,11 @@ class BiometricSensor(SensorTLS):
                 self.close_notify()
             except Exception:
                 pass
-            try:
-                self.dev.ctrl_transfer(BM_OUT, REQ_SHUTDOWN, 0, 0, [],
-                                       timeout=1000)
-            except Exception:
-                pass
-            try:
-                import usb.util
-                usb.util.release_interface(self.dev, 1)
-                usb.util.release_interface(self.dev, 0)
-            except Exception:
-                pass
             self.tls = None
+            try:
+                self.dev.reset()
+            except Exception:
+                pass
             print("  Enrollment discarded.")
             return False
 
