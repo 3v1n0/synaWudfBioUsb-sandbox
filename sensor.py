@@ -157,12 +157,6 @@ TLV_CLIENT_CERT    = 1  # 400-byte host certificate (client TLS cert body)
 TLV_CLIENT_PRIVKEY = 2  # 32-byte host ECDSA private key D (LE)
 TLV_DEVICE_CERT    = 3  # 400-byte device certificate (contains ECK1 pubkey)
 
-# ANSI 381 finger position subtypes (WINBIO_BIOMETRIC_SUBTYPE)
-# CAPTURE_DATA internal mode byte (b'\x06' at offsets 1 and 17 of the
-# 37-byte payload).  This is NOT a WINBIO_ANSI_381 finger-position subtype
-# -- it is an opaque device-internal field; changing it breaks enrollment.
-_CAPTURE_MODE = b'\x06'
-
 # ---------------------------------------------------------------------------
 # TLS constants
 # ---------------------------------------------------------------------------
@@ -367,10 +361,10 @@ CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
 
 # CAPTURE_DATA: 86 <subfactor> 00*15 <subfactor> 00*19 (37B)
 # subfactor is a WINBIO_ANSI_381_POS_* subtype; payload built by capture_data()
-# Full 37-byte payload: 86 06 00*15 06 00*19
+# Full 37-byte payload: 86 06 00*15 06 00*19 (0x06 is opaque device field)
 CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,
-                               body=_CAPTURE_MODE + b'\x00' * 15 +
-                                    _CAPTURE_MODE + b'\x00' * 19,
+                               body=b'\x06' + b'\x00' * 15 +
+                                    b'\x06' + b'\x00' * 19,
                                sep=b'', label="CAPTURE_DATA")
 # STATUS_EXT param=4: 86 00 <00*31> 04000000 (37B)
 CMD_STATUS_EXT_4         = Cmd(b'\x86', CH_DATA,
