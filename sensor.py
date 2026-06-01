@@ -1434,11 +1434,12 @@ class BiometricSensor(SensorTLS):
 
     def _is_accessible_guid(self, guid):
         """Check if a GUID is accessible in the current TLS session.
-        9f03 returns status=0000 with a record handle for accessible
-        GUIDs; non-zero status means it belongs to a different pairing
-        namespace and cannot be deleted through this session."""
+        9f03 returns status=0000 + 16B record handle (20B total) for
+        accessible GUIDs; shorter responses (e.g. 4B 00000000) mean
+        the GUID belongs to a different pairing namespace."""
         rec = self.fetch_record(guid)
-        return rec is not None and len(rec) >= 4 and rec[:2] == b'\x00\x00'
+        return (rec is not None and len(rec) >= 20
+                and rec[:2] == b'\x00\x00')
 
     def delete_record_by_guid(self, guid):
         """Delete a single record by GUID.
@@ -1461,38 +1462,44 @@ class BiometricSensor(SensorTLS):
         # Filter to only accessible GUIDs (same pairing namespace)
         guids = [g for g in all_guids if self._is_accessible_guid(g)]
         if not guids:
-            _log(f"delete_record_by_guid: no accessible GUIDs in"
-                 f" current namespace")
+            print(f"  ERROR: no accessible GUIDs in current"
+                  f" pairing namespace.  All {len(all_guids)} GUID(s)"
+                  f" belong to other sessions.")
             return False
 
         try:
             idx = guids.index(guid)
         except ValueError:
-            _log(f"delete_record_by_guid: GUID {guid.hex()} not found"
-                 f" or not accessible in current namespace")
+            if guid in all_guids:
+                print(f"  ERROR: GUID {guid.hex()} belongs to a"
+                      f" different pairing session (9f03 returned"
+                      f" no record handle).  Delete it while paired"
+                      f" with the correct namespace or use clear-db.")
+            else:
+                print(f"  ERROR: GUID {guid.hex()} not found"
+                      f" in device storage")
             return False
 
         entries = self._list_entries()
         managers = self._find_managers(entries)
         if idx >= len(managers):
-            _log(f"delete_record_by_guid: manager index {idx} out of"
-                 f" range ({len(managers)} managers)")
+            print(f"  ERROR: manager index {idx} out of"
+                  f" range ({len(managers)} managers)")
             return False
 
         target = managers[idx]
         r = self.tls_send(bytes.fromhex('a301000000') + target,
                           value=2, label="DELETE_MANAGER")
         if r != b'\x00\x00\x03\x00':
-            _log(f"delete_record_by_guid: a301 returned"
-                 f" {r.hex() if r else 'None'}")
+            print(f"  ERROR: a301 returned"
+                  f" {r.hex() if r else 'None'}")
             return False
 
         after = self.storage_query_all()
         if guid in after:
-            _log(f"delete_record_by_guid: GUID still present after deletion")
+            print(f"  ERROR: GUID still present after deletion")
             return False
 
-        _log(f"delete_record_by_guid({guid.hex()}): OK")
         return True
 
     def close_notify(self):
