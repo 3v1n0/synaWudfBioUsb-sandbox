@@ -2127,6 +2127,7 @@ class BiometricSensor(SensorTLS):
               f" ({n_foreign} foreign, skipped)")
 
         remaining_accessible = set(accessible)
+        all_guids_set = set(all_guids)
         deleted = 0
 
         while remaining_accessible:
@@ -2147,21 +2148,33 @@ class BiometricSensor(SensorTLS):
                     _log(f"  a301 returned"
                          f" {r_del.hex() if r_del else 'None'} -- skip")
                     continue
-                # Check which accessible GUID disappeared
+                # Check what disappeared from the full GUID set
                 self.storage_query_init(1)
                 self.storage_query_init(2)
                 after = set(self.storage_query_all())
-                gone = remaining_accessible - after
-                if gone:
-                    for g in gone:
+                all_gone = all_guids_set - after
+                foreign_gone = all_gone - accessible
+                if foreign_gone:
+                    # We deleted a foreign GUID -- this is wrong.
+                    # Report and abort; damage is already done.
+                    print(f"  ERROR: deleted a foreign GUID"
+                          f" {next(iter(foreign_gone)).hex()} --"
+                          f" aborting to avoid further damage")
+                    return False
+                our_gone = all_gone & accessible
+                if our_gone:
+                    for g in our_gone:
                         _log(f"  deleted GUID {g.hex()}")
                         deleted += 1
-                    remaining_accessible -= gone
+                    remaining_accessible -= our_gone
+                    all_guids_set = after
                     progress = True
                     break  # restart manager scan (handles are stale)
                 else:
-                    _log(f"  manager {mgr.hex()[:16]} deleted a foreign"
-                         f" GUID -- continuing")
+                    # Manager deleted but nothing from 9f02 changed --
+                    # unlikely; treat as no progress and try next manager
+                    _log(f"  manager {mgr.hex()[:16]} deleted but no"
+                         f" GUID disappeared -- continuing")
 
             if not progress:
                 print("  ERROR: no progress in manager sweep --"
