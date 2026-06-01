@@ -201,6 +201,12 @@ TLV_CLIENT_CERT    = 1  # 400-byte host certificate (client TLS cert body)
 TLV_CLIENT_PRIVKEY = 2  # 32-byte host ECDSA private key D (LE)
 TLV_DEVICE_CERT    = 3  # 400-byte device certificate (contains ECK1 pubkey)
 
+# Certificate section IDs used in _cmd_cert_section() (cmd 0x8e)
+# Neither section contains the device cert body; they carry metadata only.
+# The actual device cert body (142B signed blob) comes from send_challenge().
+CERT_SECT_STORAGE_META  = 0x09  # 26B: storage capacity/entry count metadata
+CERT_SECT_FIRMWARE_DESC = 0x1a  # 78B: firmware internal memory pointer table
+
 # ---------------------------------------------------------------------------
 # TLS constants
 # ---------------------------------------------------------------------------
@@ -1020,8 +1026,8 @@ class Sensor:
         assert ack == b'\x01', f"ACK={ack.hex()}"
 
         self._cmd_device_info(n)
-        self._cmd_cert_section(n, 0x09)
-        self._cmd_cert_section(n, 0x1a)
+        self._cmd_cert_section(n, CERT_SECT_STORAGE_META)
+        self._cmd_cert_section(n, CERT_SECT_FIRMWARE_DESC)
         boot = self._cmd_bootstrap_status(n)
         _log(f"  {boot}")
         return boot
@@ -1097,8 +1103,9 @@ class Sensor:
                                   ec.ECDSA(hashes.SHA256()))
                     _log("Device CA signature verified OK")
                 except InvalidSignature:
-                    print("WARNING: device CA verification failed -- "
-                          "device may not be genuine Synaptics hardware")
+                    raise RuntimeError(
+                        "Device CA verification failed -- "
+                        "device may not be genuine Synaptics hardware")
 
         return client_cert, device_cert
 
