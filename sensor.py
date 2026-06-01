@@ -2773,9 +2773,8 @@ def main():
             print("probe-managers...")
             sensor.probe_managers()
     except (KeyboardInterrupt, usb.core.USBError) as exc:
-        if isinstance(exc, usb.core.USBError) and exc.errno not in (4, 19):
-            raise
-        print("\nInterrupted.")
+        print(f"\nInterrupted (USBError errno={getattr(exc, 'errno', None)})."
+              if isinstance(exc, usb.core.USBError) else "\nInterrupted.")
         if getattr(sensor, '_enroll_active', False):
             print("  Discarding active enrollment...")
             sensor.discard_enrollment()
