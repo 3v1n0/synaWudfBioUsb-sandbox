@@ -167,10 +167,36 @@ TLS_CHANGE_CS = 0x14
 TLS_APP_DATA  = 0x17
 TLS_ALERT     = 0x15
 
+# ---------------------------------------------------------------------------
+# TLS constants
+# ---------------------------------------------------------------------------
+
+TLS_VER       = b'\x03\x03'
+TLS_HANDSHAKE = 0x16
+TLS_CHANGE_CS = 0x14
+TLS_APP_DATA  = 0x17
+TLS_ALERT     = 0x15
+
 # TLS alert levels (RFC 5246 section 7.2)
 TLS_ALERT_WARNING = 1
 TLS_ALERT_FATAL   = 2
-CIPHER_SUITE  = b'\xc0\x2e'
+
+# TLS handshake message types (RFC 5246 section 7.4)
+TLS_HS_CLIENT_HELLO        = 0x01
+TLS_HS_SERVER_HELLO        = 0x02
+TLS_HS_CERTIFICATE         = 0x0b
+TLS_HS_CERTIFICATE_REQUEST = 0x0d
+TLS_HS_SERVER_HELLO_DONE   = 0x0e
+TLS_HS_CERTIFICATE_VERIFY  = 0x0f
+TLS_HS_CLIENT_KEY_EXCHANGE = 0x10
+TLS_HS_FINISHED            = 0x14
+
+# Cipher suites used in ClientHello
+CIPHER_SUITE       = b'\xc0\x2e'  # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+CIPHER_SUITE_C005  = b'\xc0\x05'  # TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA (first in list)
+
+# 4-byte IOCTL framing header prepended to TLS records sent to device
+IOCTL_HDR = b'\x44\x00\x00\x00'
 
 # ---------------------------------------------------------------------------
 # Identity key (P_SHA256 D) — for challenge signature only
@@ -785,7 +811,7 @@ class SensorTLS(Sensor):
         # supported_groups(0x0004)+ec_point_formats(0x000b).
         # CH HS body = 71 bytes, total CH = 84 bytes (matched to windows driver trace).
         sess_id   = b'\x07' + b'\x00' * 7
-        suites    = (b'\xc0\x05' + CIPHER_SUITE
+        suites    = (CIPHER_SUITE_C005 + CIPHER_SUITE
                      + b'\x00\x3d\x00\x8d\x00\xa8\x00\xa9')
         # Extensions: ext_len=0x000a (10) is a device quirk -- it covers
         # supported_groups (6B) + ec_point_formats type+len (4B) only.
@@ -797,14 +823,14 @@ class SensorTLS(Sensor):
                    + b'\x00'                          # compression: length=0
                    + struct.pack('>H', len(ext_inner)) + ext_inner
                    + b'\x01\x00')                     # ec_point_formats data
-        ch_hs  = make_hs_message(0x01, ch_body)
+        ch_hs  = make_hs_message(TLS_HS_CLIENT_HELLO, ch_body)
         ch_rec = make_tls_record(TLS_HANDSHAKE, ch_hs)
         state.feed_hs(ch_hs)
         _hexdump("CH record", ch_rec)
 
         # Send CH: value=4 with 44000000 IOCTL header (confirmed windows driver trace)
         self.ctrl_out(REQ_CMD, value=4,
-                      data=b'\x44\x00\x00\x00' + ch_rec,
+                      data=IOCTL_HDR + ch_rec,
                       label="TLS_OUT(CH)")
         raw_sh = self.ctrl_in(REQ_RESP, 0x400, label="TLS_IN(CH)")
         if raw_sh and raw_sh[0] == TLS_ALERT:
@@ -828,11 +854,11 @@ class SensorTLS(Sensor):
                            b'\x00' + rbody[hoff+1:hoff+4])[0]
                 hmsg = rbody[hoff: hoff + 4 + hl]
                 state.feed_hs(hmsg)
-                if ht == 0x02:    # ServerHello
+                if ht == TLS_HS_SERVER_HELLO:
                     srv_rand = hmsg[6:38]
-                elif ht == 0x0d:  # CertificateRequest -- expected, no action
+                elif ht == TLS_HS_CERTIFICATE_REQUEST:
                     pass
-                elif ht == 0x0e:  # ServerHelloDone
+                elif ht == TLS_HS_SERVER_HELLO_DONE:
                     pass
                 hoff += 4 + hl
         if srv_rand is None:
@@ -863,25 +889,27 @@ class SensorTLS(Sensor):
                          + pub_key + b'\x00' * 220)  # 2+142+2+2+32+220 = 400
             assert len(cert_body) == 400, f"fresh cert_body={len(cert_body)}"
 
-        cert_hs = make_hs_message(0x0b,
-                      b'\x00\x01\x90' + b'\x00\x01\x90' + cert_body)
+        # Client cert body is always 400 bytes (0x190)
+        CERT_BODY_LEN = struct.pack('>I', 400)[1:]  # 3-byte big-endian = \x00\x01\x90
+        cert_hs = make_hs_message(TLS_HS_CERTIFICATE,
+                      CERT_BODY_LEN + CERT_BODY_LEN + cert_body)
         state.feed_hs(cert_hs)
         _hexdump("Cert HS", cert_hs)
 
         # ----- ClientKeyExchange -----
-        cke_hs = make_hs_message(0x10, b'\x04' + eph_x + eph_y)
+        cke_hs = make_hs_message(TLS_HS_CLIENT_KEY_EXCHANGE, b'\x04' + eph_x + eph_y)
         state.feed_hs(cke_hs)
 
         # ----- CertificateVerify -----
         hs_dig = state.hs_digest()
         _hexdump("HS hash for CertVerify", hs_dig)
         sig_der = sign_ecdsa_sha256(client_privkey_be, hs_dig)
-        cv_hs   = make_hs_message(0x0f, sig_der)
+        cv_hs   = make_hs_message(TLS_HS_CERTIFICATE_VERIFY, sig_der)
         state.feed_hs(cv_hs)
 
         # ----- ChangeCipherSpec + Finished -----
         verify  = prf(master, 'client finished', state.hs_digest(), 12)
-        fin_hs  = make_hs_message(0x14, verify)
+        fin_hs  = make_hs_message(TLS_HS_FINISHED, verify)
 
         hs_rec  = make_tls_record(TLS_HANDSHAKE, cert_hs + cke_hs + cv_hs)
         ccs_rec = make_tls_record(TLS_CHANGE_CS, b'\x01')
@@ -893,7 +921,7 @@ class SensorTLS(Sensor):
         fin_rec = make_tls_record(TLS_HANDSHAKE, fin_cipher)
 
         # Send bundle: value=0 per windows driver trace (wVal=0x0000 confirmed)
-        burst = b'\x44\x00\x00\x00' + hs_rec + ccs_rec + fin_rec
+        burst = IOCTL_HDR + hs_rec + ccs_rec + fin_rec
         _hexdump("bundle", burst)
         self.ctrl_out(REQ_CMD, value=0, data=burst,
                       label="TLS_OUT(BUNDLE)")
