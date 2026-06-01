@@ -358,7 +358,6 @@ CMD_ENROLL_TEMPLATE      = Cmd(b'\x39', CH_DATA,
                                label="ENROLL_TEMPLATE", sep=b'')
 
 # STORAGE_COMMIT (9603) payload is variable-length (built by _build_commit_payload)
-# so no fixed Cmd descriptor -- the method builds it directly.
 CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT", sep=b'')
 
 # CAPTURE_DATA: 86 <subfactor> 00*15 <subfactor> 00*19 (37B)
@@ -1610,7 +1609,7 @@ class BiometricSensor(SensorTLS):
     def _build_commit_payload(self, guid, sid, label):
         """
         Build commit payload (arg to CMD_STORAGE_COMMIT, 136 bytes).
-        guid  -- 16 bytes from status_query response
+        guid  -- 16 bytes from enroll_status response
         sid   -- 16 bytes (generated)
         label -- string for identity label
         """
