@@ -2551,6 +2551,7 @@ class BiometricSensor(SensorTLS):
         return True
 
     @staticmethod
+    @staticmethod
     def _extract_ctx(cap_resp):
         """Extract enrollment context from CAPTURE_DATA response[-2:] as LE u16."""
         if cap_resp is None or len(cap_resp) < 2:
