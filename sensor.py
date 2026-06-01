@@ -1319,41 +1319,29 @@ class BiometricSensor(SensorTLS):
         """
         Delete a single record by its 16-byte GUID.
 
-        Uses FETCH_RECORD (9f03) to get the record entry handle,
-        SELECT_RECORD (a003) to select it, and tries DELETE_RECORD
-        (a302) to remove it as the a30x analogue of a003.
-        If a302 doesn't exist, falls back to enumerating entries
-        via A002 identity matching.
+        Enumerates FETCH_FIRST entries, SELECT_ENTRY each, uses
+        a003 SELECT_RECORD (with the FETCH_FIRST entry, not the
+        9f03 handle) to read entry identity, matches GUID, and
+        DELETE_ENTRY (a301).
         """
-        rec = self.fetch_record(guid)
-        if rec and len(rec) >= 20:
-            entry = rec[4:20]
-            r = self.tls_send(
-                bytes.fromhex('a003000000') + entry,
-                value=2, label="SELECT_RECORD")
-            if r is not None:
-                r = self.tls_send(
-                    bytes.fromhex('a302000000') + entry,
-                    value=2, label="DELETE_RECORD")
-                if r == b'\x00\x00\x03\x00':
-                    return True
-
         entries = self._list_entries()
         for i, ent in enumerate(entries):
-            _log(f"Entry[{i}]: {ent.hex()}")
             r = self.tls_send(
                 bytes.fromhex('a001000000') + ent,
                 value=2, label="SELECT_ENTRY")
             if r is None or len(r) < 12:
                 continue
             if r[8:12] != b'\x01\x00\x00\x00':
+                _log(f"Entry[{i}] invalid")
                 continue
+            # SELECT_RECORD (a003) with the storage entry handle
             r2 = self.tls_send(
-                bytes.fromhex('a002000000') + ent,
-                value=2, label="GET_ENTRY_INFO")
+                bytes.fromhex('a003000000') + ent,
+                value=2, label="SELECT_RECORD")
             if r2 is None:
                 continue
-            _log(f"A002 response ({len(r2)}B): {r2.hex()}")
+            _log(f"Entry[{i}] SEL_REC ({len(r2)}B): {r2.hex()}")
+            # Try GUID at various offsets
             for off in (0, 2, 4, 6, 8):
                 if len(r2) >= off + 16 and r2[off:off+16] == guid:
                     return self.delete_record(ent)
