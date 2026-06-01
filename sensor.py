@@ -158,21 +158,10 @@ TLV_CLIENT_PRIVKEY = 2  # 32-byte host ECDSA private key D (LE)
 TLV_DEVICE_CERT    = 3  # 400-byte device certificate (contains ECK1 pubkey)
 
 # ANSI 381 finger position subtypes (WINBIO_BIOMETRIC_SUBTYPE)
-WINBIO_SUBTYPE_NO_INFORMATION        = 0
-WINBIO_ANSI_381_POS_RH_THUMB         = 1
-WINBIO_ANSI_381_POS_RH_INDEX_FINGER  = 2
-WINBIO_ANSI_381_POS_RH_MIDDLE_FINGER = 3
-WINBIO_ANSI_381_POS_RH_RING_FINGER   = 4
-WINBIO_ANSI_381_POS_RH_LITTLE_FINGER = 5
-WINBIO_ANSI_381_POS_LH_THUMB         = 6
-WINBIO_ANSI_381_POS_LH_INDEX_FINGER  = 7
-WINBIO_ANSI_381_POS_LH_MIDDLE_FINGER = 8
-WINBIO_ANSI_381_POS_LH_RING_FINGER   = 9
-WINBIO_ANSI_381_POS_LH_LITTLE_FINGER = 10
-WINBIO_ANSI_381_POS_RH_FOUR_FINGERS  = 13
-WINBIO_ANSI_381_POS_LH_FOUR_FINGERS  = 14
-WINBIO_ANSI_381_POS_TWO_THUMBS       = 15
-WINBIO_SUBTYPE_ANY                   = 255
+# CAPTURE_DATA internal mode byte (b'\x06' at offsets 1 and 17 of the
+# 37-byte payload).  This is NOT a WINBIO_ANSI_381 finger-position subtype
+# -- it is an opaque device-internal field; changing it breaks enrollment.
+_CAPTURE_MODE = b'\x06'
 
 # ---------------------------------------------------------------------------
 # TLS constants
@@ -378,7 +367,11 @@ CMD_STORAGE_COMMIT       = Cmd(b'\x96\x03', CH_STORE, label="STORAGE_COMMIT")
 
 # CAPTURE_DATA: 86 <subfactor> 00*15 <subfactor> 00*19 (37B)
 # subfactor is a WINBIO_ANSI_381_POS_* subtype; payload built by capture_data()
-CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,  label="CAPTURE_DATA")
+# Full 37-byte payload: 86 06 00*15 06 00*19
+CMD_CAPTURE_DATA         = Cmd(b'\x86', CH_DATA,
+                               body=_CAPTURE_MODE + b'\x00' * 15 +
+                                    _CAPTURE_MODE + b'\x00' * 19,
+                               sep=b'', label="CAPTURE_DATA")
 # STATUS_EXT param=4: 86 00 <00*31> 04000000 (37B)
 CMD_STATUS_EXT_4         = Cmd(b'\x86', CH_DATA,
                                b'\x00' * 31 + b'\x04\x00\x00\x00',
@@ -1498,17 +1491,14 @@ class BiometricSensor(SensorTLS):
             return 1, 0   # finger detected
         return 2, 7       # no finger
 
-    def capture_data(self, subfactor=WINBIO_ANSI_381_POS_LH_THUMB):
+    def capture_data(self):
         """
         Send CAPTURE_DATA (value=0x0002).
         Returns (resp, sensor_status, reject_detail).
-        37-byte payload: 86 <subfactor> 00*15 <subfactor> 00*19
-        subfactor is a WINBIO_ANSI_381_POS_* finger position subtype.
+        37-byte fixed payload: 86 06 00*15 06 00*19
+        The 0x06 byte is an opaque device-internal mode field.
         """
-        sf = bytes([subfactor])
-        payload = CMD_CAPTURE_DATA.opcode + sf + b'\x00' * 15 + sf + b'\x00' * 19
-        resp = self.tls_send(payload, value=CMD_CAPTURE_DATA.value,
-                             label=CMD_CAPTURE_DATA.label)
+        resp = CMD_CAPTURE_DATA.send(self)
         ss, rd = self._parse_capture_response(resp)
         if resp is not None and len(resp) == 66:
             _log(f"  CAPTURE_DATA resp: {resp.hex()}")
