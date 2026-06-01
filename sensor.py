@@ -148,6 +148,13 @@ def _rand(n):
 TemplateInfo   = namedtuple('TemplateInfo',   ['guid', 'sid', 'label', 'subfactor'])
 RecordInfo     = namedtuple('RecordInfo',     ['handle'])
 SelectInfo     = namedtuple('SelectInfo',     ['handle', 'guid'])
+StorageCount   = namedtuple('StorageCount',   ['status', 'count', 'guids'])
+CaptureStatus  = namedtuple('CaptureStatus',  ['sensor_status', 'reject_detail'])
+SensorStatus   = namedtuple('SensorStatus',   ['mode', 'sample', 'quality', 'context'])
+EnrollStatus   = namedtuple('EnrollStatus',   ['status', 'guid', 'sample_cnt', 'extra'])
+MatchResult    = namedtuple('MatchResult',    ['status', 'guid', 'score', 'index',
+                                               'strength', 'template_update'])
+TemplateStatus = namedtuple('TemplateStatus', ['status', 'percent_complete', 'reject_detail'])
 
 REQ_START        = 0x19   # OUT -- phase 1 init signal
 REQ_INIT_ACK     = 0x1a   # IN  -- phase 1 init acknowledgment
@@ -1285,15 +1292,15 @@ class BiometricSensor(SensorTLS):
     def get_storage_count(self):
         """
         Full storage query sequence to obtain the actual record count.
-        Returns (status, count, guids) where count = len(guids).
+        Returns StorageCount(status, count, guids).
         """
         status = self.get_record_count()
         if status != 0:
-            return status, 0, []
+            return StorageCount(status, 0, [])
         self.storage_query_init(1)
         self.storage_query_init(2)
         guids = self.storage_query_all()
-        return 0, len(guids), guids
+        return StorageCount(0, len(guids), guids)
 
     def storage_query_init(self, n):
         """Send STORAGE_QUERY_INIT (call twice before QUERY_ALL)."""
@@ -1384,7 +1391,7 @@ class BiometricSensor(SensorTLS):
         Full list-db sequence. Returns list of (guid, record_data) for
         all non-empty slots. Prints results to stdout.
         """
-        status, count, guids = self.get_storage_count()
+        sc = self.get_storage_count(); status, count, guids = sc.status, sc.count, sc.guids
         print(f"Storage count: status=0x{status:04x} count={count}")
         if not guids:
             print("No storage slots found.")
@@ -1540,18 +1547,18 @@ class BiometricSensor(SensorTLS):
     def _parse_capture_response(resp):
         """
         Parse 66-byte CAPTURE_DATA device response.
-        Returns (sensor_status, reject_detail).
+        Returns CaptureStatus(sensor_status, reject_detail).
 
         The marker at [18:22] (LE u32) tells if a finger was detected:
           6 = WINBIO_I_MORE_DATA = finger detected
           0 = no finger / hardware rejected
         """
         if resp is None or len(resp) < 22:
-            return 3, 0
+            return CaptureStatus(3, 0)
         marker = struct.unpack_from('<I', resp, 18)[0]
         if marker == 6:
-            return 1, 0   # finger detected
-        return 2, 7       # no finger
+            return CaptureStatus(1, 0)   # finger detected
+        return CaptureStatus(2, 7)       # no finger
 
     def capture_data(self):
         """
@@ -1561,10 +1568,10 @@ class BiometricSensor(SensorTLS):
         The 0x06 byte is an opaque device-internal mode field.
         """
         resp = CMD_CAPTURE_DATA.send(self)
-        ss, rd = self._parse_capture_response(resp)
+        cs = self._parse_capture_response(resp)
         if resp is not None and len(resp) == 66:
             _log(f"  CAPTURE_DATA resp: {resp.hex()}")
-        return resp, ss, rd
+        return resp, cs.sensor_status, cs.reject_detail
 
     @staticmethod
     def _parse_sensor_status(resp):
@@ -1589,17 +1596,17 @@ class BiometricSensor(SensorTLS):
         sample = struct.unpack_from('<H', resp, 8)[0]
         quality = struct.unpack_from('<H', resp, 10)[0]
         context = struct.unpack_from('<I', resp, 12)[0] if len(resp) >= 16 else 0
-        return mode, sample, quality, context
+        return SensorStatus(mode, sample, quality, context)
 
     def _print_sensor_status(self, ctx=0, label=""):
         """Query and print human-readable SENSOR_STATUS."""
         resp = self.get_sensor_status(ctx)
-        mode, sample, quality, context = self._parse_sensor_status(resp)
-        mode_str = {1: "armed", 2: "data_rdy"}.get(mode, f"0x{mode:04x}")
+        ss = self._parse_sensor_status(resp)
+        mode_str = {1: "armed", 2: "data_rdy"}.get(ss.mode, f"0x{ss.mode:04x}")
         print(f"  {label}Sensor: mode={mode_str}"
-              f" sample={sample} quality=0x{quality:04x}"
-              f" context={context}")
-        return mode, sample, quality, context
+              f" sample={ss.sample} quality=0x{ss.quality:04x}"
+              f" context={ss.context}")
+        return ss
 
     def get_sensor_status(self, ctx=0):
         """
@@ -1728,7 +1735,7 @@ class BiometricSensor(SensorTLS):
                 'samples_used': struct.unpack_from('<H', resp, 52)[0],
                 'size_flag': struct.unpack_from('<I', resp, 48)[0],
             }
-        return status, guid, sample_cnt, extra
+        return EnrollStatus(status, guid, sample_cnt, extra)
 
     def storage_commit(self, payload):
         """
@@ -2109,8 +2116,7 @@ class BiometricSensor(SensorTLS):
           [0x2a:0x2e]  templateUpdate (u32 LE)  -- inferred; qm+12 not explicit in decompiled code
           [0x2e:0x42]  remaining qm fields (20 bytes)
 
-        Returns (status, guid, match_score, match_index,
-                 match_strength, template_update)
+        Returns MatchResult(status, guid, score, index, strength, template_update)
         or None on TLS error.
         """
         r = CMD_MATCH_RESULT.send(self)
@@ -2119,15 +2125,15 @@ class BiometricSensor(SensorTLS):
         status = struct.unpack('<H', r[:2])[0]
         guid = r[0x02:0x12] if len(r) >= 18 else None
 
-        match_score = match_index = match_strength = template_update = None
+        score = index = strength = template_update = None
         if (len(r) >= 0x42
                 and struct.unpack('<I', r[0x12:0x16])[0] == 0x24):
-            match_score     = struct.unpack('<i', r[0x1e:0x22])[0]
-            match_index     = struct.unpack('<I', r[0x22:0x26])[0]
-            match_strength  = struct.unpack('<I', r[0x26:0x2a])[0]
+            score           = struct.unpack('<i', r[0x1e:0x22])[0]
+            index           = struct.unpack('<I', r[0x22:0x26])[0]
+            strength        = struct.unpack('<I', r[0x26:0x2a])[0]
             template_update = struct.unpack('<I', r[0x2a:0x2e])[0]
 
-        return status, guid, match_score, match_index, match_strength, template_update
+        return MatchResult(status, guid, score, index, strength, template_update)
 
     def identify_all(self):
         """
@@ -2139,7 +2145,7 @@ class BiometricSensor(SensorTLS):
         print("\n--- Identify All ---")
 
         # 1. Load all enrolled records into matching engine
-        status, count, guids = self.get_storage_count()
+        sc = self.get_storage_count(); status, count, guids = sc.status, sc.count, sc.guids
         _log(f"Storage count: status=0x{status:04x} count={count}")
         if status != 0:
             print(f"  Storage query failed: 0x{status:04x}")
@@ -2215,15 +2221,14 @@ class BiometricSensor(SensorTLS):
         if mr is None:
             print("  MATCH_RESULT failed (TLS error)")
             return None
-        status, matched, score, idx, strength, tupd = mr
-        _log(f"  matchScore={score} matchIndex={idx} matchStrength={strength} templateUpdate={tupd}")
-        if status != 0:
-            print(f"  No match (status=0x{status:04x})")
+        _log(f"  matchScore={mr.score} matchIndex={mr.index} matchStrength={mr.strength} templateUpdate={mr.template_update}")
+        if mr.status != 0:
+            print(f"  No match (status=0x{mr.status:04x})")
             return None
-        if matched is None or matched == b'\x00' * 16:
+        if mr.guid is None or mr.guid == b'\x00' * 16:
             print("  MATCH_RESULT returned zero GUID")
             return None
-        self._print_match(matched)
+        self._print_match(mr.guid)
         return matched
 
     def identify(self):
@@ -2270,15 +2275,14 @@ class BiometricSensor(SensorTLS):
         if mr is None:
             print("  MATCH_RESULT failed (TLS error)")
             return None
-        status, matched, score, idx, strength, tupd = mr
-        _log(f"  matchScore={score} matchIndex={idx} matchStrength={strength} templateUpdate={tupd}")
-        if status != 0:
-            print(f"  No match (status=0x{status:04x})")
+        _log(f"  matchScore={mr.score} matchIndex={mr.index} matchStrength={mr.strength} templateUpdate={mr.template_update}")
+        if mr.status != 0:
+            print(f"  No match (status=0x{mr.status:04x})")
             return None
-        if matched is None or matched == b'\x00' * 16:
+        if mr.guid is None or mr.guid == b'\x00' * 16:
             print("  MATCH_RESULT returned zero GUID")
             return None
-        self._print_match(matched)
+        self._print_match(mr.guid)
         return matched
 
     def _list_entries(self):
@@ -2507,11 +2511,11 @@ class BiometricSensor(SensorTLS):
         if resp is None:
             print("  ENROLL_TEMPLATE failed (TLS error)")
             return False
-        ts, pc, rd = self._parse_template_status(resp)
-        if ts != 0:
+        ts = self._parse_template_status(resp)
+        if ts.status != 0:
             print(f"  ENROLL_TEMPLATE rejected:"
-                  f" TemplateStatus=0x{ts:08x}"
-                  f" PercentComplete={pc} RejectDetail=0x{rd:x}")
+                  f" TemplateStatus=0x{ts.status:08x}"
+                  f" PercentComplete={ts.percent_complete} RejectDetail=0x{ts.reject_detail:x}")
             return False
         print(f"  Template response: {resp.hex()}")
         _log(f"  TemplateStatus={ts:#x} PC={pc} RD=0x{rd:x}")
@@ -2573,19 +2577,16 @@ class BiometricSensor(SensorTLS):
           [8:12]  - RejectDetail (LE u32)
         """
         if resp is None or len(resp) < 2:
-            return -1, 0, 0
+            return TemplateStatus(-1, 0, 0)
         if resp == b'\x00\x00' or resp == b'\x00\x00\x00\x00':
-            return 0, 0, 0
+            return TemplateStatus(0, 0, 0)
         if len(resp) < 16:
-            return -1, 0, 0
+            return TemplateStatus(-1, 0, 0)
         ts_raw = struct.unpack('<I', resp[2:6])[0]
-        if ts_raw == 0 or ts_raw == 6:
-            ts = 0
-        else:
-            ts = ts_raw
+        ts = 0 if ts_raw in (0, 6) else ts_raw
         pc = struct.unpack('<I', resp[12:16])[0]
         rd = struct.unpack('<I', resp[8:12])[0]
-        return ts, pc, rd
+        return TemplateStatus(ts, pc, rd)
 
     def _enroll_one_sample(self, sample_num, max_samples):
         """One enrollment sample, matching windows driver trace exactly.
@@ -2663,16 +2664,15 @@ class BiometricSensor(SensorTLS):
         if enroll is None:
             print("  ENROLL_STATUS failed")
             return False, None
-        status, guid, sample_cnt, extra = enroll
-        print(f"  ENROLL_STATUS: status=0x{status:04x}"
-              f" guid={'yes' if guid else 'no'}"
-              f" sample_cnt={sample_cnt}"
-              + (f" extra={extra}" if extra else ""))
+        print(f"  ENROLL_STATUS: status=0x{enroll.status:04x}"
+              f" guid={'yes' if enroll.guid else 'no'}"
+              f" sample_cnt={enroll.sample_cnt}"
+              + (f" extra={enroll.extra}" if enroll.extra else ""))
 
         # GUID present → enrollment complete, ready to commit
-        if guid:
-            print(f"  GUID: {guid.hex()}")
-            return True, guid
+        if enroll.guid:
+            print(f"  GUID: {enroll.guid.hex()}")
+            return True, enroll.guid
 
         # Track progress via the two counters that change only when
         # the device makes real progress: sample_cnt [22:24] and
@@ -2680,14 +2680,14 @@ class BiometricSensor(SensorTLS):
         # extracted enough data.
         prev = getattr(self, '_prev_enroll_progress', None)
         changed = False
-        if extra is not None:
+        if enroll.extra is not None:
             if prev is not None:
                 changed = (
-                    extra['sample_cnt'] != prev.get('sample_cnt')
-                    or extra['progress_sum'] != prev.get('progress_sum'))
+                    enroll.extra['sample_cnt'] != prev.get('sample_cnt')
+                    or enroll.extra['progress_sum'] != prev.get('progress_sum'))
             else:
                 changed = True
-            self._prev_enroll_progress = extra
+            self._prev_enroll_progress = enroll.extra
             if not changed:
                 plateau = getattr(self, '_enroll_plateau', 0) + 1
                 self._enroll_plateau = plateau
@@ -2750,7 +2750,7 @@ class BiometricSensor(SensorTLS):
         print(f"  Label: '{label}'")
 
         # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
-        status, count, _ = self.get_storage_count()
+        sc = self.get_storage_count(); status, count = sc.status, sc.count
         print(f"  DB records: {count}")
         if status != 0:
             print(f"  Storage query status=0x{status:04x}")
@@ -2779,7 +2779,7 @@ class BiometricSensor(SensorTLS):
                 if isinstance(guid, int):
                     # Terminal error (3 bad captures, DB full, etc.)
                     print(f"  Terminal error code=0x{guid:04x}")
-                    _, cnt, _ = self.get_storage_count()
+                    cnt = self.get_storage_count().count
                     if cnt >= 10:
                         print(f"  Database has {cnt} records "
                               "(likely full). Clear some and retry.")
@@ -2793,7 +2793,7 @@ class BiometricSensor(SensorTLS):
                 self._enroll_active = False
                 ok2 = self._commit_enrollment(guid=guid, label=label)
                 if not ok2:
-                    _, cnt, _ = self.get_storage_count()
+                    cnt = self.get_storage_count().count
                     print(f"  DB records after failed commit: {cnt}")
                 return ok2
 
