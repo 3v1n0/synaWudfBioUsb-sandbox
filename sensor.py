@@ -1388,13 +1388,12 @@ class BiometricSensor(SensorTLS):
         """
         Send 9602 enrollment status query.
 
-        Returns a dict:
-          status:  LE16 at [0:2]  (0 = ok/continuing)
-          guid:    bytes at [2:18] (16B, all-zero if not complete)
-          sample_cnt: LE16 at [22:24] (0 if unavailable)
-          raw:     full response bytes
+        Returns (status, guid, sample_cnt) or None:
+          status:     LE16 at [0:2]  (0 = ok/continuing)
+          guid:       bytes at [2:18] (16B, None if not complete)
+          sample_cnt: LE16 at [22:24] (None if unavailable)
 
-        When guid is non-zero, enrollment is complete and caller
+        When guid is non-None, enrollment is complete and caller
         should commit.  When sample_cnt increments vs last call,
         the capture was accepted by the device.
         """
@@ -1409,8 +1408,7 @@ class BiometricSensor(SensorTLS):
         if guid == b'\x00' * 16:
             guid = None
         sample_cnt = struct.unpack_from('<H', resp, 22)[0] if rlen >= 24 else None
-        return dict(status=status, guid=guid,
-                    sample_cnt=sample_cnt, raw=resp)
+        return status, guid, sample_cnt
 
     def storage_commit(self, payload):
         """
@@ -2032,37 +2030,38 @@ class BiometricSensor(SensorTLS):
             _log(f"  Ext4 progress: {struct.unpack('<H', qual2)[0]}")
         self.update_enrollment_ack()
 
-        es = self.get_enroll_status()
-        if es is None:
+        enroll = self.get_enroll_status()
+        if enroll is None:
             print("  ENROLL_STATUS failed")
             return False, None
-        _log(f"  ENROLL_STATUS: status=0x{es['status']:04x}"
-             f" guid={'yes' if es['guid'] else 'no'}"
-             f" sample_cnt={es['sample_cnt']}")
+        status, guid, sample_cnt = enroll
+        _log(f"  ENROLL_STATUS: status=0x{status:04x}"
+             f" guid={'yes' if guid else 'no'}"
+             f" sample_cnt={sample_cnt}")
 
         # GUID present → enrollment complete, ready to commit
-        if es['guid']:
-            print(f"  GUID: {es['guid'].hex()}")
-            return True, es['guid']
+        if guid:
+            print(f"  GUID: {guid.hex()}")
+            return True, guid
 
         # Non-zero status = terminal error
-        if es['status'] != 0:
-            print(f"  ENROLL_STATUS error: 0x{es['status']:04x}")
-            return False, es['status']
+        if status != 0:
+            print(f"  ENROLL_STATUS error: 0x{status:04x}")
+            return False, status
 
         # Sample count check — does the device think we made progress?
-        if es['sample_cnt'] is not None:
+        if sample_cnt is not None:
             prev = getattr(self, '_prev_enroll_cnt', None)
-            self._prev_enroll_cnt = es['sample_cnt']
+            self._prev_enroll_cnt = sample_cnt
             if prev is not None:
-                if es['sample_cnt'] > prev:
+                if sample_cnt > prev:
                     ok = True
-                    _log(f"  ENROLL count {prev}→{es['sample_cnt']}")
+                    _log(f"  ENROLL count {prev}→{sample_cnt}")
                 else:
                     ok = False
-                    _log(f"  ENROLL count stuck at {es['sample_cnt']}")
+                    _log(f"  ENROLL count stuck at {sample_cnt}")
             else:
-                _log(f"  ENROLL initial count={es['sample_cnt']}")
+                _log(f"  ENROLL initial count={sample_cnt}")
 
         if ok:
             print(f"  Sample {sample_num} OK")
