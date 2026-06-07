@@ -1786,10 +1786,10 @@ class BiometricSensor(SensorTLS):
             print(f"  [{i}] GUID {guid.hex()}{label_str}{sf_str}")
             print(f"       9f03 -> handle {rec.handle.hex() if rec else 'N/A'}"
                   f" | a003 -> {guid_from_a003.hex() if guid_from_a003 else 'N/A'}"
-                  f" | a103 -> {tmpl.guid.hex() if tmpl else 'N/A'}")
+                  f" | a103 -> {tmpl.guid.hex() if tmpl and tmpl.guid else 'N/A'}")
             if guid_from_a003 and guid_from_a003 != guid:
                 print(f"       WARN: a003 GUID mismatch!")
-            if tmpl and tmpl.guid != guid:
+            if tmpl and tmpl.guid and tmpl.guid != guid:
                 print(f"       WARN: template GUID mismatch!")
 
         # 3. FETCH_FIRST entries + 9f03(entry) for per-entry slots
