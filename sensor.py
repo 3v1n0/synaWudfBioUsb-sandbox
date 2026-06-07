@@ -536,6 +536,65 @@ def _parse_pairing_tlv(raw):
     return out
 
 
+
+_LIBFPRINT_BLOB_LEN = 832  # VDT_PAIRING_BLOB_LEN = 32+400+400
+
+
+def _load_pairing_from_libfprint_storage(path):
+    from gi.repository import GLib
+
+    try:
+        with open(path, 'rb') as fh:
+            raw = fh.read()
+        top = GLib.Variant.new_from_bytes(
+            GLib.VariantType('a{sv}'), GLib.Bytes.new(raw), False)
+    except Exception as exc:
+        _log(f"WARN: could not parse {path}: {exc}")
+        return None
+
+    pairing_key = None
+    for i in range(top.n_children()):
+        k = top.get_child_value(i).get_child_value(0).get_string()
+        if k.startswith('persistent-data/'):
+            pairing_key = k
+            break
+
+    if pairing_key is None:
+        _log(f"WARN: no pairing key found in {path}")
+        return None
+
+    # Outer ay bytes encode the (issv) persistent-data tuple
+    outer_bytes = bytes(top.lookup_value(
+        pairing_key, GLib.VariantType('ay')).unpack())
+    issv = GLib.Variant.new_from_bytes(
+        GLib.VariantType('(issv)'), GLib.Bytes.new(outer_bytes), False)
+    _version, _driver, _devid, inner = issv.unpack()
+
+    # inner is the driver's ay -- raw VdtPairingData bytes
+    blob = bytes(inner)
+    if len(blob) < _LIBFPRINT_BLOB_LEN:
+        _log(f"WARN: inner blob too short ({len(blob)}B) in {path}")
+        return None
+
+    blob = blob[:_LIBFPRINT_BLOB_LEN]
+    _log(f"Loaded pairing blob from {path} "
+         f"key={pairing_key!r} driver={_driver!r}")
+
+    tag2_priv_le = blob[0:32]
+    client_cert  = blob[32:432]
+    device_cert  = blob[432:832]
+
+    # device cert has same layout as client_cert (3f5f1700+x_le+gap+y_le+...)
+    # Reconstruct TLV_DEVICE_CERT (tag3) directly from the stored blob.
+    # dev_x/y extracted by driver from device_cert[4:36] and [72:104] on load.
+
+    return {
+        TLV_CLIENT_CERT:    client_cert,
+        TLV_CLIENT_PRIVKEY: tag2_priv_le,
+        TLV_DEVICE_CERT:    device_cert,
+    }
+
+
 def _load_pairing_from_file():
     try:
         return _parse_pairing_tlv(open(PAIRING_FILE, 'rb').read())
@@ -650,8 +709,19 @@ def load_pairing_data():
     """
     Load PairingData TLV dict from local file or Wine registry.
     Returns {tag: bytes} or None.
+
+    Priority:
+      1. LIBFPRINT_STORAGE env var -> test-storage.variant (libfprint format)
+      2. pairing.dat (native format, PAIRING_FILE env var overrides path)
+      3. Wine registry (USE_WINE_PAIRING_DATA env var)
     """
     use_wine = "USE_WINE_PAIRING_DATA" in os.environ
+    libfprint_storage = os.environ.get("LIBFPRINT_STORAGE")
+
+    if libfprint_storage:
+        tlvs = _load_pairing_from_libfprint_storage(libfprint_storage)
+        if tlvs is not None:
+            return tlvs
 
     if not use_wine:
         tlvs = _load_pairing_from_file()
@@ -1414,7 +1484,7 @@ class SensorTLS(Sensor):
     def tls_send(self, plain, channel, label="", ctype=TLS_APP_DATA):
         """Encrypt plain as TLS record (ctype), send, decrypt response."""
         assert self.tls is not None, "call connect() first"
-        _log(f"  tx seq={self.tls.client_seq} plain_len={len(plain)}")
+        _log(f"  tx seq={self.tls.client_seq} plain_len={len(plain)} plain_hex={plain.hex()}")
         body = self.tls.encrypt(ctype, plain)
         rec  = make_tls_record(ctype, body)
         # Pad to 8-byte alignment (native format)
@@ -1525,9 +1595,8 @@ class BiometricSensor(SensorTLS):
         status = struct.unpack('<H', resp[:2])[0]
         if status != 0:
             raise RuntimeError(f"GET_RECORD_COUNT failed: 0x{status:04x}")
-        self.storage_query_init(1)
-        self.storage_query_init(2)
-        return self.storage_query_all()
+        print(f"  Record count: {resp.hex()}")
+        return 0
 
     def storage_query_init(self, n):
         """Send STORAGE_QUERY_INIT (40B response, [0:2] = status).
@@ -1574,9 +1643,14 @@ class BiometricSensor(SensorTLS):
         """
         Send LOAD_TEMPLATE (a103) for a record handle and parse the response.
 
-        Response layout (133 bytes):
-          [0:2]    status (u16 LE, 0x0000 = ok)
-          [2:14]   fixed header (matches commit header sans opcode)
+        Compact format (C driver / libfprint commits):
+          [0:4]    status (u32 LE, 0x00000000 = ok)
+          [4:8]    template_data_size (u32 LE = 125 = sizeof VDT_CMD_ENROLL_TEMPLATE)
+          [8:]     NUL-terminated UTF-8 fprint ID string, zero-padded
+
+        WinBIO format (legacy, length ~133B):
+          [0:2]    status (u16 LE)
+          [2:14]   fixed header
           [14:30]  GUID (16B)
           [30:]    payload region -- format detected by marker at [30:40]:
             WinBIO format (COMMIT_IDENTITY_PREFIX at [30:40]):
@@ -1592,6 +1666,16 @@ class BiometricSensor(SensorTLS):
         sid and subfactor are None for libfprint-format templates.
         """
         r = CMD_LOAD_TEMPLATE.send(self, handle)
+        if not r:
+            return None
+        # Compact format (C driver / libfprint): [0:4] status, [4:8] size, [8:] label
+        if len(r) >= 8 and r[4] == 0x7d:
+            raw   = r[8:]
+            nul   = raw.find(b'\x00')
+            label = raw[:nul].decode('utf-8', errors='replace') if nul >= 0 else \
+                    raw.decode('utf-8', errors='replace')
+            return TemplateInfo(guid=None, sid=None, label=label or None, subfactor=None)
+        # Legacy format (WinBIO or old libfprint)
         if not r or len(r) < 56:
             return None
         guid = r[14:30]
@@ -1606,7 +1690,7 @@ class BiometricSensor(SensorTLS):
                 raw   = r[idx+7:idx+7+llen]
                 label = raw.rstrip(b'\x00').decode('utf-8', errors='replace') or None
         else:
-            # libfprint format: NUL-terminated UTF-8 ID string from [30:]
+            # libfprint format: NUL-terminated UTF-8 fprint ID string from [30:]
             sid       = None
             subfactor = None
             raw       = r[30:]
@@ -1639,8 +1723,8 @@ class BiometricSensor(SensorTLS):
         Full list-db sequence. Returns list of (guid, record_data) for
         all non-empty slots. Prints results to stdout.
         """
-        guids = self.get_storage_count()
-        print(f"Storage count: {len(guids)}")
+        guids = self.storage_query_all()
+        print(f"Storage count: {len(guids)} count cmd: {self.get_storage_count()}")
         if not guids:
             print("No storage slots found.")
             return []
@@ -1688,8 +1772,8 @@ class BiometricSensor(SensorTLS):
              f" {count_resp.hex() if count_resp else 'None'}")
 
         # 2. Storage query init + query all
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         guids = self.storage_query_all()
         print(f"\nRecords (STORAGE_QUERY_ALL via 9f02): {len(guids)}")
         for i, guid in enumerate(guids):
@@ -1938,16 +2022,20 @@ class BiometricSensor(SensorTLS):
         assert len(payload) <= 136, f"commit payload too large: {len(payload)}"
         return payload + b'\x00' * (136 - len(payload))
 
-    def _build_commit_payload_fprint(self, guid, finger=FpFinger.UNKNOWN,
+    def _build_commit_payload_fprint(self, finger=FpFinger.UNKNOWN,
                                      username=None):
         """
-        Build libfprint-format commit payload (136 bytes).
+        Build libfprint-format commit payload (136 bytes, without opcode).
+        Matches the C driver's build_commit_payload.
 
-        The 119 bytes after COMMIT_HEADER+sep+GUID are a NUL-terminated
-        UTF-8 string in libfprint ID format, zero-padded:
-          FP1-{YYYYMMDD}-{finger_hex1}-{rand8_hex_upper}-{username}
+        Wire format (138B with opcode prepended by CMD_STORAGE_COMMIT):
+          [0:2]    96 03        opcode (from CMD_STORAGE_COMMIT)
+          [2:9]    00 x 7       padding
+          [9:11]   7d 00        template size (125 LE)
+          [11:13]  00 00        padding
+          [13:]    label\0      NUL-terminated fprint ID string
+                   + zeros      zero-padded to 138 total
 
-        guid     -- 16 bytes from enroll_status response
         finger   -- FpFinger enum value (default UNKNOWN=0)
         username -- str (default: current OS username, truncated to 32 chars)
         """
@@ -1958,17 +2046,21 @@ class BiometricSensor(SensorTLS):
         fp_id     = (f"FP1-{date_str}-{int(finger):x}"
                      f"-{rand_part}-{username}")
         id_bytes  = fp_id.encode('utf-8') + b'\x00'
-        # 136 - 17 (COMMIT_HEADER=16 + sep=1 + guid=16 wait... recount)
-        # COMMIT_HEADER=16, sep=1, guid=16 -> prefix=33; free=136-33=103
-        free = 136 - len(self.COMMIT_HEADER) - 1 - 16
-        assert len(id_bytes) <= free, \
-            f"fprint ID too long ({len(id_bytes)}B > {free}B): {fp_id!r}"
-        payload = (self.COMMIT_HEADER
-                   + b'\x00' + guid
-                   + id_bytes
-                   + b'\x00' * (free - len(id_bytes)))
-        assert len(payload) == 136, f"commit payload size wrong: {len(payload)}"
-        return payload
+
+        TEMPLATE_SIZE = 125      # sizeof(VDT_CMD_ENROLL_TEMPLATE)
+        PAYLOAD_LEN   = 136      # 138 wire minus 2B opcode
+        STR_MAX       = 103
+        LABEL_FREE    = PAYLOAD_LEN - 7 - 2 - 2   # 125
+
+        assert len(id_bytes) <= LABEL_FREE, \
+            f"fprint ID too long ({len(id_bytes)}B > {LABEL_FREE}B): {fp_id!r}"
+
+        payload = bytearray(PAYLOAD_LEN)           # all zeros
+        struct.pack_into('<H', payload, 7, TEMPLATE_SIZE)
+        payload[11:11 + len(id_bytes)] = id_bytes
+
+        assert len(payload) == PAYLOAD_LEN
+        return bytes(payload)
 
     def _build_commit_payload(self, guid, finger=FpFinger.UNKNOWN,
                               username=None):
@@ -1977,13 +2069,13 @@ class BiometricSensor(SensorTLS):
         WinBIO format is used when COMMIT_WINBIO=1 is set, or when
         USE_WINE_PAIRING_DATA is set (pairing came from Wine registry,
         so b.exe compatibility is expected).
-        Default is libfprint format.
+        Default is libfprint format (guid unused, matches C driver).
         """
         if os.environ.get('COMMIT_WINBIO') or os.environ.get('USE_WINE_PAIRING_DATA'):
             sid   = _rand(16)
             label = (f"FP{os.urandom(2).hex()}")[:7]
             return self._build_commit_payload_winbio(guid, sid, label)
-        return self._build_commit_payload_fprint(guid, finger, username)
+        return self._build_commit_payload_fprint(finger, username)
 
     def get_enroll_status(self):
         """
@@ -2052,7 +2144,7 @@ class BiometricSensor(SensorTLS):
         Select + delete a single record by its 16-byte entry data.
 
         The entry can be obtained from _list_entries() (9f01) or
-        from get_storage_count() GUIDs.
+        from self.storage_query_all() GUIDs.
         Returns True on success.
         """
         if self.select_entry(entry) is None:
@@ -2134,8 +2226,8 @@ class BiometricSensor(SensorTLS):
 
         Returns True on success; False otherwise.
         """
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         all_guids = self.storage_query_all()
 
         if guid not in all_guids:
@@ -2178,8 +2270,8 @@ class BiometricSensor(SensorTLS):
             dr = self.delete_entry(mgr, label="PROBE_DELETE")
             if dr is None or dr.status != DELETE_STATUS_OK:
                 continue
-            self.storage_query_init(1)
-            self.storage_query_init(2)
+            # self.storage_query_init(1)
+            # self.storage_query_init(2)
             after = self.storage_query_all()
             if guid not in after:
                 _log(f"  manager {mgr.hex()} owned target GUID -- removed")
@@ -2196,8 +2288,8 @@ class BiometricSensor(SensorTLS):
         """
         print(f"Probing {guid.hex()}...")
 
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         all_guids = self.storage_query_all()
 
         r = self.fetch_record(guid)
@@ -2286,8 +2378,8 @@ class BiometricSensor(SensorTLS):
             ref_to_ents[ref].append(ent)
 
         # --- now fetch GUIDs and record handles ---
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         all_guids = self.storage_query_all()
         guid_to_rh = {}
         for g in all_guids:
@@ -2446,7 +2538,7 @@ class BiometricSensor(SensorTLS):
         print("\n--- Identify All ---")
 
         # 1. Load all enrolled records into matching engine
-        guids = self.get_storage_count()
+        guids = self.storage_query_all()
         _log(f"Storage count: {len(guids)}")
 
         loaded = 0
@@ -2484,11 +2576,10 @@ class BiometricSensor(SensorTLS):
         self._print_sensor_status(cap.ctx, label="armed: ")
 
         # 6. Pre-capture queries
-        self.query_status_ext(4)
+        print(f"  {self.query_status_ext(4)}")
         self.query_enrollment_needs()
 
-        ext1 = self.query_status_ext(1)
-        print(f"  Progress: {ext1.progress}")
+        print(f"  {self.query_status_ext(1)}")
 
         # UPDATE_CHECK with 8014 (identify variant)
         r = CMD_UPDATE_IDENT_CHECK.send(self, label="UPDATE_IDENTIFY_CHECK")
@@ -2505,7 +2596,7 @@ class BiometricSensor(SensorTLS):
         # 8. Post-capture queries
         self._print_sensor_status(label="captured: ")
         self.query_enrollment_simple()
-        self.query_status_ext(4)
+        print(f"  {self.query_status_ext(4)}")
         self.update_enrollment_ack()
 
         # 9. Match result
@@ -2578,8 +2669,8 @@ class BiometricSensor(SensorTLS):
         """Fetch all entry blobs via 9f01. Returns list of 16-byte handles.
         Must init storage before FETCH_FIRST (device rejects with TLS
         Alert 022f otherwise, corrupting the session)."""
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         resp = CMD_FETCH_FIRST.send(self)
         if resp is None or len(resp) < 4:
             return []
@@ -2632,8 +2723,8 @@ class BiometricSensor(SensorTLS):
         print(f"  {deleted} deleted")
 
         # Verify
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         remaining = self.storage_query_all()
         if remaining:
             print(f"  WARNING: {len(remaining)} GUIDs still present")
@@ -2664,8 +2755,8 @@ class BiometricSensor(SensorTLS):
         a full wipe including ghost slots.
         """
         print("  Fetching records...")
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         guids = self.storage_query_all()
         print(f"  {len(guids)} GUIDs in index")
 
@@ -2687,8 +2778,8 @@ class BiometricSensor(SensorTLS):
             return False
 
         # Verify
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         remaining = self.storage_query_all()
         if remaining:
             print(f"  WARNING: {len(remaining)} GUIDs still present")
@@ -2708,8 +2799,8 @@ class BiometricSensor(SensorTLS):
         Use erase_database() to wipe everything unconditionally.
         """
         print("  Querying records...")
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         all_guids = self.storage_query_all()
 
         accessible = set(
@@ -2742,8 +2833,8 @@ class BiometricSensor(SensorTLS):
                     _log(f"  a301 returned {dr} -- skip")
                     continue
                 # Check what disappeared from the full GUID set
-                self.storage_query_init(1)
-                self.storage_query_init(2)
+                # self.storage_query_init(1)
+                # self.storage_query_init(2)
                 after = set(self.storage_query_all())
                 all_gone = all_guids_set - after
                 foreign_gone = all_gone - accessible
@@ -2771,8 +2862,8 @@ class BiometricSensor(SensorTLS):
                 break
 
         # Verify
-        self.storage_query_init(1)
-        self.storage_query_init(2)
+        # self.storage_query_init(1)
+        # self.storage_query_init(2)
         remaining = self.storage_query_all()
         still_accessible = [g for g in remaining
                             if self._is_accessible_guid(g)]
@@ -2888,7 +2979,7 @@ class BiometricSensor(SensorTLS):
             print("  No finger detected")
             return False, None
 
-        self._print_sensor_status(cap.ctx, label="capture: ")
+        # self._print_sensor_status(cap.ctx, label="capture: ")
 
         # Interrupt 1: capture armed (01) -- immediate after CAPTURE
         i1 = self.read_interrupt(timeout=60000)
@@ -2899,7 +2990,7 @@ class BiometricSensor(SensorTLS):
         _log(f"  Interrupt raw: {i1.hex()}")
         print(f"  Interrupt: type=0x{i1_type:02x}"
               f" ({'capture armed' if i1_type==1 else 'data captured' if i1_type==2 else 'unknown'})")
-        self._print_sensor_status(cap.ctx, label="armed:   ")
+        # self._print_sensor_status(cap.ctx, label="armed:   ")
 
         # Pre-capture queries (finger is being placed/held)
         self.query_status_ext(4)
@@ -2924,7 +3015,7 @@ class BiometricSensor(SensorTLS):
                   f" ({'capture armed' if i2_type==1 else 'data captured' if i2_type==2 else 'unknown'})")
 
         # Post-capture queries
-        self._print_sensor_status(label="captured: ")
+        # self._print_sensor_status(label="captured: ")
         self.query_enrollment_simple()
         ext4b = self.query_status_ext(4)
         _log(f"  Ext4 progress: {ext4b.progress}")
@@ -3020,14 +3111,14 @@ class BiometricSensor(SensorTLS):
             username = getpass.getuser()[:32]
         print(f"  Finger: {FpFinger(finger).name}  User: {username}")
 
-        # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
-        guids = self.get_storage_count()
-        print(f"  DB records: {len(guids)}")
-        if len(guids) >= 10:
-            ans = input("  Database is full! Try anyway? [y/N] ").strip().lower()
-            if ans != 'y':
-                print("  Enrollment cancelled.")
-                return False
+        # # Check DB capacity (max ~10 records from WINBIO_E_DATABASE_FULL)
+        # guids = self.get_storage_count()
+        # print(f"  DB records: {len(guids)}")
+        # if len(guids) >= 10:
+        #     ans = input("  Database is full! Try anyway? [y/N] ").strip().lower()
+        #     if ans != 'y':
+        #         print("  Enrollment cancelled.")
+        #         return False
 
         r = self.enroll_begin()
         if r is None:
@@ -3048,7 +3139,7 @@ class BiometricSensor(SensorTLS):
                 if isinstance(guid, int):
                     # Terminal error (3 bad captures, DB full, etc.)
                     print(f"  Terminal error code=0x{guid:04x}")
-                    cnt = len(self.get_storage_count())
+                    cnt = len(self.storage_query_all())
                     if cnt >= 10:
                         print(f"  Database has {cnt} records "
                               "(likely full). Clear some and retry.")
@@ -3063,7 +3154,7 @@ class BiometricSensor(SensorTLS):
                 ok2 = self._commit_enrollment(guid=guid, finger=finger,
                                               username=username)
                 if not ok2:
-                    cnt = len(self.get_storage_count())
+                    cnt = len(self.self.storage_query_all())
                     print(f"  DB records after failed commit: {cnt}")
                 return ok2
 
