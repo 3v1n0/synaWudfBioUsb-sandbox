@@ -491,7 +491,7 @@ def _log(msg, *args):
     if SENSOR_TRACE:
         print(f"[sensor] {msg}", *args)
 
-def _hexdump(label, data, maxlen=256):
+def _hexdump(label, data, maxlen=2048):
     if not SENSOR_TRACE:
         return
     s = data[:maxlen].hex()
